@@ -30,6 +30,7 @@
 - File type stats. Initial implementation done.
 - Duplicate candidate view. Initial size/name/date grouping tab done.
 - Background scan worker. Initial implementation with fallback progress counts done.
+- App shell polish. Initial top bar, control rail, status metrics, and formatted size display done.
 - Scanner mode selection. Initial implementation done.
 - Search/filter UI. Initial name, regex, extension, path, size, allocated-size, and modified-date filters done.
 - GUI CSV export. Initial non-blocking export done.

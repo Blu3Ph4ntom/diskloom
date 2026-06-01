@@ -44,7 +44,7 @@ Early development. Implemented pieces include:
 - CSV export.
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
-- egui desktop shell with background scans, live fallback progress counts, scanner mode selection, query-backed file filters, non-blocking CSV export, file actions, and tree, files, types, treemap, and duplicate-candidate tabs.
+- egui desktop shell with a scan control rail, background scans, live progress counts, scanner mode selection, query-backed file filters, non-blocking CSV export, file actions, and tree, files, types, treemap, and duplicate-candidate tabs.
 - GUI scan cancellation through fallback and direct NTFS progress checkpoints.
 - Benchmark harness for repeated scan timing, sampled process memory, foreground tick-gap responsiveness, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 

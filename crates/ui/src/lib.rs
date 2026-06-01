@@ -119,6 +119,8 @@ struct ScanResult {
     elapsed_ms: u128,
     scanner_label: &'static str,
     fallback_reason: Option<String>,
+    total_size: u64,
+    total_allocated: u64,
     tree_rows: Vec<TreeRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
@@ -272,7 +274,7 @@ impl DiskLoomApp {
 
 impl eframe::App for DiskLoomApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
+        apply_app_style(ctx);
         self.receive_scan();
         self.receive_action();
         if self.start_on_launch {
@@ -280,59 +282,33 @@ impl eframe::App for DiskLoomApp {
             self.start_scan();
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered_justified(|ui| {
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
                 ui.heading("DiskLoom");
+                ui.separator();
+                ui.label("See your disk clearly.");
+            });
+            ui.add_space(6.0);
+        });
+
+        egui::SidePanel::left("control_panel")
+            .resizable(true)
+            .default_width(360.0)
+            .width_range(300.0..=460.0)
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                self.scan_setup_controls(ui);
+                ui.separator();
+                self.status_line(ui);
+                ui.separator();
+                self.filter_controls(ui);
+                ui.separator();
+                self.action_controls(ui);
             });
 
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                ui.label("Path");
-                let input_width = (ui.available_width() - 96.0).max(120.0);
-                ui.add_sized(
-                    [input_width, 24.0],
-                    egui::TextEdit::singleline(&mut self.path),
-                );
-                let scanning = matches!(self.state, UiState::Scanning(_));
-                if ui
-                    .add_enabled(!scanning, egui::Button::new("Scan"))
-                    .clicked()
-                {
-                    self.start_scan();
-                }
-            });
-
+        egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label("Scanner");
-                ui.selectable_value(
-                    &mut self.scanner_mode,
-                    UiScannerMode::Auto,
-                    UiScannerMode::Auto.label(),
-                );
-                ui.selectable_value(
-                    &mut self.scanner_mode,
-                    UiScannerMode::Ntfs,
-                    UiScannerMode::Ntfs.label(),
-                );
-                ui.selectable_value(
-                    &mut self.scanner_mode,
-                    UiScannerMode::Fallback,
-                    UiScannerMode::Fallback.label(),
-                );
-            });
-
-            ui.add_space(8.0);
-            self.scan_controls(ui);
-            ui.add_space(8.0);
-            self.filter_controls(ui);
-
-            ui.add_space(8.0);
-            self.action_controls(ui);
-
-            ui.add_space(8.0);
-            self.status_line(ui);
-            ui.separator();
             self.tabs(ui);
             ui.separator();
             self.active_view(ui);
@@ -396,12 +372,15 @@ impl DiskLoomApp {
                     DUPLICATE_GROUP_LIMIT,
                     DUPLICATE_PATH_LIMIT,
                 );
+                let (total_size, total_allocated) = graph_totals(&graph);
                 ScanResult {
                     graph,
                     summary: outcome.summary,
                     elapsed_ms: started.elapsed().as_millis(),
                     scanner_label: outcome.scanner_label,
                     fallback_reason: outcome.fallback_reason,
+                    total_size,
+                    total_allocated,
                     tree_rows,
                     file_types,
                     treemap_items,
@@ -489,15 +468,19 @@ impl DiskLoomApp {
 
     fn filter_controls(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
+        ui.strong("Filter");
+        ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             ui.label("Search");
             changed |= ui
                 .add_sized(
-                    [180.0, 24.0],
+                    [ui.available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.name),
                 )
                 .changed();
+        });
+        ui.horizontal(|ui| {
             changed |= ui.checkbox(&mut self.filters.regex, "Regex").changed();
             ui.label("Ext");
             changed |= ui
@@ -506,10 +489,12 @@ impl DiskLoomApp {
                     egui::TextEdit::singleline(&mut self.filters.extension),
                 )
                 .changed();
+        });
+        ui.vertical(|ui| {
             ui.label("Path");
             changed |= ui
                 .add_sized(
-                    [180.0, 24.0],
+                    [ui.available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.path),
                 )
                 .changed();
@@ -589,13 +574,63 @@ impl DiskLoomApp {
         });
     }
 
-    fn action_controls(&mut self, ui: &mut egui::Ui) {
+    fn scan_setup_controls(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Scan");
+        ui.add_space(4.0);
+        ui.label("Path");
+        ui.add_sized(
+            [ui.available_width(), 26.0],
+            egui::TextEdit::singleline(&mut self.path),
+        );
+
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label("CSV");
+            ui.label("Scanner");
+            ui.selectable_value(
+                &mut self.scanner_mode,
+                UiScannerMode::Auto,
+                UiScannerMode::Auto.label(),
+            );
+            ui.selectable_value(
+                &mut self.scanner_mode,
+                UiScannerMode::Ntfs,
+                UiScannerMode::Ntfs.label(),
+            );
+            ui.selectable_value(
+                &mut self.scanner_mode,
+                UiScannerMode::Fallback,
+                UiScannerMode::Fallback.label(),
+            );
+        });
+
+        ui.add_space(8.0);
+        let scanning = matches!(self.state, UiState::Scanning(_));
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !scanning,
+                    egui::Button::new("Scan").min_size(egui::vec2(96.0, 30.0)),
+                )
+                .clicked()
+            {
+                self.start_scan();
+            }
+            self.scan_controls(ui);
+        });
+    }
+
+    fn action_controls(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Actions");
+        ui.add_space(4.0);
+
+        ui.vertical(|ui| {
+            ui.label("CSV path");
             ui.add_sized(
-                [260.0, 24.0],
+                [ui.available_width(), 24.0],
                 egui::TextEdit::singleline(&mut self.export_path),
             );
+        });
+        ui.horizontal(|ui| {
             ui.checkbox(&mut self.export_include_directories, "Dirs");
             let export_enabled =
                 matches!(self.state, UiState::Complete(_)) && self.action_receiver.is_none();
@@ -607,7 +642,8 @@ impl DiskLoomApp {
             }
         });
 
-        ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
             ui.label("Selected");
             let selected = self
                 .selected_path
@@ -617,9 +653,11 @@ impl DiskLoomApp {
             let mut selected_text = selected;
             ui.add_enabled(
                 false,
-                egui::TextEdit::singleline(&mut selected_text).desired_width(240.0),
+                egui::TextEdit::singleline(&mut selected_text).desired_width(ui.available_width()),
             );
+        });
 
+        ui.horizontal(|ui| {
             let enabled = self.selected_path.is_some();
             if ui
                 .add_enabled(enabled, egui::Button::new("Explorer"))
@@ -714,34 +752,50 @@ impl DiskLoomApp {
     }
 
     fn status_line(&self, ui: &mut egui::Ui) {
+        ui.strong("Status");
+        ui.add_space(4.0);
         match &self.state {
             UiState::Idle => {
-                ui.label("See your disk clearly.");
+                ui.label("Ready");
             }
             UiState::Scanning(progress) => {
-                ui.spinner();
-                if let Some(progress) = progress {
-                    ui.label(format!(
-                        "Scanning: {} entries, {} files, {} directories, {} inaccessible, {} ms",
-                        progress.summary.entries,
-                        progress.summary.files,
-                        progress.summary.directories,
-                        progress.summary.inaccessible,
-                        progress.elapsed_ms
-                    ));
-                } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
                     ui.label("Scanning");
+                });
+                if let Some(progress) = progress {
+                    metric_grid(
+                        ui,
+                        [
+                            ("Entries", format_count(progress.summary.entries)),
+                            ("Files", format_count(progress.summary.files)),
+                            ("Dirs", format_count(progress.summary.directories)),
+                            ("Elapsed", format!("{} ms", progress.elapsed_ms)),
+                        ],
+                    );
+                    if progress.summary.inaccessible > 0 {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(224, 164, 82),
+                            format!("{} inaccessible", progress.summary.inaccessible),
+                        );
+                    }
                 }
             }
             UiState::Complete(result) => {
+                ui.label(result.scanner_label);
+                metric_grid(
+                    ui,
+                    [
+                        ("Size", format_bytes(result.total_size)),
+                        ("Allocated", format_bytes(result.total_allocated)),
+                        ("Entries", format_count(result.summary.entries)),
+                        ("Elapsed", format!("{} ms", result.elapsed_ms)),
+                    ],
+                );
                 ui.label(format!(
-                    "{} entries, {} files, {} directories, {} inaccessible, {} ms, {}",
-                    result.summary.entries,
-                    result.summary.files,
-                    result.summary.directories,
-                    result.summary.inaccessible,
-                    result.elapsed_ms,
-                    result.scanner_label
+                    "{} files, {} directories",
+                    format_count(result.summary.files),
+                    format_count(result.summary.directories)
                 ));
                 if let Some(reason) = &result.fallback_reason {
                     ui.colored_label(
@@ -798,8 +852,8 @@ impl DiskLoomApp {
                         ui.end_row();
 
                         for row in &rows {
-                            ui.monospace(row.size.to_string());
-                            ui.monospace(row.allocated.to_string());
+                            ui.monospace(format_bytes(row.size));
+                            ui.monospace(format_bytes(row.allocated));
                             ui.label(row.kind);
                             ui.horizontal(|ui| {
                                 ui.add_space((row.depth as f32 * 14.0).min(180.0));
@@ -849,8 +903,8 @@ impl DiskLoomApp {
                         ui.end_row();
 
                         for row in &rows {
-                            ui.monospace(row.size.to_string());
-                            ui.monospace(row.allocated.to_string());
+                            ui.monospace(format_bytes(row.size));
+                            ui.monospace(format_bytes(row.allocated));
                             ui.label(row.kind);
                             ui.monospace(row.modified_unix.to_string());
                             let selected = self.selected_path.as_ref() == Some(&row.path);
@@ -880,9 +934,9 @@ impl DiskLoomApp {
                     ui.end_row();
 
                     for stat in &result.file_types {
-                        ui.monospace(stat.size.to_string());
-                        ui.monospace(stat.allocated.to_string());
-                        ui.monospace(stat.files.to_string());
+                        ui.monospace(format_bytes(stat.size));
+                        ui.monospace(format_bytes(stat.allocated));
+                        ui.monospace(format_count(stat.files));
                         ui.label(&stat.extension);
                         ui.end_row();
                     }
@@ -937,9 +991,9 @@ impl DiskLoomApp {
                         ui.end_row();
 
                         for group in &groups {
-                            ui.monospace(group.wasted_bytes.to_string());
-                            ui.monospace(group.size.to_string());
-                            ui.monospace(group.count.to_string());
+                            ui.monospace(format_bytes(group.wasted_bytes));
+                            ui.monospace(format_bytes(group.size));
+                            ui.monospace(format_count(group.count as u64));
                             ui.monospace(group.modified_unix.to_string());
                             ui.label(&group.name);
                             ui.end_row();
@@ -1057,6 +1111,82 @@ impl DiskLoomApp {
             }
         }
     }
+}
+
+fn apply_app_style(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = egui::Color32::from_rgb(24, 26, 28);
+    visuals.window_fill = egui::Color32::from_rgb(28, 30, 32);
+    visuals.faint_bg_color = egui::Color32::from_rgb(34, 37, 40);
+    visuals.extreme_bg_color = egui::Color32::from_rgb(18, 20, 22);
+    visuals.selection.bg_fill = egui::Color32::from_rgb(66, 107, 92);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(8.0, 7.0);
+    style.spacing.button_padding = egui::vec2(10.0, 5.0);
+    style.spacing.interact_size = egui::vec2(40.0, 28.0);
+    ctx.set_style(style);
+}
+
+fn metric_grid<const N: usize>(ui: &mut egui::Ui, rows: [(&'static str, String); N]) {
+    egui::Grid::new(ui.next_auto_id())
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 3.0))
+        .show(ui, |ui| {
+            for (label, value) in rows {
+                ui.label(label);
+                ui.monospace(value);
+                ui.end_row();
+            }
+        });
+}
+
+fn graph_totals(graph: &FileGraph) -> (u64, u64) {
+    graph
+        .ids()
+        .filter_map(|id| {
+            let entry = graph.entry(id)?;
+            if entry.parent.is_some() {
+                return None;
+            }
+            let stats = graph.stats(id)?;
+            Some((stats.total_size.bytes(), stats.total_allocated.bytes()))
+        })
+        .next()
+        .unwrap_or((0, 0))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit_idx = 0;
+    while value >= 1024.0 && unit_idx + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{bytes} B")
+    } else if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit_idx])
+    } else if value >= 10.0 {
+        format!("{value:.1} {}", UNITS[unit_idx])
+    } else {
+        format!("{value:.2} {}", UNITS[unit_idx])
+    }
+}
+
+fn format_count(value: u64) -> String {
+    let text = value.to_string();
+    let mut output = String::with_capacity(text.len() + text.len() / 3);
+    for (idx, ch) in text.chars().rev().enumerate() {
+        if idx > 0 && idx.is_multiple_of(3) {
+            output.push(',');
+        }
+        output.push(ch);
+    }
+    output.chars().rev().collect()
 }
 
 #[derive(Debug)]
@@ -1676,8 +1806,8 @@ mod tests {
 
     use super::{
         FilterInputs, duplicate_groups_from_graph, export_graph_to_csv, filtered_rows_from_graph,
-        parse_optional_u64, parse_optional_unix_seconds, tree_rows_from_graph,
-        ui_scan_needs_elevation,
+        format_bytes, format_count, parse_optional_u64, parse_optional_unix_seconds,
+        tree_rows_from_graph, ui_scan_needs_elevation,
     };
 
     fn sample_graph() -> FileGraph {
@@ -1746,6 +1876,18 @@ mod tests {
         assert_eq!(parse_optional_u64("Min size", "").unwrap(), None);
         assert_eq!(parse_optional_u64("Min size", "42").unwrap(), Some(42));
         assert!(parse_optional_u64("Min size", "abc").is_err());
+    }
+
+    #[test]
+    fn format_bytes_should_scale_binary_units() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1536), "1.50 KB");
+        assert_eq!(format_bytes(10 * 1024 * 1024), "10.0 MB");
+    }
+
+    #[test]
+    fn format_count_should_group_thousands() {
+        assert_eq!(format_count(1_234_567), "1,234,567");
     }
 
     #[test]
