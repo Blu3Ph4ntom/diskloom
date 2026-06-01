@@ -21,7 +21,10 @@ diskloom-scan.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
     "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
 

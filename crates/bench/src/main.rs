@@ -260,6 +260,15 @@ struct PublicComparison {
     validity: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BenchmarkEnvironment {
+    volume_root: String,
+    file_system: String,
+    drive_type: String,
+    shell_elevated: String,
+    windows_version: String,
+}
+
 #[derive(Debug)]
 struct SuiteReport<'a> {
     path: &'a Path,
@@ -269,6 +278,7 @@ struct SuiteReport<'a> {
     sample_ms: u64,
     progress_every: u64,
     include_directories: bool,
+    environment: &'a BenchmarkEnvironment,
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
     comparisons: &'a [PublicComparison],
@@ -425,6 +435,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .iter()
         .map(|comparison| comparison.claim_id)
         .collect();
+    let environment = detect_benchmark_environment(&options.path);
 
     let scan_csv = options.output_dir.join("scan.csv");
     let mut scan_file = File::create(&scan_csv)
@@ -449,7 +460,12 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     let metadata_txt = options.output_dir.join("metadata.txt");
     let mut metadata_file = File::create(&metadata_txt)
         .with_context(|| format!("failed to create {}", metadata_txt.display()))?;
-    write_suite_metadata(&mut metadata_file, &options, &selected_claim_ids)?;
+    write_suite_metadata(
+        &mut metadata_file,
+        &options,
+        &environment,
+        &selected_claim_ids,
+    )?;
 
     let report_md = options.output_dir.join("report.md");
     let mut report_file = File::create(&report_md)
@@ -464,6 +480,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
             sample_ms: options.sample_ms,
             progress_every: options.progress_every,
             include_directories: options.include_directories,
+            environment: &environment,
             scan_summary: &scan_summary,
             export_summary: &export_summary,
             comparisons: &comparisons,
@@ -1415,6 +1432,30 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         report.include_directories
     )?;
     writeln!(writer)?;
+    writeln!(writer, "## Environment")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "- Volume root: `{}`",
+        report.environment.volume_root
+    )?;
+    writeln!(
+        writer,
+        "- File system: `{}`",
+        report.environment.file_system
+    )?;
+    writeln!(writer, "- Drive type: `{}`", report.environment.drive_type)?;
+    writeln!(
+        writer,
+        "- Shell elevated: `{}`",
+        report.environment.shell_elevated
+    )?;
+    writeln!(
+        writer,
+        "- Windows version: `{}`",
+        report.environment.windows_version
+    )?;
+    writeln!(writer)?;
     writeln!(writer, "## DiskLoom Scan")?;
     writeln!(writer)?;
     writeln!(
@@ -1500,6 +1541,7 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
 fn write_suite_metadata(
     writer: &mut impl Write,
     options: &SuiteOptions,
+    environment: &BenchmarkEnvironment,
     selected_claim_ids: &[&str],
 ) -> Result<()> {
     writeln!(
@@ -1510,6 +1552,19 @@ fn write_suite_metadata(
     writeln!(writer, "generated_unix_seconds={}", unix_now_seconds())?;
     writeln!(writer, "target_os={}", std::env::consts::OS)?;
     writeln!(writer, "target_arch={}", std::env::consts::ARCH)?;
+    writeln!(writer, "detected_volume_root={}", environment.volume_root)?;
+    writeln!(writer, "detected_filesystem={}", environment.file_system)?;
+    writeln!(writer, "detected_drive_type={}", environment.drive_type)?;
+    writeln!(
+        writer,
+        "detected_shell_elevated={}",
+        environment.shell_elevated
+    )?;
+    writeln!(
+        writer,
+        "detected_windows_version={}",
+        environment.windows_version
+    )?;
     writeln!(writer, "path={}", options.path.display())?;
     writeln!(writer, "output_dir={}", options.output_dir.display())?;
     writeln!(writer, "scanner={}", scanner_label(options.scanner))?;
@@ -1549,6 +1604,264 @@ fn unix_now_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+#[cfg(windows)]
+fn detect_benchmark_environment(path: &Path) -> BenchmarkEnvironment {
+    let volume_root = windows_volume_root(path).unwrap_or_else(|| "unknown".to_owned());
+    BenchmarkEnvironment {
+        file_system: windows_file_system_name(&volume_root),
+        drive_type: windows_drive_type(&volume_root),
+        shell_elevated: windows_shell_elevated(),
+        windows_version: windows_version(),
+        volume_root,
+    }
+}
+
+#[cfg(not(windows))]
+fn detect_benchmark_environment(_: &Path) -> BenchmarkEnvironment {
+    BenchmarkEnvironment {
+        volume_root: "unsupported".to_owned(),
+        file_system: "unsupported".to_owned(),
+        drive_type: "unsupported".to_owned(),
+        shell_elevated: "unsupported".to_owned(),
+        windows_version: "unsupported".to_owned(),
+    }
+}
+
+#[cfg(windows)]
+fn windows_volume_root(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut components = path.components();
+    let prefix = match components.next()? {
+        Component::Prefix(prefix) => prefix.kind(),
+        _ => return None,
+    };
+
+    match prefix {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            Some(format!("{}:\\", letter as char))
+        }
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(format!(
+            "\\\\{}\\{}\\",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        )),
+        Prefix::DeviceNS(_) | Prefix::Verbatim(_) => None,
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_system_name(volume_root: &str) -> String {
+    if volume_root == "unknown" {
+        return "unknown".to_owned();
+    }
+
+    use windows::{Win32::Storage::FileSystem::GetVolumeInformationW, core::PCWSTR};
+
+    let root_wide = to_wide(volume_root);
+    let mut fs_name = [0_u16; 32];
+
+    // SAFETY: `root_wide` is null-terminated and `fs_name` is a valid mutable UTF-16 buffer.
+    let result = unsafe {
+        GetVolumeInformationW(
+            PCWSTR(root_wide.as_ptr()),
+            None,
+            None,
+            None,
+            None,
+            Some(&mut fs_name),
+        )
+    };
+
+    match result {
+        Ok(()) => trim_nul_utf16(&fs_name),
+        Err(error) => format!("unknown({error})"),
+    }
+}
+
+#[cfg(windows)]
+fn windows_drive_type(volume_root: &str) -> String {
+    if volume_root == "unknown" {
+        return "unknown".to_owned();
+    }
+
+    use windows::{Win32::Storage::FileSystem::GetDriveTypeW, core::PCWSTR};
+
+    let root_wide = to_wide(volume_root);
+    // SAFETY: `root_wide` is null-terminated and valid for the duration of the call.
+    let drive_type = unsafe { GetDriveTypeW(PCWSTR(root_wide.as_ptr())) };
+    drive_type_label(drive_type).to_owned()
+}
+
+#[cfg(windows)]
+fn drive_type_label(drive_type: u32) -> &'static str {
+    match drive_type {
+        0 => "unknown",
+        1 => "no_root_dir",
+        2 => "removable",
+        3 => "fixed",
+        4 => "remote",
+        5 => "cdrom",
+        6 => "ramdisk",
+        _ => "unrecognized",
+    }
+}
+
+#[cfg(windows)]
+fn windows_shell_elevated() -> String {
+    use std::{ffi::c_void, mem::size_of};
+
+    use windows::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let mut token = HANDLE::default();
+    // SAFETY: GetCurrentProcess returns a pseudo-handle for the current process. `token` is a
+    // valid output pointer and is closed before returning if it is opened.
+    let token_result = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if let Err(error) = token_result {
+        return format!("unknown({error})");
+    }
+
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0_u32;
+    // SAFETY: `elevation` points to a properly sized TOKEN_ELEVATION buffer and `returned` is a
+    // valid output pointer. `token` is a process token handle opened above.
+    let result = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast::<c_void>()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    // SAFETY: `token` was opened by OpenProcessToken and is no longer used after this call.
+    let _ = unsafe { CloseHandle(token) };
+
+    match result {
+        Ok(()) => bool_label(elevation.TokenIsElevated != 0).to_owned(),
+        Err(error) => format!("unknown({error})"),
+    }
+}
+
+#[cfg(windows)]
+fn windows_version() -> String {
+    let product_name = registry_string("ProductName").unwrap_or_else(|| "Windows".to_owned());
+    let display_version =
+        registry_string("DisplayVersion").or_else(|| registry_string("ReleaseId"));
+    let build = registry_string("CurrentBuildNumber").or_else(|| registry_string("CurrentBuild"));
+    let ubr = registry_dword("UBR");
+
+    match (display_version, build, ubr) {
+        (Some(display), Some(build), Some(ubr)) => {
+            format!("{product_name} {display} build {build}.{ubr}")
+        }
+        (Some(display), Some(build), None) => format!("{product_name} {display} build {build}"),
+        (_, Some(build), Some(ubr)) => format!("{product_name} build {build}.{ubr}"),
+        (_, Some(build), None) => format!("{product_name} build {build}"),
+        _ => product_name,
+    }
+}
+
+#[cfg(windows)]
+fn registry_string(value_name: &str) -> Option<String> {
+    use std::ffi::c_void;
+
+    use windows::{
+        Win32::System::Registry::{
+            HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+        },
+        core::PCWSTR,
+    };
+
+    const WINDOWS_NT_CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let subkey = to_wide(WINDOWS_NT_CURRENT_VERSION);
+    let value = to_wide(value_name);
+    let mut buffer = vec![0_u16; 256];
+    let mut bytes = (buffer.len() * size_of_u16()) as u32;
+
+    // SAFETY: `subkey`, `value`, and `buffer` are valid for the duration of the call. The buffer
+    // size is supplied in bytes as required by RegGetValueW.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some(buffer.as_mut_ptr().cast::<c_void>()),
+            Some(&mut bytes),
+        )
+    };
+    if status.0 != 0 {
+        return None;
+    }
+
+    let units = (bytes as usize / size_of_u16()).min(buffer.len());
+    let value = trim_nul_utf16(&buffer[..units]);
+    (!value.is_empty()).then_some(value)
+}
+
+#[cfg(windows)]
+fn registry_dword(value_name: &str) -> Option<u32> {
+    use std::ffi::c_void;
+
+    use windows::{
+        Win32::System::Registry::{
+            HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+        },
+        core::PCWSTR,
+    };
+
+    const WINDOWS_NT_CURRENT_VERSION: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let subkey = to_wide(WINDOWS_NT_CURRENT_VERSION);
+    let value = to_wide(value_name);
+    let mut data = 0_u32;
+    let mut bytes = std::mem::size_of::<u32>() as u32;
+
+    // SAFETY: `subkey` and `value` are null-terminated and `data` is a valid DWORD output buffer.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            PCWSTR(subkey.as_ptr()),
+            PCWSTR(value.as_ptr()),
+            RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY,
+            None,
+            Some((&mut data as *mut u32).cast::<c_void>()),
+            Some(&mut bytes),
+        )
+    };
+    if status.0 == 0 { Some(data) } else { None }
+}
+
+#[cfg(windows)]
+fn size_of_u16() -> usize {
+    std::mem::size_of::<u16>()
+}
+
+#[cfg(windows)]
+fn bool_label(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+#[cfg(windows)]
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn trim_nul_utf16(buffer: &[u16]) -> String {
+    let end = buffer
+        .iter()
+        .position(|code_unit| *code_unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..end])
+}
+
 fn scanner_label(scanner: ScannerMode) -> &'static str {
     match scanner {
         ScannerMode::Auto => "auto",
@@ -1560,10 +1873,10 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary, PublicClaimId,
-        ScanMeasurement, SuiteOptions, SuiteReport, compare_summary_to_claim, parse_measurements,
-        per_million, public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims,
-        summarize_export_measurements, summarize_rows, write_export_measurements,
+        BenchmarkEnvironment, CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary,
+        PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport, compare_summary_to_claim,
+        parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
+        selected_claims, summarize_export_measurements, summarize_rows, write_export_measurements,
         write_measurements, write_public_comparison, write_public_comparisons,
         write_suite_metadata, write_suite_report, write_summary,
     };
@@ -1863,6 +2176,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             &scan_summary,
             public_claim(PublicClaimId::WizTreeSsd460Gb),
         )];
+        let environment = sample_environment();
         let mut output = Vec::new();
 
         write_suite_report(
@@ -1875,6 +2189,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 sample_ms: 10,
                 progress_every: 1024,
                 include_directories: true,
+                environment: &environment,
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
                 comparisons: &comparisons,
@@ -1885,6 +2200,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
         assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
+        assert!(output.contains("## Environment"));
     }
 
     #[test]
@@ -1899,19 +2215,29 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             include_directories: true,
             claims: Vec::new(),
         };
+        let environment = sample_environment();
         let mut output = Vec::new();
 
         write_suite_metadata(
             &mut output,
             &options,
+            &environment,
             &["wiztree-ssd-460gb", "wiztree-hdd-25gb"],
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("publication_checklist:"));
+        assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("same_machine_competitor_runs="));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn drive_type_label_should_name_known_win32_values() {
+        assert_eq!(super::drive_type_label(3), "fixed");
+        assert_eq!(super::drive_type_label(4), "remote");
     }
 
     #[test]
@@ -1945,6 +2271,16 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             final_private_bytes: 70,
             peak_private_bytes_per_million_entries: 30_000_000,
             memory_samples: 4,
+        }
+    }
+
+    fn sample_environment() -> BenchmarkEnvironment {
+        BenchmarkEnvironment {
+            volume_root: "C:\\".to_owned(),
+            file_system: "NTFS".to_owned(),
+            drive_type: "fixed".to_owned(),
+            shell_elevated: "false".to_owned(),
+            windows_version: "10.0.0".to_owned(),
         }
     }
 }
