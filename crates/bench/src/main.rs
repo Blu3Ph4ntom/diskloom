@@ -58,6 +58,10 @@ enum Command {
         dataset_label: String,
         #[arg(long, default_value = "unknown")]
         cache_state: String,
+        #[arg(long, default_value = "unspecified")]
+        hardware_label: String,
+        #[arg(long, default_value = "unspecified")]
+        dataset_shape: String,
         #[arg(long, default_value_t = 5)]
         iterations: usize,
         #[arg(long, default_value_t = 10)]
@@ -414,6 +418,8 @@ struct SuiteReport<'a> {
     output_dir: &'a Path,
     dataset_label: &'a str,
     cache_state: &'a str,
+    hardware_label: &'a str,
+    dataset_shape: &'a str,
     scanner: ScannerMode,
     iterations: usize,
     sample_ms: u64,
@@ -446,6 +452,8 @@ struct SuiteOptions {
     output_dir: PathBuf,
     dataset_label: String,
     cache_state: String,
+    hardware_label: String,
+    dataset_shape: String,
     iterations: usize,
     sample_ms: u64,
     progress_every: u64,
@@ -486,6 +494,8 @@ fn main() -> Result<()> {
             output_dir,
             dataset_label,
             cache_state,
+            hardware_label,
+            dataset_shape,
             iterations,
             sample_ms,
             progress_every,
@@ -498,6 +508,8 @@ fn main() -> Result<()> {
             output_dir,
             dataset_label: single_line_value(&dataset_label, "unspecified"),
             cache_state: single_line_value(&cache_state, "unknown"),
+            hardware_label: single_line_value(&hardware_label, "unspecified"),
+            dataset_shape: single_line_value(&dataset_shape, "unspecified"),
             iterations,
             sample_ms,
             progress_every,
@@ -670,6 +682,8 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         output_dir: &options.output_dir,
         dataset_label: &options.dataset_label,
         cache_state: &options.cache_state,
+        hardware_label: &options.hardware_label,
+        dataset_shape: &options.dataset_shape,
         scanner: options.scanner,
         iterations: options.iterations,
         sample_ms: options.sample_ms,
@@ -2057,6 +2071,34 @@ fn suite_audit_rows(
         SuiteAuditRow::new("cache_state", AuditStatus::Pass, "Cache state is recorded.")
     });
 
+    rows.push(if options.hardware_label == "unspecified" {
+        SuiteAuditRow::new(
+            "hardware_label",
+            AuditStatus::Warning,
+            "Set --hardware-label before publishing benchmark results.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "hardware_label",
+            AuditStatus::Pass,
+            "Hardware label is recorded.",
+        )
+    });
+
+    rows.push(if options.dataset_shape == "unspecified" {
+        SuiteAuditRow::new(
+            "dataset_shape",
+            AuditStatus::Warning,
+            "Set --dataset-shape before publishing benchmark results.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "dataset_shape",
+            AuditStatus::Pass,
+            "Dataset shape is recorded.",
+        )
+    });
+
     rows.push(if options.iterations >= 3 {
         SuiteAuditRow::new(
             "iterations",
@@ -2199,6 +2241,8 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     )?;
     writeln!(writer, "- Dataset label: `{}`", report.dataset_label)?;
     writeln!(writer, "- Cache state: `{}`", report.cache_state)?;
+    writeln!(writer, "- Hardware label: `{}`", report.hardware_label)?;
+    writeln!(writer, "- Dataset shape: `{}`", report.dataset_shape)?;
     writeln!(writer, "- Scanner: `{}`", scanner_label(report.scanner))?;
     writeln!(writer, "- Iterations: {}", report.iterations)?;
     writeln!(writer, "- Sample interval: {} ms", report.sample_ms)?;
@@ -2422,6 +2466,8 @@ fn write_suite_metadata(
     writeln!(writer, "git_dirty={}", run_context.git_dirty)?;
     writeln!(writer, "dataset_label={}", options.dataset_label)?;
     writeln!(writer, "cache_state={}", options.cache_state)?;
+    writeln!(writer, "hardware_label={}", options.hardware_label)?;
+    writeln!(writer, "dataset_shape={}", options.dataset_shape)?;
     writeln!(
         writer,
         "competitor_csv={}",
@@ -2468,6 +2514,7 @@ fn write_suite_metadata(
     writeln!(writer)?;
     writeln!(writer, "publication_checklist:")?;
     writeln!(writer, "- hardware=")?;
+    writeln!(writer, "- dataset_shape=")?;
     writeln!(writer, "- windows_version=")?;
     writeln!(writer, "- filesystem=")?;
     writeln!(writer, "- drive_type=")?;
@@ -2543,6 +2590,16 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
         writer,
         "    \"cache_state\": {},",
         json_string(&options.cache_state)
+    )?;
+    writeln!(
+        writer,
+        "    \"hardware_label\": {},",
+        json_string(&options.hardware_label)
+    )?;
+    writeln!(
+        writer,
+        "    \"dataset_shape\": {},",
+        json_string(&options.dataset_shape)
     )?;
     writeln!(
         writer,
@@ -3823,6 +3880,8 @@ TreeSize,9.0,other,warm,traversal,2000,
             output_dir: std::path::PathBuf::from("target/bench-suite"),
             dataset_label: "repo-smoke".to_owned(),
             cache_state: "warm".to_owned(),
+            hardware_label: "workstation-a".to_owned(),
+            dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
             progress_every: 1024,
@@ -3862,6 +3921,8 @@ WizTree,4.25,repo-smoke,warm,traversal,700,50
             output_dir: std::path::PathBuf::from("target/bench-suite"),
             dataset_label: "repo-smoke".to_owned(),
             cache_state: "warm".to_owned(),
+            hardware_label: "workstation-a".to_owned(),
+            dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
             progress_every: 1024,
@@ -3908,6 +3969,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         let Command::Suite {
             dataset_label,
             cache_state,
+            hardware_label,
+            dataset_shape,
             ..
         } = args.command
         else {
@@ -3915,6 +3978,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         };
         assert_eq!(dataset_label, "unspecified");
         assert_eq!(cache_state, "unknown");
+        assert_eq!(hardware_label, "unspecified");
+        assert_eq!(dataset_shape, "unspecified");
     }
 
     #[test]
@@ -3972,6 +4037,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
                 output_dir: std::path::Path::new("target/bench-suite"),
                 dataset_label: "repo-smoke",
                 cache_state: "warm",
+                hardware_label: "workstation-a",
+                dataset_shape: "repo tree",
                 scanner: super::ScannerMode::Fallback,
                 iterations: 3,
                 sample_ms: 10,
@@ -4001,6 +4068,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("Git revision"));
         assert!(output.contains("Dataset label: `repo-smoke`"));
         assert!(output.contains("Cache state: `warm`"));
+        assert!(output.contains("Hardware label: `workstation-a`"));
+        assert!(output.contains("Dataset shape: `repo tree`"));
         assert!(output.contains("## Benchmark Audit"));
         assert!(output.contains("Overall status: `warning`"));
         assert!(output.contains("## Same-Machine Competitor Comparisons"));
@@ -4039,6 +4108,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
                 output_dir: std::path::Path::new("target/bench-suite"),
                 dataset_label: "repo-smoke",
                 cache_state: "warm",
+                hardware_label: "workstation-a",
+                dataset_shape: "repo tree",
                 scanner: super::ScannerMode::Fallback,
                 iterations: 3,
                 sample_ms: 10,
@@ -4066,6 +4137,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             output_dir: std::path::PathBuf::from("target/bench-suite"),
             dataset_label: "repo-smoke".to_owned(),
             cache_state: "warm".to_owned(),
+            hardware_label: "workstation-a".to_owned(),
+            dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
             progress_every: 1024,
@@ -4098,6 +4171,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("git_dirty=false"));
         assert!(output.contains("dataset_label=repo-smoke"));
         assert!(output.contains("cache_state=warm"));
+        assert!(output.contains("hardware_label=workstation-a"));
+        assert!(output.contains("dataset_shape=repo tree"));
         assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
@@ -4115,6 +4190,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             output_dir: std::path::PathBuf::from("target/bench-suite"),
             dataset_label: "unspecified".to_owned(),
             cache_state: "unknown".to_owned(),
+            hardware_label: "unspecified".to_owned(),
+            dataset_shape: "unspecified".to_owned(),
             iterations: 1,
             sample_ms: 10,
             progress_every: 1024,
@@ -4160,6 +4237,14 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             rows.iter()
                 .any(|row| { row.check == "public_claims" && row.status == AuditStatus::Warning })
         );
+        assert!(
+            rows.iter()
+                .any(|row| { row.check == "hardware_label" && row.status == AuditStatus::Warning })
+        );
+        assert!(
+            rows.iter()
+                .any(|row| { row.check == "dataset_shape" && row.status == AuditStatus::Warning })
+        );
         assert!(rows.iter().any(|row| {
             row.check == "same_machine_competitors" && row.status == AuditStatus::Pass
         }));
@@ -4188,6 +4273,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             output_dir: std::path::PathBuf::from("target/bench-suite"),
             dataset_label: "repo-smoke".to_owned(),
             cache_state: "warm".to_owned(),
+            hardware_label: "workstation-a".to_owned(),
+            dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
             progress_every: 1024,
@@ -4261,6 +4348,8 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("\"audit_status\": \"warning\""));
         assert!(output.contains("\"dataset_label\": \"repo-smoke\""));
         assert!(output.contains("\"cache_state\": \"warm\""));
+        assert!(output.contains("\"hardware_label\": \"workstation-a\""));
+        assert!(output.contains("\"dataset_shape\": \"repo tree\""));
         assert!(output.contains("\"competitor_csv\": \"\""));
         assert!(output.contains("\"audit.csv\""));
         assert!(output.contains("\"manifest.json\""));
