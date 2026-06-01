@@ -26,6 +26,10 @@ pub struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "CLI arguments are parsed once at startup; keeping the subcommand shape direct avoids clap indirection"
+)]
 enum Command {
     Scan(ScanCommand),
     NtfsProbe { volume: String },
@@ -44,6 +48,9 @@ struct ScanCommand {
 
     #[arg(long)]
     name: Option<String>,
+
+    #[arg(long = "path")]
+    path_filter: Option<String>,
 
     #[arg(long)]
     regex: bool,
@@ -236,16 +243,13 @@ fn drive_volume(path: &Path) -> Option<String> {
 }
 
 fn query_filter(command: &ScanCommand) -> Result<QueryFilter> {
-    let name = match (&command.name, command.regex) {
-        (Some(pattern), true) => Some(NameMatcher::regex(pattern)?),
-        (Some(needle), false) => Some(NameMatcher::contains(needle.as_str())),
-        (None, _) => None,
-    };
+    let name = matcher_from_pattern(command.name.as_deref(), command.regex)?;
+    let path = matcher_from_pattern(command.path_filter.as_deref(), command.regex)?;
 
     Ok(QueryFilter {
         name,
         extension: command.extension.clone(),
-        path: None,
+        path,
         min_size: command.min_size,
         max_size: command.max_size,
         min_allocated: command.min_allocated,
@@ -253,6 +257,14 @@ fn query_filter(command: &ScanCommand) -> Result<QueryFilter> {
         modified_after: command.modified_after,
         modified_before: command.modified_before,
         include_directories: !command.files_only,
+    })
+}
+
+fn matcher_from_pattern(pattern: Option<&str>, regex: bool) -> Result<Option<NameMatcher>> {
+    Ok(match (pattern, regex) {
+        (Some(pattern), true) => Some(NameMatcher::regex(pattern)?),
+        (Some(needle), false) => Some(NameMatcher::contains(needle)),
+        (None, _) => None,
     })
 }
 
@@ -356,9 +368,11 @@ fn run_ntfs_probe(volume: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::drive_volume;
+    use diskloom_core::{FileGraphBuilder, FileKind};
+
+    use super::{ScanCommand, ScannerMode, drive_volume, query_filter};
 
     #[test]
     fn drive_volume_should_accept_drive_root() {
@@ -368,5 +382,52 @@ mod tests {
     #[test]
     fn drive_volume_should_reject_folder_path() {
         assert_eq!(drive_volume(Path::new("c:\\Users")), None);
+    }
+
+    #[test]
+    fn query_filter_should_match_full_path_argument() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let src = builder
+            .add_entry(Some(root), "src", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(src), "main.rs", FileKind::File, 5, 8, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "readme.md", FileKind::File, 3, 4, 0)
+            .unwrap();
+        let graph = builder.finish();
+        let command = scan_command_with_path_filter("src");
+
+        let filter = query_filter(&command).unwrap().compile().unwrap();
+        let matches: Vec<_> = filter.matching_ids(&graph).collect();
+
+        assert_eq!(matches.len(), 2);
+    }
+
+    fn scan_command_with_path_filter(path_filter: &str) -> ScanCommand {
+        ScanCommand {
+            path: PathBuf::from("."),
+            scanner: ScannerMode::Fallback,
+            csv: None,
+            name: None,
+            path_filter: Some(path_filter.to_owned()),
+            regex: false,
+            extension: None,
+            min_size: None,
+            max_size: None,
+            min_allocated: None,
+            max_allocated: None,
+            modified_after: None,
+            modified_before: None,
+            files_only: false,
+            follow_symlinks: false,
+            duplicates: false,
+            file_types: false,
+            limit: 25,
+        }
     }
 }
