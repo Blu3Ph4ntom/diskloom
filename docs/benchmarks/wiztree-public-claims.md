@@ -40,6 +40,7 @@ Capture and summarize a run before comparing it with the claim matrix:
 ```powershell
 target\release\diskloom-bench.exe scan C:\ --scanner ntfs --iterations 5 --sample-ms 10 > target\bench-ntfs.csv
 target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
 ```
 
 Use synthetic datasets for controlled fallback measurements:
@@ -56,3 +57,4 @@ target\release\diskloom-bench.exe scan D:\diskloom-bench-1m --scanner fallback -
 - Compare DiskLoom's NTFS fast path against WizTree's NTFS scan path, and DiskLoom fallback against WizTree non-admin/folder traversal.
 - Separate scan time, time to first visible result, CSV export time, peak working set, private bytes, and UI responsiveness.
 - Mark public WizTree claims as vendor-published claims unless independently reproduced.
+- Treat `compare-public` output as a source-labeled reference row only. It is useful for tracking progress against public claims, but it is not a same-machine competitor benchmark.

@@ -104,6 +104,7 @@ Run the benchmark harness:
 ```powershell
 cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback > target/bench.csv
 cargo run -p diskloom-bench -- summarize target\bench.csv
+cargo run -p diskloom-bench -- compare-public target\bench.csv --claim wiztree-ssd-460gb
 ```
 
 See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.

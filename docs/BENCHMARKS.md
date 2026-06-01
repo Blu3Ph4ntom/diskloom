@@ -56,10 +56,17 @@ target\release\diskloom-bench.exe scan C:\ --iterations 5 --sample-ms 10 --scann
 target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
 ```
 
+Compare a captured run to a source-labeled WizTree public claim:
+
+```powershell
+target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
+target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-hdd-25gb
+```
+
 Synthetic dataset generation:
 
 ```powershell
 cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
 ```
 
-The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. The `summarize` command computes run count, scanner set, fallback count, elapsed median/range, and peak memory maxima from captured CSV rows. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness and competitor automation still need dedicated collectors before public claims are made.
+The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. The `summarize` command computes run count, scanner set, fallback count, elapsed median/range, and peak memory maxima from captured CSV rows. The `compare-public` command emits a source-labeled reference comparison against WizTree's historical published claims and marks it as `reference_only_vendor_claim_not_same_machine`. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness and competitor automation still need dedicated collectors before public claims are made.
