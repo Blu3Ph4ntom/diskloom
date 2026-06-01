@@ -24,13 +24,15 @@
 ## Milestone 3: GUI
 
 - Tree view sorted by size.
-- File view sorted by size.
-- Treemap.
-- File type stats.
-- Background scan worker.
+- File view sorted by size. Initial implementation done.
+- Treemap. Initial implementation done.
+- File type stats. Initial implementation done.
+- Background scan worker. Initial implementation done.
+- Scanner mode selection. Initial implementation done.
 - Search/filter UI.
 - Shell actions.
-- Dark mode and high-DPI polish.
+- Dark mode. Initial implementation done.
+- High-DPI polish.
 
 ## Milestone 4: Packaging and Benchmarks
 
