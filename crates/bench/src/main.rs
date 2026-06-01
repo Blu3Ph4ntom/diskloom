@@ -53,6 +53,10 @@ enum Command {
     Suite {
         path: PathBuf,
         output_dir: PathBuf,
+        #[arg(long, default_value = "unspecified")]
+        dataset_label: String,
+        #[arg(long, default_value = "unknown")]
+        cache_state: String,
         #[arg(long, default_value_t = 5)]
         iterations: usize,
         #[arg(long, default_value_t = 10)]
@@ -305,6 +309,8 @@ struct SuiteRunContext {
 struct SuiteReport<'a> {
     path: &'a Path,
     output_dir: &'a Path,
+    dataset_label: &'a str,
+    cache_state: &'a str,
     scanner: ScannerMode,
     iterations: usize,
     sample_ms: u64,
@@ -321,6 +327,8 @@ struct SuiteReport<'a> {
 struct SuiteOptions {
     path: PathBuf,
     output_dir: PathBuf,
+    dataset_label: String,
+    cache_state: String,
     iterations: usize,
     sample_ms: u64,
     progress_every: u64,
@@ -358,6 +366,8 @@ fn main() -> Result<()> {
         Command::Suite {
             path,
             output_dir,
+            dataset_label,
+            cache_state,
             iterations,
             sample_ms,
             progress_every,
@@ -367,6 +377,8 @@ fn main() -> Result<()> {
         } => run_suite(SuiteOptions {
             path,
             output_dir,
+            dataset_label: single_line_value(&dataset_label, "unspecified"),
+            cache_state: single_line_value(&cache_state, "unknown"),
             iterations,
             sample_ms,
             progress_every,
@@ -510,6 +522,8 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         &SuiteReport {
             path: &options.path,
             output_dir: &options.output_dir,
+            dataset_label: &options.dataset_label,
+            cache_state: &options.cache_state,
             scanner: options.scanner,
             iterations: options.iterations,
             sample_ms: options.sample_ms,
@@ -1509,6 +1523,8 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         "- Output directory: `{}`",
         report.output_dir.display()
     )?;
+    writeln!(writer, "- Dataset label: `{}`", report.dataset_label)?;
+    writeln!(writer, "- Cache state: `{}`", report.cache_state)?;
     writeln!(writer, "- Scanner: `{}`", scanner_label(report.scanner))?;
     writeln!(writer, "- Iterations: {}", report.iterations)?;
     writeln!(writer, "- Sample interval: {} ms", report.sample_ms)?;
@@ -1672,6 +1688,8 @@ fn write_suite_metadata(
     writeln!(writer, "command_line={}", run_context.command_line)?;
     writeln!(writer, "git_revision={}", run_context.git_revision)?;
     writeln!(writer, "git_dirty={}", run_context.git_dirty)?;
+    writeln!(writer, "dataset_label={}", options.dataset_label)?;
+    writeln!(writer, "cache_state={}", options.cache_state)?;
     writeln!(writer, "detected_volume_root={}", environment.volume_root)?;
     writeln!(writer, "detected_filesystem={}", environment.file_system)?;
     writeln!(writer, "detected_drive_type={}", environment.drive_type)?;
@@ -1743,6 +1761,16 @@ fn current_command_line() -> String {
         .map(|arg| shell_quote_arg(&arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn single_line_value(value: &str, fallback: &str) -> String {
+    let sanitized = value.replace(['\r', '\n'], " ");
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        fallback.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn shell_quote_arg(arg: &str) -> String {
@@ -2088,9 +2116,9 @@ mod tests {
         MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport,
         SuiteRunContext, compare_summary_to_claim, parse_measurements, per_million, public_claim,
         ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
-        summarize_export_measurements, summarize_rows, write_export_measurements,
-        write_measurements, write_public_comparisons, write_suite_metadata, write_suite_report,
-        write_summary,
+        single_line_value, summarize_export_measurements, summarize_rows,
+        write_export_measurements, write_measurements, write_public_comparisons,
+        write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -2493,6 +2521,23 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
     }
 
     #[test]
+    fn suite_cli_should_default_context_labels() {
+        let args =
+            Args::try_parse_from(["diskloom-bench", "suite", ".", "target/bench-suite"]).unwrap();
+
+        let Command::Suite {
+            dataset_label,
+            cache_state,
+            ..
+        } = args.command
+        else {
+            panic!("expected suite command");
+        };
+        assert_eq!(dataset_label, "unspecified");
+        assert_eq!(cache_state, "unknown");
+    }
+
+    #[test]
     fn write_suite_report_should_mark_public_claims_reference_only() {
         let scan_summary = MeasurementSummary {
             runs: 3,
@@ -2540,6 +2585,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             &SuiteReport {
                 path: std::path::Path::new("."),
                 output_dir: std::path::Path::new("target/bench-suite"),
+                dataset_label: "repo-smoke",
+                cache_state: "warm",
                 scanner: super::ScannerMode::Fallback,
                 iterations: 3,
                 sample_ms: 10,
@@ -2565,6 +2612,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("ratio vs max"));
         assert!(output.contains("## Environment"));
         assert!(output.contains("Git revision"));
+        assert!(output.contains("Dataset label: `repo-smoke`"));
+        assert!(output.contains("Cache state: `warm`"));
     }
 
     #[test]
@@ -2572,6 +2621,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let options = SuiteOptions {
             path: std::path::PathBuf::from("."),
             output_dir: std::path::PathBuf::from("target/bench-suite"),
+            dataset_label: "repo-smoke".to_owned(),
+            cache_state: "warm".to_owned(),
             iterations: 3,
             sample_ms: 10,
             progress_every: 1024,
@@ -2601,6 +2652,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("command_line=diskloom-bench suite . target/bench-suite"));
         assert!(output.contains("git_revision=abcdef123456"));
         assert!(output.contains("git_dirty=false"));
+        assert!(output.contains("dataset_label=repo-smoke"));
+        assert!(output.contains("cache_state=warm"));
         assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
@@ -2616,6 +2669,15 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert_eq!(shell_quote_arg("simple"), "simple");
         assert_eq!(shell_quote_arg("two words"), "\"two words\"");
         assert_eq!(shell_quote_arg("a\"b"), "\"a\\\"b\"");
+    }
+
+    #[test]
+    fn single_line_value_should_trim_newlines_and_empty_values() {
+        assert_eq!(
+            single_line_value(" warm\r\nsecond run ", "unknown"),
+            "warm  second run"
+        );
+        assert_eq!(single_line_value("\n\t", "unknown"), "unknown");
     }
 
     #[cfg(windows)]
