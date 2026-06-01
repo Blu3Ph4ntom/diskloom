@@ -1,8 +1,10 @@
 use std::{
     env,
     ffi::OsString,
+    fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
+    time::SystemTime,
 };
 
 fn main() -> ExitCode {
@@ -96,7 +98,7 @@ fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, Stri
         .join("target")
         .join("release")
         .join(format!("{binary}{}", env::consts::EXE_SUFFIX));
-    if exe.exists() {
+    if release_binary_is_current(repo_root, &exe)? {
         return Ok(exe);
     }
 
@@ -130,6 +132,65 @@ fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, Stri
     Ok(exe)
 }
 
+fn release_binary_is_current(repo_root: &Path, exe: &Path) -> Result<bool, String> {
+    let Ok(exe_modified) = fs::metadata(exe).and_then(|metadata| metadata.modified()) else {
+        return Ok(false);
+    };
+
+    build_inputs_newer_than(repo_root, exe_modified).map(|newer| !newer)
+}
+
+fn build_inputs_newer_than(root: &Path, timestamp: SystemTime) -> Result<bool, String> {
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir)
+            .map_err(|error| format!("failed to read {}: {error}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("failed to read {}: {error}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+
+            if file_type.is_dir() {
+                if !should_skip_build_dir(&path) {
+                    pending.push(path);
+                }
+                continue;
+            }
+
+            if is_build_input(&path)
+                && fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
+                    > timestamp
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn should_skip_build_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, ".agent" | ".git" | "dist" | "target"))
+}
+
+fn is_build_input(path: &Path) -> bool {
+    if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+        return true;
+    }
+
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "Cargo.lock" | "Cargo.toml"))
+}
+
 fn exit_code_from_status(code: Option<i32>) -> ExitCode {
     match code {
         Some(0) => ExitCode::SUCCESS,
@@ -142,7 +203,9 @@ fn exit_code_from_status(code: Option<i32>) -> ExitCode {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{LaunchTarget, exit_code_from_status, launch_target};
+    use super::{
+        LaunchTarget, exit_code_from_status, is_build_input, launch_target, should_skip_build_dir,
+    };
 
     #[test]
     fn launch_target_should_default_to_gui() {
@@ -206,5 +269,22 @@ mod tests {
             exit_code_from_status(Some(300)),
             std::process::ExitCode::from(255)
         );
+    }
+
+    #[test]
+    fn build_input_detection_should_track_rust_and_manifest_files() {
+        assert!(is_build_input(std::path::Path::new("src/main.rs")));
+        assert!(is_build_input(std::path::Path::new("Cargo.toml")));
+        assert!(is_build_input(std::path::Path::new("Cargo.lock")));
+        assert!(!is_build_input(std::path::Path::new("README.md")));
+    }
+
+    #[test]
+    fn build_dir_filter_should_skip_generated_and_private_dirs() {
+        assert!(should_skip_build_dir(std::path::Path::new("target")));
+        assert!(should_skip_build_dir(std::path::Path::new(".git")));
+        assert!(should_skip_build_dir(std::path::Path::new(".agent")));
+        assert!(should_skip_build_dir(std::path::Path::new("dist")));
+        assert!(!should_skip_build_dir(std::path::Path::new("crates")));
     }
 }
