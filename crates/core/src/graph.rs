@@ -43,6 +43,15 @@ pub struct GraphEntry {
     pub modified_unix: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryMetadata {
+    pub kind: FileKind,
+    pub size: u64,
+    pub allocated: u64,
+    pub modified_unix: i64,
+    pub extra_flags: EntryFlags,
+}
+
 #[derive(Debug, Error)]
 pub enum FileGraphError {
     #[error("entry id {0} is out of bounds")]
@@ -185,11 +194,13 @@ impl FileGraphBuilder {
         self.add_entry_with_flags(
             parent,
             name,
-            kind,
-            size,
-            allocated,
-            modified_unix,
-            EntryFlags::empty(),
+            EntryMetadata {
+                kind,
+                size,
+                allocated,
+                modified_unix,
+                extra_flags: EntryFlags::empty(),
+            },
         )
     }
 
@@ -197,11 +208,7 @@ impl FileGraphBuilder {
         &mut self,
         parent: Option<EntryId>,
         name: &str,
-        kind: FileKind,
-        size: u64,
-        allocated: u64,
-        modified_unix: i64,
-        extra_flags: EntryFlags,
+        metadata: EntryMetadata,
     ) -> Result<EntryId, FileGraphError> {
         let id = EntryId(self.parents.len() as u32);
         if parent == Some(id) {
@@ -215,20 +222,20 @@ impl FileGraphBuilder {
         }
 
         let mut flags = EntryFlags::empty();
-        match kind {
+        match metadata.kind {
             FileKind::Directory => flags.insert(EntryFlags::DIRECTORY),
             FileKind::Symlink => flags.insert(EntryFlags::SYMLINK),
             FileKind::File | FileKind::Other => {}
         }
-        flags.insert(extra_flags);
+        flags.insert(metadata.extra_flags);
 
         let name_id = self.names.intern(name);
         self.parents.push(parent);
         self.name_ids.push(name_id);
         self.flags.push(flags);
-        self.modified_unix.push(modified_unix);
-        self.own_size.push(size);
-        self.own_allocated.push(allocated);
+        self.modified_unix.push(metadata.modified_unix);
+        self.own_size.push(metadata.size);
+        self.own_allocated.push(metadata.allocated);
 
         Ok(id)
     }

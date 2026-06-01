@@ -3,7 +3,9 @@ use std::{
     fmt,
 };
 
-use diskloom_core::{EntryFlags, EntryId, FileGraph, FileGraphBuilder, FileGraphError, FileKind};
+use diskloom_core::{
+    EntryFlags, EntryId, EntryMetadata, FileGraph, FileGraphBuilder, FileGraphError, FileKind,
+};
 use thiserror::Error;
 
 use crate::mft::{FileNameAttribute, MftParseError, ParsedFileRecord, parse_file_record};
@@ -456,11 +458,13 @@ fn add_entry_recursive(
     let id = builder.add_entry_with_flags(
         parent,
         name,
-        entry.kind,
-        entry.size,
-        entry.allocated,
-        entry.modified_unix,
-        flags,
+        EntryMetadata {
+            kind: entry.kind,
+            size: entry.size,
+            allocated: entry.allocated,
+            modified_unix: entry.modified_unix,
+            extra_flags: flags,
+        },
     )?;
     ids.insert(record_number, id);
     visiting.remove(&record_number);
