@@ -31,3 +31,18 @@ Compare against:
 - Avoid claims that are not backed by published data.
 - Publish commands, dataset generator settings, raw output, and analysis scripts.
 
+## Current Harness
+
+Repeated fallback scan timing:
+
+```powershell
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5
+```
+
+Synthetic dataset generation:
+
+```powershell
+cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
+```
+
+The harness currently emits CSV rows for elapsed time and entry counts. Peak working set, private bytes, UI responsiveness, and competitor automation still need dedicated collectors before public claims are made.

@@ -2,22 +2,23 @@
 
 ## Milestone 1: CLI Prototype
 
-- Rust workspace.
-- Compact file graph.
-- Fallback scanner.
-- Aggregation.
-- Query/filter engine.
-- CSV export.
-- CLI scan/export mode.
-- Unit tests and benchmark harness.
+- Rust workspace. Done.
+- Compact file graph. Done.
+- Fallback scanner. Done.
+- Aggregation. Done.
+- Query/filter engine. Initial implementation done.
+- CSV export. Done.
+- CLI scan/export mode. Done.
+- Unit tests and benchmark harness. Initial implementation done.
 
 ## Milestone 2: Windows Fast Path
 
-- Volume discovery.
-- Direct NTFS volume access.
-- MFT record parsing.
+- Volume discovery. Done.
+- Direct NTFS volume access. Probe implemented.
+- MFT record parsing. Header parser implemented.
 - Hard link handling where possible.
 - Fallback behavior when fast path is unavailable.
+- Full MFT scan and graph construction.
 
 ## Milestone 3: GUI
 
@@ -42,4 +43,3 @@
 - Snapshot and delta scans.
 - Content-hash duplicate verification.
 - macOS and Linux scanner implementations behind existing boundaries.
-

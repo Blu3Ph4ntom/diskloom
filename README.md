@@ -32,7 +32,71 @@ The project is Windows-first for v1. Future macOS and Linux support may arrive t
 
 ## Status
 
-Early development. The first milestone is a CLI scanner prototype, compact data model, export path, benchmark harness, and GUI shell. The README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
+Early development. Implemented pieces include:
+
+- Rust workspace with separate core, scan, query, duplicate, export, Windows, NTFS, CLI, UI, and benchmark crates.
+- Compact graph with string interning, integer IDs, parent IDs, aggregation, and lazy path reconstruction.
+- Non-admin fallback scanner with Windows allocated-size reporting.
+- CLI scan/export mode.
+- Windows volume discovery.
+- Direct NTFS volume probe using raw volume access and `FSCTL_GET_NTFS_VOLUME_DATA`.
+- MFT file-record header parser tests.
+- CSV export.
+- Duplicate candidate grouping by size/name/date.
+- egui desktop shell with background fallback scans.
+- Benchmark harness for repeated scan timing and synthetic dataset creation.
+
+The direct NTFS MFT scanner is not complete yet. DiskLoom falls back to directory traversal when raw volume access is unavailable or the fast path is incomplete. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
+
+## Usage
+
+Run a fallback scan:
+
+```powershell
+cargo run -p diskloom-cli -- scan . --limit 25
+```
+
+Export CSV:
+
+```powershell
+cargo run -p diskloom-cli -- scan C:\Users --csv target/users.csv
+```
+
+List Windows volumes:
+
+```powershell
+cargo run -p diskloom-cli -- volumes
+```
+
+Probe the NTFS fast-path boundary:
+
+```powershell
+cargo run -p diskloom-cli -- ntfs-probe C:
+```
+
+Launch the GUI shell:
+
+```powershell
+cargo run -p diskloom-ui
+```
+
+Run the benchmark harness:
+
+```powershell
+cargo run -p diskloom-bench -- scan . --iterations 5
+```
+
+Create a synthetic dataset:
+
+```powershell
+cargo run -p diskloom-bench -- dataset target/bench-tree --dirs 100 --files-per-dir 100 --bytes-per-file 0
+```
+
+Build portable binaries:
+
+```powershell
+cargo build --release -p diskloom-cli -p diskloom-ui
+```
 
 ## License
 
@@ -42,4 +106,3 @@ Licensed under either of:
 - MIT License
 
 at your option.
-
