@@ -14,6 +14,8 @@ use diskloom_query::{
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_properties};
 
+const UI_PROGRESS_EVERY: u64 = 1_024;
+
 #[derive(Debug)]
 pub struct DiskLoomApp {
     path: String,
@@ -55,15 +57,22 @@ impl UiScannerMode {
 #[derive(Debug)]
 enum UiState {
     Idle,
-    Scanning,
+    Scanning(Option<UiScanProgress>),
     Complete(Box<ScanResult>),
     Error(String),
 }
 
 #[derive(Debug)]
 enum ScanMessage {
+    Progress(UiScanProgress),
     Complete(Box<ScanResult>),
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UiScanProgress {
+    summary: ScanSummary,
+    elapsed_ms: u128,
 }
 
 #[derive(Debug)]
@@ -159,7 +168,7 @@ impl eframe::App for DiskLoomApp {
                     [input_width, 24.0],
                     egui::TextEdit::singleline(&mut self.path),
                 );
-                let scanning = matches!(self.state, UiState::Scanning);
+                let scanning = matches!(self.state, UiState::Scanning(_));
                 if ui
                     .add_enabled(!scanning, egui::Button::new("Scan"))
                     .clicked()
@@ -202,7 +211,7 @@ impl eframe::App for DiskLoomApp {
             self.active_view(ui);
         });
 
-        if matches!(self.state, UiState::Scanning) {
+        if matches!(self.state, UiState::Scanning(_)) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -215,7 +224,7 @@ impl DiskLoomApp {
         let scanner_mode = self.scanner_mode;
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
-        self.state = UiState::Scanning;
+        self.state = UiState::Scanning(None);
         self.view_cache = None;
         self.selected_path = None;
         self.rename_target.clear();
@@ -223,7 +232,14 @@ impl DiskLoomApp {
 
         thread::spawn(move || {
             let started = Instant::now();
-            let result = scan_path(path, scanner_mode).map(|outcome| {
+            let progress_sender = sender.clone();
+            let mut on_progress = |summary| {
+                let _ = progress_sender.send(ScanMessage::Progress(UiScanProgress {
+                    summary,
+                    elapsed_ms: started.elapsed().as_millis(),
+                }));
+            };
+            let result = scan_path(path, scanner_mode, &mut on_progress).map(|outcome| {
                 let file_types = file_type_stats(&outcome.graph, 50);
                 let treemap_items = treemap_items_from_graph(&outcome.graph, 120);
                 ScanResult {
@@ -250,28 +266,44 @@ impl DiskLoomApp {
             return;
         };
 
-        match receiver.try_recv() {
-            Ok(ScanMessage::Complete(result)) => {
-                self.state = UiState::Complete(result);
-                self.view_cache = None;
-                self.selected_path = None;
-                self.rename_target.clear();
+        let mut keep_receiver = true;
+        loop {
+            match receiver.try_recv() {
+                Ok(ScanMessage::Progress(progress)) => {
+                    self.state = UiState::Scanning(Some(progress));
+                }
+                Ok(ScanMessage::Complete(result)) => {
+                    self.state = UiState::Complete(result);
+                    self.view_cache = None;
+                    self.selected_path = None;
+                    self.rename_target.clear();
+                    keep_receiver = false;
+                    break;
+                }
+                Ok(ScanMessage::Error(error)) => {
+                    self.state = UiState::Error(error);
+                    self.view_cache = None;
+                    self.selected_path = None;
+                    self.rename_target.clear();
+                    keep_receiver = false;
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    break;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state = UiState::Error("scan worker stopped".to_owned());
+                    self.view_cache = None;
+                    self.selected_path = None;
+                    self.rename_target.clear();
+                    keep_receiver = false;
+                    break;
+                }
             }
-            Ok(ScanMessage::Error(error)) => {
-                self.state = UiState::Error(error);
-                self.view_cache = None;
-                self.selected_path = None;
-                self.rename_target.clear();
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                self.receiver = Some(receiver);
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.state = UiState::Error("scan worker stopped".to_owned());
-                self.view_cache = None;
-                self.selected_path = None;
-                self.rename_target.clear();
-            }
+        }
+
+        if keep_receiver {
+            self.receiver = Some(receiver);
         }
     }
 
@@ -392,9 +424,20 @@ impl DiskLoomApp {
             UiState::Idle => {
                 ui.label("See your disk clearly.");
             }
-            UiState::Scanning => {
+            UiState::Scanning(progress) => {
                 ui.spinner();
-                ui.label("Scanning");
+                if let Some(progress) = progress {
+                    ui.label(format!(
+                        "Scanning: {} entries, {} files, {} directories, {} inaccessible, {} ms",
+                        progress.summary.entries,
+                        progress.summary.files,
+                        progress.summary.directories,
+                        progress.summary.inaccessible,
+                        progress.elapsed_ms
+                    ));
+                } else {
+                    ui.label("Scanning");
+                }
             }
             UiState::Complete(result) => {
                 ui.label(format!(
@@ -634,28 +677,40 @@ struct UiScanOutcome {
     fallback_reason: Option<String>,
 }
 
-fn scan_path(path: PathBuf, mode: UiScannerMode) -> Result<UiScanOutcome, String> {
+fn scan_path(
+    path: PathBuf,
+    mode: UiScannerMode,
+    on_progress: &mut impl FnMut(ScanSummary),
+) -> Result<UiScanOutcome, String> {
     match mode {
-        UiScannerMode::Fallback => scan_fallback(path, None),
+        UiScannerMode::Fallback => scan_fallback(path, None, on_progress),
         UiScannerMode::Ntfs => scan_ntfs(&path),
         UiScannerMode::Auto => {
             if drive_volume(&path).is_some() {
                 match scan_ntfs(&path) {
                     Ok(outcome) => Ok(outcome),
-                    Err(error) => scan_fallback(path, Some(error)),
+                    Err(error) => scan_fallback(path, Some(error), on_progress),
                 }
             } else {
-                scan_fallback(path, None)
+                scan_fallback(path, None, on_progress)
             }
         }
     }
 }
 
-fn scan_fallback(path: PathBuf, fallback_reason: Option<String>) -> Result<UiScanOutcome, String> {
-    let (graph, summary) = FallbackScanner::scan(ScanOptions {
-        root: path,
-        follow_symlinks: false,
-    })
+fn scan_fallback(
+    path: PathBuf,
+    fallback_reason: Option<String>,
+    on_progress: &mut impl FnMut(ScanSummary),
+) -> Result<UiScanOutcome, String> {
+    let (graph, summary) = FallbackScanner::scan_with_progress(
+        ScanOptions {
+            root: path,
+            follow_symlinks: false,
+        },
+        UI_PROGRESS_EVERY,
+        on_progress,
+    )
     .map_err(|error| error.to_string())?;
 
     Ok(UiScanOutcome {

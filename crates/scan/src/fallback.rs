@@ -44,6 +44,14 @@ pub enum ScanError {
 
 impl FallbackScanner {
     pub fn scan(options: ScanOptions) -> Result<(FileGraph, ScanSummary), ScanError> {
+        Self::scan_with_progress(options, 0, |_| {})
+    }
+
+    pub fn scan_with_progress(
+        options: ScanOptions,
+        progress_every: u64,
+        mut on_progress: impl FnMut(ScanSummary),
+    ) -> Result<(FileGraph, ScanSummary), ScanError> {
         let root_metadata = metadata_for(&options.root, options.follow_symlinks)?;
         let root_kind = kind_for(&root_metadata);
         let root_size = logical_size(&root_metadata, root_kind);
@@ -63,6 +71,13 @@ impl FallbackScanner {
         let mut summary = ScanSummary::default();
         summary.entries += 1;
         bump_kind(&mut summary, root_kind);
+        let mut last_progress_entries = 0;
+        maybe_emit_progress(
+            summary,
+            progress_every,
+            &mut last_progress_entries,
+            &mut on_progress,
+        );
 
         let mut pending = Vec::new();
         if root_kind == FileKind::Directory {
@@ -101,12 +116,24 @@ impl FallbackScanner {
 
                 summary.entries += 1;
                 bump_kind(&mut summary, kind);
+                maybe_emit_progress(
+                    summary,
+                    progress_every,
+                    &mut last_progress_entries,
+                    &mut on_progress,
+                );
 
                 if kind == FileKind::Directory {
                     pending.push((path, id));
                 }
             }
         }
+        emit_progress(
+            summary,
+            progress_every,
+            &mut last_progress_entries,
+            &mut on_progress,
+        );
 
         Ok((builder.finish(), summary))
     }
@@ -196,6 +223,33 @@ fn bump_kind(summary: &mut ScanSummary, kind: FileKind) {
     }
 }
 
+fn maybe_emit_progress(
+    summary: ScanSummary,
+    progress_every: u64,
+    last_entries: &mut u64,
+    on_progress: &mut impl FnMut(ScanSummary),
+) {
+    if progress_every == 0 {
+        return;
+    }
+    if summary.entries == 1 || summary.entries.is_multiple_of(progress_every) {
+        emit_progress(summary, progress_every, last_entries, on_progress);
+    }
+}
+
+fn emit_progress(
+    summary: ScanSummary,
+    progress_every: u64,
+    last_entries: &mut u64,
+    on_progress: &mut impl FnMut(ScanSummary),
+) {
+    if progress_every == 0 || summary.entries == *last_entries {
+        return;
+    }
+    *last_entries = summary.entries;
+    on_progress(summary);
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -229,5 +283,23 @@ mod tests {
         let stats = graph.stats(root).unwrap();
 
         assert_eq!(stats.total_size.bytes(), 12);
+    }
+
+    #[test]
+    fn scan_with_progress_should_emit_summary_snapshots() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("a.bin"), [0_u8; 8]).unwrap();
+        fs::write(temp.path().join("b.bin"), [0_u8; 4]).unwrap();
+        fs::write(temp.path().join("c.bin"), [0_u8; 2]).unwrap();
+        let mut snapshots = Vec::new();
+
+        let (_, summary) =
+            FallbackScanner::scan_with_progress(ScanOptions::new(temp.path()), 2, |progress| {
+                snapshots.push(progress.entries);
+            })
+            .unwrap();
+
+        assert_eq!(summary.entries, 4);
+        assert_eq!(snapshots, vec![1, 2, 4]);
     }
 }
