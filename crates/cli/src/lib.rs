@@ -11,7 +11,9 @@ use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::find_duplicate_candidates;
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
-use diskloom_query::{NameMatcher, QueryFilter, SortKey, SortOrder, sort_entries};
+use diskloom_query::{
+    FileTypeStat, NameMatcher, QueryFilter, SortKey, SortOrder, file_type_stats, sort_entries,
+};
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{VolumeKind, discover_volumes};
 
@@ -76,6 +78,9 @@ struct ScanCommand {
     #[arg(long)]
     duplicates: bool,
 
+    #[arg(long)]
+    file_types: bool,
+
     #[arg(long, default_value_t = 25)]
     limit: usize,
 }
@@ -132,6 +137,11 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     if command.duplicates {
         writeln!(stdout)?;
         write_duplicate_candidates(&mut stdout, &graph, command.limit)?;
+    }
+
+    if command.file_types {
+        writeln!(stdout)?;
+        write_file_type_stats(&mut stdout, &file_type_stats(&graph, command.limit))?;
     }
 
     if let Some(csv_path) = command.csv {
@@ -300,6 +310,21 @@ fn write_duplicate_candidates(
             candidate.size,
             candidate.entries.len(),
             candidate.name
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_file_type_stats(writer: &mut impl Write, stats: &[FileTypeStat]) -> Result<()> {
+    writeln!(writer, "File types by size:")?;
+    writeln!(writer, "size\tallocated\tfiles\textension")?;
+
+    for stat in stats {
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}",
+            stat.size, stat.allocated, stat.files, stat.extension
         )?;
     }
 

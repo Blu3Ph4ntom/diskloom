@@ -6,14 +6,25 @@ use std::{
 };
 
 use diskloom_core::{EntryFlags, FileGraph};
-use diskloom_query::{SortKey, SortOrder, sort_entries};
+use diskloom_query::{
+    FileTypeStat, SortKey, SortOrder, TreemapBounds, TreemapItem, TreemapRect, file_type_stats,
+    layout_treemap, sort_entries,
+};
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 
 #[derive(Debug)]
 pub struct DiskLoomApp {
     path: String,
+    active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTab {
+    Files,
+    Types,
+    Treemap,
 }
 
 #[derive(Debug)]
@@ -35,6 +46,8 @@ struct ScanResult {
     summary: ScanSummary,
     elapsed_ms: u128,
     rows: Vec<ResultRow>,
+    file_types: Vec<FileTypeStat>,
+    treemap_items: Vec<TreemapItem>,
 }
 
 #[derive(Debug)]
@@ -49,6 +62,7 @@ impl Default for DiskLoomApp {
     fn default() -> Self {
         Self {
             path: ".".to_owned(),
+            active_tab: ActiveTab::Files,
             state: UiState::Idle,
             receiver: None,
         }
@@ -85,7 +99,9 @@ impl eframe::App for DiskLoomApp {
             ui.add_space(8.0);
             self.status_line(ui);
             ui.separator();
-            self.results(ui);
+            self.tabs(ui);
+            ui.separator();
+            self.active_view(ui);
         });
 
         if matches!(self.state, UiState::Scanning) {
@@ -111,6 +127,8 @@ impl DiskLoomApp {
                 summary,
                 elapsed_ms: started.elapsed().as_millis(),
                 rows: rows_from_graph(&graph, 500),
+                file_types: file_type_stats(&graph, 50),
+                treemap_items: treemap_items_from_graph(&graph, 120),
             });
 
             let message = match result {
@@ -167,6 +185,22 @@ impl DiskLoomApp {
         }
     }
 
+    fn tabs(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Files, "Files");
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Types, "Types");
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Treemap, "Treemap");
+        });
+    }
+
+    fn active_view(&self, ui: &mut egui::Ui) {
+        match self.active_tab {
+            ActiveTab::Files => self.results(ui),
+            ActiveTab::Types => self.type_stats(ui),
+            ActiveTab::Treemap => self.treemap(ui),
+        }
+    }
+
     fn results(&self, ui: &mut egui::Ui) {
         let UiState::Complete(result) = &self.state else {
             return;
@@ -195,6 +229,58 @@ impl DiskLoomApp {
                     });
             });
     }
+
+    fn type_stats(&self, ui: &mut egui::Ui) {
+        let UiState::Complete(result) = &self.state else {
+            return;
+        };
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("types_grid")
+                .striped(true)
+                .min_col_width(96.0)
+                .show(ui, |ui| {
+                    ui.strong("Size");
+                    ui.strong("Allocated");
+                    ui.strong("Files");
+                    ui.strong("Extension");
+                    ui.end_row();
+
+                    for stat in &result.file_types {
+                        ui.monospace(stat.size.to_string());
+                        ui.monospace(stat.allocated.to_string());
+                        ui.monospace(stat.files.to_string());
+                        ui.label(&stat.extension);
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn treemap(&self, ui: &mut egui::Ui) {
+        let UiState::Complete(result) = &self.state else {
+            return;
+        };
+
+        let available = ui.available_size();
+        let height = available.y.max(280.0);
+        let (response, painter) =
+            ui.allocate_painter(egui::vec2(available.x, height), egui::Sense::hover());
+        let rect = response.rect;
+        let treemap = layout_treemap(
+            &result.treemap_items,
+            TreemapBounds {
+                x: rect.left(),
+                y: rect.top(),
+                width: rect.width(),
+                height: rect.height(),
+            },
+        );
+
+        for (idx, item) in treemap.iter().enumerate() {
+            paint_treemap_rect(&painter, item, idx);
+        }
+    }
 }
 
 fn rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<ResultRow> {
@@ -220,4 +306,61 @@ fn rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<ResultRow> {
             })
         })
         .collect()
+}
+
+fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem> {
+    let mut ids: Vec<_> = graph.ids().collect();
+    sort_entries(graph, &mut ids, SortKey::Size, SortOrder::Descending);
+
+    ids.into_iter()
+        .filter_map(|id| {
+            let stats = graph.stats(id)?;
+            let entry = graph.entry(id)?;
+            if entry.flags.contains(EntryFlags::DIRECTORY) || stats.own_size.bytes() == 0 {
+                return None;
+            }
+            Some(TreemapItem {
+                id,
+                label: graph.name(id).unwrap_or_default().to_owned(),
+                size: stats.own_size.bytes(),
+            })
+        })
+        .take(limit)
+        .collect()
+}
+
+fn paint_treemap_rect(painter: &egui::Painter, item: &TreemapRect, idx: usize) {
+    let bounds = egui::Rect::from_min_size(
+        egui::pos2(item.bounds.x, item.bounds.y),
+        egui::vec2(item.bounds.width.max(0.0), item.bounds.height.max(0.0)),
+    )
+    .shrink(1.0);
+    if bounds.width() <= 1.0 || bounds.height() <= 1.0 {
+        return;
+    }
+
+    let palette = [
+        egui::Color32::from_rgb(86, 137, 111),
+        egui::Color32::from_rgb(130, 122, 193),
+        egui::Color32::from_rgb(196, 138, 79),
+        egui::Color32::from_rgb(79, 148, 189),
+        egui::Color32::from_rgb(177, 95, 112),
+    ];
+    painter.rect_filled(bounds, 2.0, palette[idx % palette.len()]);
+    painter.rect_stroke(
+        bounds,
+        2.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 26, 28)),
+        egui::StrokeKind::Inside,
+    );
+
+    if bounds.width() > 72.0 && bounds.height() > 28.0 {
+        painter.text(
+            bounds.left_top() + egui::vec2(6.0, 5.0),
+            egui::Align2::LEFT_TOP,
+            &item.label,
+            egui::FontId::monospace(11.0),
+            egui::Color32::from_rgb(246, 246, 238),
+        );
+    }
 }
