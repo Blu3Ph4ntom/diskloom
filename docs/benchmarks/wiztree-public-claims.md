@@ -43,6 +43,12 @@ target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
 target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
 ```
 
+Or generate a local bundle with raw DiskLoom measurements, source-labeled public claim rows, and a Markdown report:
+
+```powershell
+target\release\diskloom-bench.exe suite C:\ target\bench-suite-ntfs --scanner ntfs --iterations 5 --sample-ms 10
+```
+
 Use synthetic datasets for controlled fallback measurements:
 
 ```powershell
