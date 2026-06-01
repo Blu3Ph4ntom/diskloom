@@ -468,6 +468,7 @@ dependencies = [
  "anyhow",
  "clap",
  "diskloom-core",
+ "diskloom-export",
  "diskloom-ntfs",
  "diskloom-scan",
  "windows",

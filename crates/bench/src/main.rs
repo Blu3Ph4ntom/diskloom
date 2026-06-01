@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
 use diskloom_core::{EntryFlags, FileGraph};
+use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 
@@ -32,6 +33,19 @@ enum Command {
         sample_ms: u64,
         #[arg(long, value_enum, default_value = "fallback")]
         scanner: ScannerMode,
+    },
+    Export {
+        path: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long, default_value_t = 10)]
+        sample_ms: u64,
+        #[arg(long, value_enum, default_value = "fallback")]
+        scanner: ScannerMode,
+        #[arg(long, default_value_t = true)]
+        include_directories: bool,
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
     },
     Dataset {
         root: PathBuf,
@@ -85,6 +99,27 @@ struct ScanMeasurement {
     memory_samples: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExportMeasurement {
+    iteration: usize,
+    scanner: &'static str,
+    fallback: bool,
+    scan_elapsed_ms: u128,
+    export_elapsed_ms: u128,
+    total_elapsed_ms: u128,
+    export_bytes: u64,
+    entries: u64,
+    files: u64,
+    directories: u64,
+    inaccessible: u64,
+    peak_working_set_bytes: u64,
+    peak_private_bytes: u64,
+    final_working_set_bytes: u64,
+    final_private_bytes: u64,
+    peak_private_bytes_per_million_entries: u64,
+    memory_samples: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct MemorySample {
     working_set_bytes: u64,
@@ -111,6 +146,23 @@ struct ScanRun {
 #[derive(Debug, Clone, Copy)]
 struct MeasuredScan {
     run: ScanRun,
+    memory: MemoryPeak,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportRun {
+    scan_elapsed_ms: u128,
+    export_elapsed_ms: u128,
+    total_elapsed_ms: u128,
+    export_bytes: u64,
+    scanner: &'static str,
+    fallback: bool,
+    summary: ScanSummary,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MeasuredExport {
+    run: ExportRun,
     memory: MemoryPeak,
 }
 
@@ -175,6 +227,21 @@ fn main() -> Result<()> {
             sample_ms,
             scanner,
         } => run_scan(path, iterations, sample_ms, scanner),
+        Command::Export {
+            path,
+            iterations,
+            sample_ms,
+            scanner,
+            include_directories,
+            output_dir,
+        } => run_export(
+            path,
+            iterations,
+            sample_ms,
+            scanner,
+            include_directories,
+            output_dir,
+        ),
         Command::Dataset {
             root,
             dirs,
@@ -197,6 +264,39 @@ fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64, scanner: ScannerMo
     }
 
     write_measurements(&mut io::stdout().lock(), &measurements)?;
+    Ok(())
+}
+
+fn run_export(
+    path: PathBuf,
+    iterations: usize,
+    sample_ms: u64,
+    scanner: ScannerMode,
+    include_directories: bool,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    if let Some(output_dir) = &output_dir {
+        fs::create_dir_all(output_dir)
+            .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    }
+
+    let mut measurements = Vec::with_capacity(iterations);
+    let sample_interval = Duration::from_millis(sample_ms.max(1));
+
+    for iteration in 1..=iterations {
+        let export = run_measured_export(
+            path.clone(),
+            sample_interval,
+            scanner,
+            include_directories,
+            output_dir.clone(),
+            iteration,
+        )
+        .with_context(|| format!("export benchmark failed for {}", path.display()))?;
+        measurements.push(export_measurement_from_run(iteration, export));
+    }
+
+    write_export_measurements(&mut io::stdout().lock(), &measurements)?;
     Ok(())
 }
 
@@ -228,12 +328,83 @@ fn run_measured_scan(
     Ok(MeasuredScan { run, memory })
 }
 
+fn run_measured_export(
+    path: PathBuf,
+    sample_interval: Duration,
+    scanner: ScannerMode,
+    include_directories: bool,
+    output_dir: Option<PathBuf>,
+    iteration: usize,
+) -> Result<MeasuredExport> {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = export_once(path, scanner, include_directories, output_dir, iteration)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+
+    let mut memory = MemoryPeak::default();
+    let run = loop {
+        memory.observe(current_process_memory()?);
+        match receiver.recv_timeout(sample_interval) {
+            Ok(result) => break result.map_err(|error| anyhow!(error))?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("export worker stopped"));
+            }
+        }
+    };
+    handle
+        .join()
+        .map_err(|_| anyhow!("export worker panicked"))?;
+    memory.observe(current_process_memory()?);
+
+    Ok(MeasuredExport { run, memory })
+}
+
 fn scan_once(path: PathBuf, scanner: ScannerMode) -> Result<ScanRun> {
     let started = Instant::now();
     let outcome = scan_path(path, scanner)?;
 
     Ok(ScanRun {
         elapsed_ms: started.elapsed().as_millis(),
+        scanner: outcome.scanner,
+        fallback: outcome.fallback,
+        summary: outcome.summary,
+    })
+}
+
+fn export_once(
+    path: PathBuf,
+    scanner: ScannerMode,
+    include_directories: bool,
+    output_dir: Option<PathBuf>,
+    iteration: usize,
+) -> Result<ExportRun> {
+    let total_started = Instant::now();
+    let scan_started = Instant::now();
+    let outcome = scan_graph_path(path, scanner)?;
+    let scan_elapsed_ms = scan_started.elapsed().as_millis();
+
+    let export_started = Instant::now();
+    let options = CsvExportOptions {
+        include_directories,
+    };
+    let export_bytes = if let Some(output_dir) = output_dir {
+        let output_path = output_dir.join(format!("diskloom-export-{iteration:03}.csv"));
+        let file = File::create(&output_path)
+            .with_context(|| format!("failed to create {}", output_path.display()))?;
+        export_graph(file, &outcome.graph, options)?
+    } else {
+        export_graph(io::sink(), &outcome.graph, options)?
+    };
+    let export_elapsed_ms = export_started.elapsed().as_millis();
+
+    Ok(ExportRun {
+        scan_elapsed_ms,
+        export_elapsed_ms,
+        total_elapsed_ms: total_started.elapsed().as_millis(),
+        export_bytes,
         scanner: outcome.scanner,
         fallback: outcome.fallback,
         summary: outcome.summary,
@@ -247,43 +418,63 @@ struct ScanOutcome {
     summary: ScanSummary,
 }
 
+#[derive(Debug)]
+struct ScanGraphOutcome {
+    scanner: &'static str,
+    fallback: bool,
+    graph: FileGraph,
+    summary: ScanSummary,
+}
+
 fn scan_path(path: PathBuf, scanner: ScannerMode) -> Result<ScanOutcome> {
+    let outcome = scan_graph_path(path, scanner)?;
+    Ok(ScanOutcome {
+        scanner: outcome.scanner,
+        fallback: outcome.fallback,
+        summary: outcome.summary,
+    })
+}
+
+fn scan_graph_path(path: PathBuf, scanner: ScannerMode) -> Result<ScanGraphOutcome> {
     match scanner {
-        ScannerMode::Fallback => scan_fallback(path, false),
-        ScannerMode::Ntfs => scan_ntfs(&path),
+        ScannerMode::Fallback => scan_graph_fallback(path, false),
+        ScannerMode::Ntfs => scan_graph_ntfs(&path),
         ScannerMode::Auto => {
             if drive_volume(&path).is_some() {
-                match scan_ntfs(&path) {
+                match scan_graph_ntfs(&path) {
                     Ok(outcome) => Ok(outcome),
-                    Err(_) => scan_fallback(path, true),
+                    Err(_) => scan_graph_fallback(path, true),
                 }
             } else {
-                scan_fallback(path, false)
+                scan_graph_fallback(path, false)
             }
         }
     }
 }
 
-fn scan_fallback(path: PathBuf, fallback: bool) -> Result<ScanOutcome> {
-    let (_, summary) = FallbackScanner::scan(ScanOptions {
+fn scan_graph_fallback(path: PathBuf, fallback: bool) -> Result<ScanGraphOutcome> {
+    let (graph, summary) = FallbackScanner::scan(ScanOptions {
         root: path,
         follow_symlinks: false,
     })?;
 
-    Ok(ScanOutcome {
+    Ok(ScanGraphOutcome {
         scanner: "fallback",
         fallback,
+        graph,
         summary,
     })
 }
 
-fn scan_ntfs(path: &Path) -> Result<ScanOutcome> {
+fn scan_graph_ntfs(path: &Path) -> Result<ScanGraphOutcome> {
     let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
     let graph = NtfsScanner::scan_volume(&volume)?;
-    Ok(ScanOutcome {
+    let summary = summary_from_graph(&graph);
+    Ok(ScanGraphOutcome {
         scanner: "ntfs",
         fallback: false,
-        summary: summary_from_graph(&graph),
+        graph,
+        summary,
     })
 }
 
@@ -340,6 +531,32 @@ fn measurement_from_run(iteration: usize, scan: MeasuredScan) -> ScanMeasurement
     }
 }
 
+fn export_measurement_from_run(iteration: usize, export: MeasuredExport) -> ExportMeasurement {
+    let summary = export.run.summary;
+    ExportMeasurement {
+        iteration,
+        scanner: export.run.scanner,
+        fallback: export.run.fallback,
+        scan_elapsed_ms: export.run.scan_elapsed_ms,
+        export_elapsed_ms: export.run.export_elapsed_ms,
+        total_elapsed_ms: export.run.total_elapsed_ms,
+        export_bytes: export.run.export_bytes,
+        entries: summary.entries,
+        files: summary.files,
+        directories: summary.directories,
+        inaccessible: summary.inaccessible,
+        peak_working_set_bytes: export.memory.peak_working_set_bytes,
+        peak_private_bytes: export.memory.peak_private_bytes,
+        final_working_set_bytes: export.memory.final_working_set_bytes,
+        final_private_bytes: export.memory.final_private_bytes,
+        peak_private_bytes_per_million_entries: per_million(
+            export.memory.peak_private_bytes,
+            summary.entries,
+        ),
+        memory_samples: export.memory.samples,
+    }
+}
+
 impl MemoryPeak {
     fn observe(&mut self, sample: MemorySample) {
         self.samples += 1;
@@ -355,6 +572,40 @@ fn per_million(value: u64, count: u64) -> u64 {
         return 0;
     }
     ((u128::from(value) * 1_000_000) / u128::from(count)) as u64
+}
+
+fn export_graph<W: Write>(writer: W, graph: &FileGraph, options: CsvExportOptions) -> Result<u64> {
+    let mut writer = CountingWriter::new(writer);
+    export_csv(graph, &mut writer, options)?;
+    Ok(writer.bytes())
+}
+
+#[derive(Debug)]
+struct CountingWriter<W> {
+    inner: W,
+    bytes: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, bytes: 0 }
+    }
+
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.bytes = self.bytes.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[cfg(windows)]
@@ -457,6 +708,40 @@ fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement])
             measurement.scanner,
             u8::from(measurement.fallback),
             measurement.elapsed_ms,
+            measurement.entries,
+            measurement.files,
+            measurement.directories,
+            measurement.inaccessible,
+            measurement.peak_working_set_bytes,
+            measurement.peak_private_bytes,
+            measurement.final_working_set_bytes,
+            measurement.final_private_bytes,
+            measurement.peak_private_bytes_per_million_entries,
+            measurement.memory_samples
+        )?;
+    }
+    Ok(())
+}
+
+fn write_export_measurements(
+    writer: &mut impl Write,
+    measurements: &[ExportMeasurement],
+) -> Result<()> {
+    writeln!(
+        writer,
+        "iteration,scanner,fallback,scan_elapsed_ms,export_elapsed_ms,total_elapsed_ms,export_bytes,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
+    )?;
+    for measurement in measurements {
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            measurement.iteration,
+            measurement.scanner,
+            u8::from(measurement.fallback),
+            measurement.scan_elapsed_ms,
+            measurement.export_elapsed_ms,
+            measurement.total_elapsed_ms,
+            measurement.export_bytes,
             measurement.entries,
             measurement.files,
             measurement.directories,
@@ -688,9 +973,10 @@ fn write_public_comparison(writer: &mut impl Write, comparison: &PublicCompariso
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasurementSummary, PublicClaimId, ScanMeasurement, compare_summary_to_claim,
-        parse_measurements, per_million, public_claim, ratio_decimal, summarize_rows,
-        write_measurements, write_public_comparison, write_summary,
+        CountingWriter, ExportMeasurement, MeasurementSummary, PublicClaimId, ScanMeasurement,
+        compare_summary_to_claim, parse_measurements, per_million, public_claim, ratio_decimal,
+        summarize_rows, write_export_measurements, write_measurements, write_public_comparison,
+        write_summary,
     };
 
     #[test]
@@ -717,6 +1003,44 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("1,fallback,0,10,3,2,1,0,100,90,80,70,30000000,4"));
+    }
+
+    #[test]
+    fn write_export_measurements_should_emit_csv_rows() {
+        let measurements = [ExportMeasurement {
+            iteration: 1,
+            scanner: "fallback",
+            fallback: false,
+            scan_elapsed_ms: 10,
+            export_elapsed_ms: 3,
+            total_elapsed_ms: 13,
+            export_bytes: 120,
+            entries: 3,
+            files: 2,
+            directories: 1,
+            inaccessible: 0,
+            peak_working_set_bytes: 100,
+            peak_private_bytes: 90,
+            final_working_set_bytes: 80,
+            final_private_bytes: 70,
+            peak_private_bytes_per_million_entries: 30_000_000,
+            memory_samples: 4,
+        }];
+        let mut output = Vec::new();
+
+        write_export_measurements(&mut output, &measurements).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("1,fallback,0,10,3,13,120,3,2,1,0,100,90,80,70,30000000,4"));
+    }
+
+    #[test]
+    fn counting_writer_should_track_written_bytes() {
+        let mut writer = CountingWriter::new(Vec::new());
+
+        std::io::Write::write_all(&mut writer, b"diskloom").unwrap();
+
+        assert_eq!(writer.bytes(), 8);
     }
 
     #[test]
