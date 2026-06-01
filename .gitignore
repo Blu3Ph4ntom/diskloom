@@ -1,0 +1,9 @@
+.agent/
+target/
+*.pdb
+*.ilk
+*.log
+*.tmp
+*.bak
+dist/
+release/
