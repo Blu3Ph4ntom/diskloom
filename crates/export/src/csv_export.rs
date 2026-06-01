@@ -87,3 +87,53 @@ fn write_entry<W: Write>(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use diskloom_core::{FileGraphBuilder, FileKind};
+
+    use super::{CsvExportOptions, export_csv};
+
+    #[test]
+    fn export_csv_should_escape_paths_and_names() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "a,b.txt", FileKind::File, 5, 8, 0)
+            .unwrap();
+        let graph = builder.finish();
+
+        let mut output = Vec::new();
+        export_csv(&graph, &mut output, CsvExportOptions::default()).unwrap();
+        let csv = String::from_utf8(output).unwrap();
+
+        assert!(csv.contains("\"a,b.txt\""));
+    }
+
+    #[test]
+    fn export_csv_should_skip_directories_when_requested() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "file.txt", FileKind::File, 5, 8, 0)
+            .unwrap();
+        let graph = builder.finish();
+
+        let mut output = Vec::new();
+        export_csv(
+            &graph,
+            &mut output,
+            CsvExportOptions {
+                include_directories: false,
+            },
+        )
+        .unwrap();
+        let csv = String::from_utf8(output).unwrap();
+
+        assert!(!csv.contains(",directory,"));
+    }
+}
