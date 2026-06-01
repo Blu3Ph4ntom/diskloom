@@ -70,6 +70,8 @@ enum Command {
         include_directories: bool,
         #[arg(long, value_enum)]
         claim: Vec<PublicClaimId>,
+        #[arg(long)]
+        competitor_csv: Option<PathBuf>,
     },
     Dataset {
         root: PathBuf,
@@ -417,6 +419,7 @@ struct SuiteReport<'a> {
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
     comparisons: &'a [PublicComparison],
+    same_machine_comparisons: &'a [SameMachineComparison],
     audit_rows: &'a [SuiteAuditRow],
 }
 
@@ -428,6 +431,7 @@ struct SuiteManifest<'a> {
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
     comparisons: &'a [PublicComparison],
+    same_machine_comparisons: &'a [SameMachineComparison],
     audit_rows: &'a [SuiteAuditRow],
 }
 
@@ -443,6 +447,7 @@ struct SuiteOptions {
     scanner: ScannerMode,
     include_directories: bool,
     claims: Vec<PublicClaimId>,
+    competitor_csv: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -482,6 +487,7 @@ fn main() -> Result<()> {
             scanner,
             include_directories,
             claim,
+            competitor_csv,
         } => run_suite(SuiteOptions {
             path,
             output_dir,
@@ -493,6 +499,7 @@ fn main() -> Result<()> {
             scanner,
             include_directories,
             claims: claim,
+            competitor_csv,
         }),
         Command::Dataset {
             root,
@@ -599,9 +606,15 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .iter()
         .map(|comparison| comparison.claim_id)
         .collect();
+    let same_machine_comparisons = suite_same_machine_comparisons(&options, &scan_summary)?;
     let run_context = detect_suite_run_context();
     let environment = detect_benchmark_environment(&options.path);
-    let audit_rows = suite_audit_rows(&options, &run_context, &comparisons);
+    let audit_rows = suite_audit_rows(
+        &options,
+        &run_context,
+        &comparisons,
+        &same_machine_comparisons,
+    );
 
     let scan_csv = options.output_dir.join("scan.csv");
     let mut scan_file = File::create(&scan_csv)
@@ -622,6 +635,11 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     let mut comparison_file = File::create(&comparison_csv)
         .with_context(|| format!("failed to create {}", comparison_csv.display()))?;
     write_public_comparisons(&mut comparison_file, &comparisons)?;
+
+    let same_machine_csv = options.output_dir.join("same-machine-comparison.csv");
+    let mut same_machine_file = File::create(&same_machine_csv)
+        .with_context(|| format!("failed to create {}", same_machine_csv.display()))?;
+    write_same_machine_comparisons(&mut same_machine_file, &same_machine_comparisons)?;
 
     let audit_csv = options.output_dir.join("audit.csv");
     let mut audit_file = File::create(&audit_csv)
@@ -654,6 +672,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         scan_summary: &scan_summary,
         export_summary: &export_summary,
         comparisons: &comparisons,
+        same_machine_comparisons: &same_machine_comparisons,
         audit_rows: &audit_rows,
     };
 
@@ -664,6 +683,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         scan_summary: &scan_summary,
         export_summary: &export_summary,
         comparisons: &comparisons,
+        same_machine_comparisons: &same_machine_comparisons,
         audit_rows: &audit_rows,
     };
 
@@ -687,6 +707,11 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     writeln!(stdout, "scan summary: {}", scan_summary_csv.display())?;
     writeln!(stdout, "export: {}", export_csv.display())?;
     writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
+    writeln!(
+        stdout,
+        "same-machine comparison: {}",
+        same_machine_csv.display()
+    )?;
     writeln!(stdout, "audit: {}", audit_csv.display())?;
     writeln!(stdout, "metadata: {}", metadata_txt.display())?;
     writeln!(stdout, "manifest: {}", manifest_json.display())?;
@@ -1222,6 +1247,24 @@ fn compare_competitor_measurements(
     )?;
     write_same_machine_comparisons(&mut io::stdout().lock(), &comparisons)?;
     Ok(())
+}
+
+fn suite_same_machine_comparisons(
+    options: &SuiteOptions,
+    diskloom_summary: &MeasurementSummary,
+) -> Result<Vec<SameMachineComparison>> {
+    let Some(competitor_csv) = &options.competitor_csv else {
+        return Ok(Vec::new());
+    };
+    let input = fs::read_to_string(competitor_csv)
+        .with_context(|| format!("failed to read {}", competitor_csv.display()))?;
+    let rows = parse_competitor_measurements(&input)?;
+    compare_summary_to_competitors(
+        diskloom_summary,
+        &rows,
+        &options.dataset_label,
+        &options.cache_state,
+    )
 }
 
 fn selected_claims(claims: &[PublicClaimId]) -> Vec<PublicClaimId> {
@@ -1898,6 +1941,7 @@ fn suite_audit_rows(
     options: &SuiteOptions,
     run_context: &SuiteRunContext,
     comparisons: &[PublicComparison],
+    same_machine_comparisons: &[SameMachineComparison],
 ) -> Vec<SuiteAuditRow> {
     let mut rows = Vec::new();
 
@@ -1948,6 +1992,31 @@ fn suite_audit_rows(
             "Git worktree was not clean; record the exact diff if publishing.",
         )
     });
+
+    rows.push(
+        if same_machine_comparisons
+            .iter()
+            .any(|comparison| comparison.validity == "same_machine_user_supplied")
+        {
+            SuiteAuditRow::new(
+                "same_machine_competitors",
+                AuditStatus::Pass,
+                "At least one matched same-machine competitor row is recorded.",
+            )
+        } else if options.competitor_csv.is_some() {
+            SuiteAuditRow::new(
+                "same_machine_competitors",
+                AuditStatus::Warning,
+                "Competitor CSV was supplied, but no rows matched the suite dataset/cache context.",
+            )
+        } else {
+            SuiteAuditRow::new(
+                "same_machine_competitors",
+                AuditStatus::Warning,
+                "No same-machine competitor CSV was supplied.",
+            )
+        },
+    );
 
     rows.push(if comparisons.is_empty() {
         SuiteAuditRow::new(
@@ -2172,6 +2241,43 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         report.export_summary.peak_private_bytes_max
     )?;
     writeln!(writer)?;
+    writeln!(writer, "## Same-Machine Competitor Comparisons")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| tool | version | context | scope | competitor median/range ms | DiskLoom median/range ms | ratio | competitor peak private bytes | DiskLoom peak private bytes | validity |"
+    )?;
+    writeln!(
+        writer,
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )?;
+    for comparison in report.same_machine_comparisons {
+        writeln!(
+            writer,
+            "| {} | {} | {} | {} | {} / {}-{} | {} / {}-{} | {} | {} | {} | {} |",
+            comparison.tool,
+            comparison.version,
+            comparison.context_match,
+            comparison.scanner_scope,
+            comparison.competitor_elapsed_ms_median,
+            comparison.competitor_elapsed_ms_min,
+            comparison.competitor_elapsed_ms_max,
+            comparison.diskloom_elapsed_ms_median,
+            comparison.diskloom_elapsed_ms_min,
+            comparison.diskloom_elapsed_ms_max,
+            comparison.diskloom_vs_competitor_median_ratio,
+            optional_u64_csv(comparison.competitor_peak_private_bytes_max),
+            comparison.diskloom_peak_private_bytes_max,
+            comparison.validity
+        )?;
+    }
+    if report.same_machine_comparisons.is_empty() {
+        writeln!(
+            writer,
+            "No same-machine competitor rows were supplied for this suite."
+        )?;
+    }
+    writeln!(writer)?;
     writeln!(writer, "## Public WizTree Reference Claims")?;
     writeln!(writer)?;
     writeln!(
@@ -2227,6 +2333,14 @@ fn write_suite_metadata(
     writeln!(writer, "git_dirty={}", run_context.git_dirty)?;
     writeln!(writer, "dataset_label={}", options.dataset_label)?;
     writeln!(writer, "cache_state={}", options.cache_state)?;
+    writeln!(
+        writer,
+        "competitor_csv={}",
+        options
+            .competitor_csv
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string())
+    )?;
     writeln!(writer, "detected_volume_root={}", environment.volume_root)?;
     writeln!(writer, "detected_filesystem={}", environment.file_system)?;
     writeln!(writer, "detected_drive_type={}", environment.drive_type)?;
@@ -2286,6 +2400,7 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
     let scan_summary = manifest.scan_summary;
     let export_summary = manifest.export_summary;
     let comparisons = manifest.comparisons;
+    let same_machine_comparisons = manifest.same_machine_comparisons;
     let audit_rows = manifest.audit_rows;
 
     writeln!(writer, "{{")?;
@@ -2339,6 +2454,16 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
         writer,
         "    \"cache_state\": {},",
         json_string(&options.cache_state)
+    )?;
+    writeln!(
+        writer,
+        "    \"competitor_csv\": {},",
+        json_string(
+            &options
+                .competitor_csv
+                .as_ref()
+                .map_or_else(String::new, |path| path.display().to_string())
+        )
     )?;
     writeln!(
         writer,
@@ -2417,6 +2542,11 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
     writeln!(writer, "    {},", json_string("scan-summary.csv"))?;
     writeln!(writer, "    {},", json_string("export.csv"))?;
     writeln!(writer, "    {},", json_string("public-comparison.csv"))?;
+    writeln!(
+        writer,
+        "    {},",
+        json_string("same-machine-comparison.csv")
+    )?;
     writeln!(writer, "    {},", json_string("audit.csv"))?;
     writeln!(writer, "    {},", json_string("metadata.txt"))?;
     writeln!(writer, "    {},", json_string("manifest.json"))?;
@@ -2516,6 +2646,73 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
             json_string(row.status.label())
         )?;
         writeln!(writer, "      \"message\": {}", json_string(&row.message))?;
+        writeln!(writer, "    }}{suffix}")?;
+    }
+    writeln!(writer, "  ],")?;
+    writeln!(writer, "  \"same_machine_comparisons\": [")?;
+    for (idx, comparison) in same_machine_comparisons.iter().enumerate() {
+        let suffix = if idx + 1 == same_machine_comparisons.len() {
+            ""
+        } else {
+            ","
+        };
+        writeln!(writer, "    {{")?;
+        writeln!(writer, "      \"tool\": {},", json_string(&comparison.tool))?;
+        writeln!(
+            writer,
+            "      \"version\": {},",
+            json_string(&comparison.version)
+        )?;
+        writeln!(
+            writer,
+            "      \"dataset_label\": {},",
+            json_string(&comparison.dataset_label)
+        )?;
+        writeln!(
+            writer,
+            "      \"cache_state\": {},",
+            json_string(&comparison.cache_state)
+        )?;
+        writeln!(
+            writer,
+            "      \"scanner_scope\": {},",
+            json_string(&comparison.scanner_scope)
+        )?;
+        writeln!(
+            writer,
+            "      \"context_match\": {},",
+            json_string(comparison.context_match)
+        )?;
+        writeln!(
+            writer,
+            "      \"competitor_runs\": {},",
+            comparison.competitor_runs
+        )?;
+        writeln!(
+            writer,
+            "      \"diskloom_runs\": {},",
+            comparison.diskloom_runs
+        )?;
+        writeln!(
+            writer,
+            "      \"competitor_elapsed_ms_median\": {},",
+            comparison.competitor_elapsed_ms_median
+        )?;
+        writeln!(
+            writer,
+            "      \"diskloom_elapsed_ms_median\": {},",
+            comparison.diskloom_elapsed_ms_median
+        )?;
+        writeln!(
+            writer,
+            "      \"diskloom_vs_competitor_median_ratio\": {},",
+            json_string(&comparison.diskloom_vs_competitor_median_ratio)
+        )?;
+        writeln!(
+            writer,
+            "      \"validity\": {}",
+            json_string(comparison.validity)
+        )?;
         writeln!(writer, "    }}{suffix}")?;
     }
     writeln!(writer, "  ],")?;
@@ -2975,10 +3172,10 @@ mod tests {
         compare_summary_to_competitors, json_string, parse_competitor_measurements,
         parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
         selected_claims, shell_quote_arg, single_line_value, suite_audit_rows, suite_audit_status,
-        summarize_export_measurements, summarize_rows, write_export_measurements,
-        write_measurements, write_public_comparisons, write_same_machine_comparisons,
-        write_suite_audit, write_suite_manifest, write_suite_metadata, write_suite_report,
-        write_summary,
+        suite_same_machine_comparisons, summarize_export_measurements, summarize_rows,
+        write_export_measurements, write_measurements, write_public_comparisons,
+        write_same_machine_comparisons, write_suite_audit, write_suite_manifest,
+        write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -3465,35 +3662,77 @@ TreeSize,9.0,other,warm,traversal,2000,
 
     #[test]
     fn write_same_machine_comparisons_should_emit_csv_rows() {
-        let comparison = super::SameMachineComparison {
-            tool: "WizTree".to_owned(),
-            version: "4.25".to_owned(),
-            dataset_label: "workstation-c".to_owned(),
-            cache_state: "warm".to_owned(),
-            scanner_scope: "ntfs_mft".to_owned(),
-            context_match: "matched",
-            competitor_runs: 2,
-            diskloom_runs: 3,
-            competitor_elapsed_ms_min: 500,
-            competitor_elapsed_ms_median: 600,
-            competitor_elapsed_ms_max: 700,
-            diskloom_elapsed_ms_min: 900,
-            diskloom_elapsed_ms_median: 1_000,
-            diskloom_elapsed_ms_max: 1_100,
-            diskloom_vs_competitor_median_ratio: "1.666".to_owned(),
-            competitor_peak_private_bytes_max: Some(50),
-            diskloom_peak_private_bytes_max: 95,
-            diskloom_private_bytes_delta: Some(45),
-            validity: "same_machine_user_supplied",
-        };
+        let comparison = sample_same_machine_comparison();
         let mut output = Vec::new();
 
         write_same_machine_comparisons(&mut output, &[comparison]).unwrap();
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("tool,version,dataset_label,cache_state"));
-        assert!(output.contains("WizTree,4.25,workstation-c,warm,ntfs_mft,matched"));
+        assert!(output.contains("WizTree,4.25,repo-smoke,warm,ntfs_mft,matched"));
         assert!(output.contains("same_machine_user_supplied"));
+    }
+
+    #[test]
+    fn suite_same_machine_comparisons_should_return_empty_without_input() {
+        let options = SuiteOptions {
+            path: std::path::PathBuf::from("."),
+            output_dir: std::path::PathBuf::from("target/bench-suite"),
+            dataset_label: "repo-smoke".to_owned(),
+            cache_state: "warm".to_owned(),
+            iterations: 3,
+            sample_ms: 10,
+            progress_every: 1024,
+            scanner: super::ScannerMode::Fallback,
+            include_directories: true,
+            claims: Vec::new(),
+            competitor_csv: None,
+        };
+
+        let comparisons =
+            suite_same_machine_comparisons(&options, &sample_measurement_summary()).unwrap();
+
+        assert!(comparisons.is_empty());
+    }
+
+    #[test]
+    fn suite_same_machine_comparisons_should_read_competitor_csv() {
+        let competitor_csv = std::env::temp_dir().join(format!(
+            "diskloom-suite-competitors-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &competitor_csv,
+            "\
+tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
+WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
+WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
+",
+        )
+        .unwrap();
+        let options = SuiteOptions {
+            path: std::path::PathBuf::from("."),
+            output_dir: std::path::PathBuf::from("target/bench-suite"),
+            dataset_label: "repo-smoke".to_owned(),
+            cache_state: "warm".to_owned(),
+            iterations: 3,
+            sample_ms: 10,
+            progress_every: 1024,
+            scanner: super::ScannerMode::Fallback,
+            include_directories: true,
+            claims: Vec::new(),
+            competitor_csv: Some(competitor_csv.clone()),
+        };
+
+        let comparisons =
+            suite_same_machine_comparisons(&options, &sample_measurement_summary()).unwrap();
+        std::fs::remove_file(competitor_csv).unwrap();
+
+        assert_eq!(comparisons[0].validity, "same_machine_user_supplied");
     }
 
     #[test]
@@ -3578,6 +3817,7 @@ TreeSize,9.0,other,warm,traversal,2000,
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
                 comparisons: &comparisons,
+                same_machine_comparisons: &[],
                 audit_rows: &audit_rows,
             },
         )
@@ -3598,6 +3838,60 @@ TreeSize,9.0,other,warm,traversal,2000,
         assert!(output.contains("Cache state: `warm`"));
         assert!(output.contains("## Benchmark Audit"));
         assert!(output.contains("Overall status: `warning`"));
+        assert!(output.contains("## Same-Machine Competitor Comparisons"));
+        assert!(output.contains("No same-machine competitor rows were supplied"));
+    }
+
+    #[test]
+    fn write_suite_report_should_include_same_machine_comparisons() {
+        let scan_summary = sample_measurement_summary();
+        let export_summary = ExportSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            export_bytes_min: 100,
+            export_bytes_max: 120,
+            scan_elapsed_ms_median: 10,
+            export_elapsed_ms_min: 3,
+            export_elapsed_ms_median: 5,
+            export_elapsed_ms_max: 7,
+            total_elapsed_ms_median: 15,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let same_machine_comparisons = [sample_same_machine_comparison()];
+        let run_context = sample_run_context();
+        let environment = sample_environment();
+        let mut output = Vec::new();
+
+        write_suite_report(
+            &mut output,
+            &SuiteReport {
+                path: std::path::Path::new("."),
+                output_dir: std::path::Path::new("target/bench-suite"),
+                dataset_label: "repo-smoke",
+                cache_state: "warm",
+                scanner: super::ScannerMode::Fallback,
+                iterations: 3,
+                sample_ms: 10,
+                progress_every: 1024,
+                include_directories: true,
+                run_context: &run_context,
+                environment: &environment,
+                scan_summary: &scan_summary,
+                export_summary: &export_summary,
+                comparisons: &[],
+                same_machine_comparisons: &same_machine_comparisons,
+                audit_rows: &[],
+            },
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("| WizTree | 4.25 | matched | ntfs_mft |"));
     }
 
     #[test]
@@ -3613,6 +3907,7 @@ TreeSize,9.0,other,warm,traversal,2000,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
             claims: Vec::new(),
+            competitor_csv: None,
         };
         let run_context = sample_run_context();
         let environment = sample_environment();
@@ -3661,6 +3956,7 @@ TreeSize,9.0,other,warm,traversal,2000,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
             claims: Vec::new(),
+            competitor_csv: None,
         };
         let summary = MeasurementSummary {
             runs: 1,
@@ -3682,8 +3978,14 @@ TreeSize,9.0,other,warm,traversal,2000,
             &summary,
             public_claim(PublicClaimId::WizTreeSsd460Gb),
         )];
+        let same_machine_comparisons = [sample_same_machine_comparison()];
 
-        let rows = suite_audit_rows(&options, &sample_run_context(), &comparisons);
+        let rows = suite_audit_rows(
+            &options,
+            &sample_run_context(),
+            &comparisons,
+            &same_machine_comparisons,
+        );
 
         assert!(
             rows.iter()
@@ -3693,6 +3995,9 @@ TreeSize,9.0,other,warm,traversal,2000,
             rows.iter()
                 .any(|row| { row.check == "public_claims" && row.status == AuditStatus::Warning })
         );
+        assert!(rows.iter().any(|row| {
+            row.check == "same_machine_competitors" && row.status == AuditStatus::Pass
+        }));
         assert_eq!(suite_audit_status(&rows), AuditStatus::Fail);
     }
 
@@ -3724,6 +4029,7 @@ TreeSize,9.0,other,warm,traversal,2000,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
             claims: Vec::new(),
+            competitor_csv: None,
         };
         let scan_summary = MeasurementSummary {
             runs: 3,
@@ -3762,9 +4068,15 @@ TreeSize,9.0,other,warm,traversal,2000,
             &scan_summary,
             public_claim(PublicClaimId::WizTreeSsd460Gb),
         )];
+        let same_machine_comparisons = [sample_same_machine_comparison()];
         let run_context = sample_run_context();
         let environment = sample_environment();
-        let audit_rows = suite_audit_rows(&options, &run_context, &comparisons);
+        let audit_rows = suite_audit_rows(
+            &options,
+            &run_context,
+            &comparisons,
+            &same_machine_comparisons,
+        );
         let manifest = SuiteManifest {
             options: &options,
             run_context: &run_context,
@@ -3772,6 +4084,7 @@ TreeSize,9.0,other,warm,traversal,2000,
             scan_summary: &scan_summary,
             export_summary: &export_summary,
             comparisons: &comparisons,
+            same_machine_comparisons: &same_machine_comparisons,
             audit_rows: &audit_rows,
         };
         let mut output = Vec::new();
@@ -3783,9 +4096,13 @@ TreeSize,9.0,other,warm,traversal,2000,
         assert!(output.contains("\"audit_status\": \"warning\""));
         assert!(output.contains("\"dataset_label\": \"repo-smoke\""));
         assert!(output.contains("\"cache_state\": \"warm\""));
+        assert!(output.contains("\"competitor_csv\": \"\""));
         assert!(output.contains("\"audit.csv\""));
         assert!(output.contains("\"manifest.json\""));
         assert!(output.contains("\"claim_id\": \"wiztree-ssd-460gb\""));
+        assert!(output.contains("\"same-machine-comparison.csv\""));
+        assert!(output.contains("\"same_machine_comparisons\""));
+        assert!(output.contains("\"tool\": \"WizTree\""));
     }
 
     #[test]
@@ -3867,6 +4184,49 @@ TreeSize,9.0,other,warm,traversal,2000,
             command_line: "diskloom-bench suite . target/bench-suite".to_owned(),
             git_revision: "abcdef123456".to_owned(),
             git_dirty: "false".to_owned(),
+        }
+    }
+
+    fn sample_measurement_summary() -> MeasurementSummary {
+        MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 900,
+            elapsed_ms_median: 1_000,
+            elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 120,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        }
+    }
+
+    fn sample_same_machine_comparison() -> super::SameMachineComparison {
+        super::SameMachineComparison {
+            tool: "WizTree".to_owned(),
+            version: "4.25".to_owned(),
+            dataset_label: "repo-smoke".to_owned(),
+            cache_state: "warm".to_owned(),
+            scanner_scope: "ntfs_mft".to_owned(),
+            context_match: "matched",
+            competitor_runs: 2,
+            diskloom_runs: 3,
+            competitor_elapsed_ms_min: 500,
+            competitor_elapsed_ms_median: 600,
+            competitor_elapsed_ms_max: 700,
+            diskloom_elapsed_ms_min: 900,
+            diskloom_elapsed_ms_median: 1_000,
+            diskloom_elapsed_ms_max: 1_100,
+            diskloom_vs_competitor_median_ratio: "1.666".to_owned(),
+            competitor_peak_private_bytes_max: Some(50),
+            diskloom_peak_private_bytes_max: 95,
+            diskloom_private_bytes_delta: Some(45),
+            validity: "same_machine_user_supplied",
         }
     }
 }

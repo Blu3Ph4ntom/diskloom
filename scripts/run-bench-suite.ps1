@@ -8,6 +8,7 @@ param(
     [string]$OutputRoot = "target\bench-suites",
     [string]$DatasetLabel = "unspecified",
     [string]$CacheState = "unknown",
+    [string]$CompetitorCsv = "",
     [string[]]$Claim = @(),
     [switch]$FilesOnly,
     [switch]$SkipBuild
@@ -90,6 +91,10 @@ try {
         $suiteArgs += @("--include-directories", "false")
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($CompetitorCsv)) {
+        $suiteArgs += @("--competitor-csv", $CompetitorCsv)
+    }
+
     foreach ($claimId in $Claim) {
         if (-not [string]::IsNullOrWhiteSpace($claimId)) {
             $suiteArgs += @("--claim", $claimId)
@@ -104,6 +109,7 @@ try {
     Write-Host "Benchmark bundle: $outputDir"
     Write-Host "Report: $(Join-Path $outputDir "report.md")"
     Write-Host "Audit: $(Join-Path $outputDir "audit.csv")"
+    Write-Host "Same-machine comparison CSV: $(Join-Path $outputDir "same-machine-comparison.csv")"
     Write-Host "Public comparison CSV: $(Join-Path $outputDir "public-comparison.csv")"
 }
 finally {
