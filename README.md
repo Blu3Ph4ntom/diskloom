@@ -45,8 +45,8 @@ Early development. Implemented pieces include:
 - CSV export.
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
-- egui desktop shell with a scan control rail, discovered drive shortcuts, background scans, live progress counts, scanner mode selection, query-backed file filters, non-blocking CSV export, file actions, and tree, files, types, treemap, and duplicate-candidate tabs.
-- GUI scan cancellation through fallback and direct NTFS progress checkpoints.
+- Native Rust Win32 desktop shell with a scan control rail, discovered drive shortcuts, background scans, live progress counts, scanner mode selection, cancellation, and tree, files, types, and treemap tabs.
+- Query filters, CSV export, duplicate grouping, and Windows file actions remain implemented in shared crates and CLI paths; they are being rewired into the native GUI shell after the egui retirement.
 - Benchmark harness for repeated scan timing, sampled process memory, foreground tick-gap responsiveness, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 
 The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
