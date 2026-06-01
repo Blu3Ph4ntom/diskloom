@@ -8,8 +8,8 @@ use std::{
 use diskloom_core::{EntryFlags, FileGraph};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
-    FileTypeStat, SortKey, SortOrder, TreemapBounds, TreemapItem, TreemapRect, file_type_stats,
-    layout_treemap, sort_entries,
+    FileTypeStat, NameMatcher, QueryFilter, SortKey, SortOrder, TreemapBounds, TreemapItem,
+    TreemapRect, file_type_stats, layout_treemap, sort_entries,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 
@@ -17,6 +17,8 @@ use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 pub struct DiskLoomApp {
     path: String,
     scanner_mode: UiScannerMode,
+    filters: FilterInputs,
+    view_cache: Option<ViewCache>,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
@@ -50,23 +52,23 @@ impl UiScannerMode {
 enum UiState {
     Idle,
     Scanning,
-    Complete(ScanResult),
+    Complete(Box<ScanResult>),
     Error(String),
 }
 
 #[derive(Debug)]
 enum ScanMessage {
-    Complete(ScanResult),
+    Complete(Box<ScanResult>),
     Error(String),
 }
 
 #[derive(Debug)]
 struct ScanResult {
+    graph: FileGraph,
     summary: ScanSummary,
     elapsed_ms: u128,
     scanner_label: &'static str,
     fallback_reason: Option<String>,
-    rows: Vec<ResultRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
 }
@@ -79,11 +81,45 @@ struct ResultRow {
     allocated: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct FilterInputs {
+    name: String,
+    extension: String,
+    path: String,
+    min_size: String,
+    min_allocated: String,
+    regex: bool,
+    include_directories: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FilterSignature {
+    name: String,
+    extension: String,
+    path: String,
+    min_size: String,
+    min_allocated: String,
+    regex: bool,
+    include_directories: bool,
+}
+
+#[derive(Debug)]
+struct ViewCache {
+    signature: FilterSignature,
+    matched: usize,
+    rows: Vec<ResultRow>,
+}
+
 impl Default for DiskLoomApp {
     fn default() -> Self {
         Self {
             path: ".".to_owned(),
             scanner_mode: UiScannerMode::Auto,
+            filters: FilterInputs {
+                include_directories: true,
+                ..FilterInputs::default()
+            },
+            view_cache: None,
             active_tab: ActiveTab::Files,
             state: UiState::Idle,
             receiver: None,
@@ -139,6 +175,9 @@ impl eframe::App for DiskLoomApp {
             });
 
             ui.add_space(8.0);
+            self.filter_controls(ui);
+
+            ui.add_space(8.0);
             self.status_line(ui);
             ui.separator();
             self.tabs(ui);
@@ -163,18 +202,22 @@ impl DiskLoomApp {
 
         thread::spawn(move || {
             let started = Instant::now();
-            let result = scan_path(path, scanner_mode).map(|outcome| ScanResult {
-                summary: outcome.summary,
-                elapsed_ms: started.elapsed().as_millis(),
-                scanner_label: outcome.scanner_label,
-                fallback_reason: outcome.fallback_reason,
-                rows: rows_from_graph(&outcome.graph, 500),
-                file_types: file_type_stats(&outcome.graph, 50),
-                treemap_items: treemap_items_from_graph(&outcome.graph, 120),
+            let result = scan_path(path, scanner_mode).map(|outcome| {
+                let file_types = file_type_stats(&outcome.graph, 50);
+                let treemap_items = treemap_items_from_graph(&outcome.graph, 120);
+                ScanResult {
+                    graph: outcome.graph,
+                    summary: outcome.summary,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    scanner_label: outcome.scanner_label,
+                    fallback_reason: outcome.fallback_reason,
+                    file_types,
+                    treemap_items,
+                }
             });
 
             let message = match result {
-                Ok(result) => ScanMessage::Complete(result),
+                Ok(result) => ScanMessage::Complete(Box::new(result)),
                 Err(error) => ScanMessage::Error(error),
             };
             let _ = sender.send(message);
@@ -189,16 +232,72 @@ impl DiskLoomApp {
         match receiver.try_recv() {
             Ok(ScanMessage::Complete(result)) => {
                 self.state = UiState::Complete(result);
+                self.view_cache = None;
             }
             Ok(ScanMessage::Error(error)) => {
                 self.state = UiState::Error(error);
+                self.view_cache = None;
             }
             Err(mpsc::TryRecvError::Empty) => {
                 self.receiver = Some(receiver);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.state = UiState::Error("scan worker stopped".to_owned());
+                self.view_cache = None;
             }
+        }
+    }
+
+    fn filter_controls(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            changed |= ui
+                .add_sized(
+                    [180.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.name),
+                )
+                .changed();
+            changed |= ui.checkbox(&mut self.filters.regex, "Regex").changed();
+            ui.label("Ext");
+            changed |= ui
+                .add_sized(
+                    [80.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.extension),
+                )
+                .changed();
+            ui.label("Path");
+            changed |= ui
+                .add_sized(
+                    [180.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.path),
+                )
+                .changed();
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Min size");
+            changed |= ui
+                .add_sized(
+                    [100.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.min_size),
+                )
+                .changed();
+            ui.label("Min allocated");
+            changed |= ui
+                .add_sized(
+                    [100.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.min_allocated),
+                )
+                .changed();
+            changed |= ui
+                .checkbox(&mut self.filters.include_directories, "Dirs")
+                .changed();
+        });
+
+        if changed {
+            self.view_cache = None;
         }
     }
 
@@ -242,7 +341,7 @@ impl DiskLoomApp {
         });
     }
 
-    fn active_view(&self, ui: &mut egui::Ui) {
+    fn active_view(&mut self, ui: &mut egui::Ui) {
         match self.active_tab {
             ActiveTab::Files => self.results(ui),
             ActiveTab::Types => self.type_stats(ui),
@@ -250,10 +349,20 @@ impl DiskLoomApp {
         }
     }
 
-    fn results(&self, ui: &mut egui::Ui) {
+    fn results(&mut self, ui: &mut egui::Ui) {
         let UiState::Complete(result) = &self.state else {
             return;
         };
+        let graph_len = result.graph.len();
+        let cache = match self.ensure_view_cache() {
+            Ok(cache) => cache,
+            Err(error) => {
+                ui.colored_label(egui::Color32::from_rgb(255, 128, 104), error);
+                return;
+            }
+        };
+
+        ui.label(format!("{} of {} entries", cache.matched, graph_len));
 
         egui::ScrollArea::both()
             .auto_shrink([false; 2])
@@ -268,7 +377,7 @@ impl DiskLoomApp {
                         ui.strong("Path");
                         ui.end_row();
 
-                        for row in &result.rows {
+                        for row in &cache.rows {
                             ui.monospace(row.size.to_string());
                             ui.monospace(row.allocated.to_string());
                             ui.label(row.kind);
@@ -329,6 +438,29 @@ impl DiskLoomApp {
         for (idx, item) in treemap.iter().enumerate() {
             paint_treemap_rect(&painter, item, idx);
         }
+    }
+
+    fn ensure_view_cache(&mut self) -> Result<&ViewCache, String> {
+        let signature = self.filters.signature();
+        let is_fresh = self
+            .view_cache
+            .as_ref()
+            .is_some_and(|cache| cache.signature == signature);
+        if !is_fresh {
+            let UiState::Complete(result) = &self.state else {
+                return Err("no scan result".to_owned());
+            };
+            let filtered = filtered_rows_from_graph(&result.graph, &self.filters, 500)?;
+            self.view_cache = Some(ViewCache {
+                signature,
+                matched: filtered.matched,
+                rows: filtered.rows,
+            });
+        }
+
+        self.view_cache
+            .as_ref()
+            .ok_or_else(|| "view cache is empty".to_owned())
     }
 }
 
@@ -417,11 +549,60 @@ fn drive_volume(path: &Path) -> Option<String> {
     Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
-fn rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<ResultRow> {
-    let mut ids: Vec<_> = graph.ids().collect();
+#[derive(Debug)]
+struct FilteredRows {
+    matched: usize,
+    rows: Vec<ResultRow>,
+}
+
+impl FilterInputs {
+    fn signature(&self) -> FilterSignature {
+        FilterSignature {
+            name: self.name.clone(),
+            extension: self.extension.clone(),
+            path: self.path.clone(),
+            min_size: self.min_size.clone(),
+            min_allocated: self.min_allocated.clone(),
+            regex: self.regex,
+            include_directories: self.include_directories,
+        }
+    }
+
+    fn query_filter(&self) -> Result<QueryFilter, String> {
+        let name = matcher_from_input(&self.name, self.regex)?;
+        let path = matcher_from_input(&self.path, false)?;
+        let extension = trimmed_string(&self.extension);
+
+        Ok(QueryFilter {
+            name,
+            extension,
+            path,
+            min_size: parse_optional_u64("Min size", &self.min_size)?,
+            max_size: None,
+            min_allocated: parse_optional_u64("Min allocated", &self.min_allocated)?,
+            max_allocated: None,
+            modified_after: None,
+            modified_before: None,
+            include_directories: self.include_directories,
+        })
+    }
+}
+
+fn filtered_rows_from_graph(
+    graph: &FileGraph,
+    filters: &FilterInputs,
+    limit: usize,
+) -> Result<FilteredRows, String> {
+    let filter = filters
+        .query_filter()?
+        .compile()
+        .map_err(|error| error.to_string())?;
+    let mut ids: Vec<_> = filter.matching_ids(graph).collect();
+    let matched = ids.len();
     sort_entries(graph, &mut ids, SortKey::Size, SortOrder::Descending);
 
-    ids.into_iter()
+    let rows = ids
+        .into_iter()
         .take(limit)
         .filter_map(|id| {
             let stats = graph.stats(id)?;
@@ -439,7 +620,37 @@ fn rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<ResultRow> {
                 allocated: stats.total_allocated.bytes(),
             })
         })
-        .collect()
+        .collect();
+
+    Ok(FilteredRows { matched, rows })
+}
+
+fn matcher_from_input(value: &str, regex: bool) -> Result<Option<NameMatcher>, String> {
+    let Some(trimmed) = trimmed_string(value) else {
+        return Ok(None);
+    };
+    if regex {
+        NameMatcher::regex(&trimmed)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(Some(NameMatcher::contains(trimmed)))
+    }
+}
+
+fn trimmed_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn parse_optional_u64(label: &str, value: &str) -> Result<Option<u64>, String> {
+    let Some(trimmed) = trimmed_string(value) else {
+        return Ok(None);
+    };
+    trimmed
+        .parse()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a non-negative integer"))
 }
 
 fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem> {
@@ -496,5 +707,49 @@ fn paint_treemap_rect(painter: &egui::Painter, item: &TreemapRect, idx: usize) {
             egui::FontId::monospace(11.0),
             egui::Color32::from_rgb(246, 246, 238),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
+
+    use super::{FilterInputs, filtered_rows_from_graph, parse_optional_u64};
+
+    fn sample_graph() -> FileGraph {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "trace.log", FileKind::File, 40, 64, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "notes.txt", FileKind::File, 10, 16, 0)
+            .unwrap();
+        builder.finish()
+    }
+
+    #[test]
+    fn filtered_rows_should_apply_extension_and_size() {
+        let graph = sample_graph();
+        let filters = FilterInputs {
+            extension: "log".to_owned(),
+            min_size: "20".to_owned(),
+            include_directories: false,
+            ..FilterInputs::default()
+        };
+
+        let rows = filtered_rows_from_graph(&graph, &filters, 10).unwrap();
+
+        assert_eq!(rows.matched, 1);
+        assert_eq!(rows.rows[0].path, "root\\trace.log");
+    }
+
+    #[test]
+    fn parse_optional_u64_should_accept_empty_or_integer_values() {
+        assert_eq!(parse_optional_u64("Min size", "").unwrap(), None);
+        assert_eq!(parse_optional_u64("Min size", "42").unwrap(), Some(42));
+        assert!(parse_optional_u64("Min size", "abc").is_err());
     }
 }
