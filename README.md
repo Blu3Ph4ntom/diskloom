@@ -102,7 +102,8 @@ cargo run -p diskloom-ui
 Run the benchmark harness:
 
 ```powershell
-cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback
+cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback > target/bench.csv
+cargo run -p diskloom-bench -- summarize target\bench.csv
 ```
 
 See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.

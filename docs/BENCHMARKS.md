@@ -49,10 +49,17 @@ cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 
 cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --scanner fallback
 ```
 
+Summarize a captured CSV run:
+
+```powershell
+target\release\diskloom-bench.exe scan C:\ --iterations 5 --sample-ms 10 --scanner ntfs > target\bench-ntfs.csv
+target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+```
+
 Synthetic dataset generation:
 
 ```powershell
 cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
 ```
 
-The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness and competitor automation still need dedicated collectors before public claims are made.
+The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. The `summarize` command computes run count, scanner set, fallback count, elapsed median/range, and peak memory maxima from captured CSV rows. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness and competitor automation still need dedicated collectors before public claims are made.

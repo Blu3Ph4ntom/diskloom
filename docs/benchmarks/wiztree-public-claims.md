@@ -35,6 +35,13 @@ target\release\diskloom-bench.exe scan C:\ --scanner auto --iterations 5 --sampl
 target\release\diskloom-bench.exe scan C:\ --scanner fallback --iterations 5 --sample-ms 10
 ```
 
+Capture and summarize a run before comparing it with the claim matrix:
+
+```powershell
+target\release\diskloom-bench.exe scan C:\ --scanner ntfs --iterations 5 --sample-ms 10 > target\bench-ntfs.csv
+target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+```
+
 Use synthetic datasets for controlled fallback measurements:
 
 ```powershell
