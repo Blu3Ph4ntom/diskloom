@@ -21,10 +21,20 @@ pub struct FileRecordHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedFileRecord {
     pub header: FileRecordHeader,
+    pub standard_information: Option<StandardInformationAttribute>,
     pub file_names: Vec<FileNameAttribute>,
     pub data_size: u64,
     pub allocated_size: u64,
     pub data_runs: Vec<DataRun>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandardInformationAttribute {
+    pub created_unix: i64,
+    pub modified_unix: i64,
+    pub mft_changed_unix: i64,
+    pub accessed_unix: i64,
+    pub file_attributes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +110,8 @@ pub enum MftParseError {
     InvalidAttributeLength { offset: usize, length: u32 },
     #[error("NTFS runlist is invalid")]
     InvalidRunlist,
+    #[error("NTFS standard information attribute is invalid")]
+    InvalidStandardInformation,
     #[error("NTFS file name attribute is invalid")]
     InvalidFileName,
 }
@@ -113,6 +125,7 @@ pub fn parse_file_record(
     let header = FileRecordHeader::parse(&fixed)?;
     let mut parsed = ParsedFileRecord {
         header,
+        standard_information: None,
         file_names: Vec::new(),
         data_size: 0,
         allocated_size: 0,
@@ -121,6 +134,9 @@ pub fn parse_file_record(
 
     for attribute in iter_attributes(&fixed, header)? {
         match attribute.header.kind {
+            ATTR_STANDARD_INFORMATION if !attribute.header.non_resident => {
+                parsed.standard_information = Some(parse_standard_information(attribute.body)?);
+            }
             ATTR_FILE_NAME if !attribute.header.non_resident => {
                 parsed.file_names.push(parse_file_name(attribute.body)?);
             }
@@ -278,6 +294,25 @@ fn parse_data_attribute(
     Ok(())
 }
 
+fn parse_standard_information(input: &[u8]) -> Result<StandardInformationAttribute, MftParseError> {
+    let value = resident_value(input)?;
+    if value.len() < 32 {
+        return Err(MftParseError::InvalidStandardInformation);
+    }
+
+    Ok(StandardInformationAttribute {
+        created_unix: filetime_to_unix(read_u64(value, 0)),
+        modified_unix: filetime_to_unix(read_u64(value, 8)),
+        mft_changed_unix: filetime_to_unix(read_u64(value, 16)),
+        accessed_unix: filetime_to_unix(read_u64(value, 24)),
+        file_attributes: if value.len() >= 36 {
+            read_u32(value, 32)
+        } else {
+            0
+        },
+    })
+}
+
 fn parse_file_name(input: &[u8]) -> Result<FileNameAttribute, MftParseError> {
     if input.len() < 66 {
         return Err(MftParseError::InvalidFileName);
@@ -391,8 +426,8 @@ fn read_u64(input: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTR_DATA, ATTR_END, ATTR_FILE_NAME, DataRun, FileRecordHeader, MftParseError,
-        apply_fixups, parse_file_record, parse_runlist,
+        ATTR_DATA, ATTR_END, ATTR_FILE_NAME, ATTR_STANDARD_INFORMATION, DataRun, FileRecordHeader,
+        MftParseError, apply_fixups, parse_file_record, parse_runlist,
     };
 
     #[test]
@@ -487,7 +522,10 @@ mod tests {
         record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
         record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
 
-        let name_offset = 56_usize;
+        let standard_offset = 56_usize;
+        let standard_attr_len =
+            write_standard_information_attribute(&mut record[standard_offset..]);
+        let name_offset = standard_offset + standard_attr_len;
         let name_attr_len = write_file_name_attribute(&mut record[name_offset..], "hello.txt");
         let data_offset = name_offset + name_attr_len;
         let data_attr_len = write_data_attribute(&mut record[data_offset..]);
@@ -498,6 +536,9 @@ mod tests {
         let parsed = parse_file_record(&record, 512).unwrap();
 
         assert_eq!(parsed.header.record_number, 42);
+        let standard_information = parsed.standard_information.unwrap();
+        assert_eq!(standard_information.modified_unix, 200);
+        assert_eq!(standard_information.file_attributes, 0x20);
         assert_eq!(parsed.file_names[0].name, "hello.txt");
         assert_eq!(parsed.data_size, 16);
         assert_eq!(
@@ -507,6 +548,26 @@ mod tests {
                 clusters: 4
             }]
         );
+    }
+
+    fn write_standard_information_attribute(output: &mut [u8]) -> usize {
+        let value_len = 36_usize;
+        let attr_len = 24 + value_len;
+        output[0..4].copy_from_slice(&ATTR_STANDARD_INFORMATION.to_le_bytes());
+        output[4..8].copy_from_slice(&(attr_len as u32).to_le_bytes());
+        output[16..20].copy_from_slice(&(value_len as u32).to_le_bytes());
+        output[20..22].copy_from_slice(&24_u16.to_le_bytes());
+        output[24..32].copy_from_slice(&unix_to_filetime(100).to_le_bytes());
+        output[32..40].copy_from_slice(&unix_to_filetime(200).to_le_bytes());
+        output[40..48].copy_from_slice(&unix_to_filetime(300).to_le_bytes());
+        output[48..56].copy_from_slice(&unix_to_filetime(400).to_le_bytes());
+        output[56..60].copy_from_slice(&0x20_u32.to_le_bytes());
+        attr_len
+    }
+
+    fn unix_to_filetime(seconds: i64) -> u64 {
+        const WINDOWS_TO_UNIX_SECONDS: i64 = 11_644_473_600;
+        ((seconds + WINDOWS_TO_UNIX_SECONDS) as u64) * 10_000_000
     }
 
     fn write_file_name_attribute(output: &mut [u8], name: &str) -> usize {

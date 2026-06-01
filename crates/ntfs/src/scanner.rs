@@ -377,7 +377,9 @@ fn raw_entry_from_record(record_number: u64, parsed: &ParsedFileRecord) -> Optio
         },
         size,
         allocated,
-        modified_unix: name.modified_unix,
+        modified_unix: parsed
+            .standard_information
+            .map_or(name.modified_unix, |info| info.modified_unix),
         hard_links: parsed.header.hard_link_count,
     })
 }
@@ -514,7 +516,12 @@ fn to_wide(value: &str) -> Vec<u16> {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{NtfsRawEntry, ROOT_RECORD_NUMBER, build_graph_from_entries};
+    use super::{
+        NtfsRawEntry, ROOT_RECORD_NUMBER, build_graph_from_entries, raw_entry_from_record,
+    };
+    use crate::mft::{
+        FileNameAttribute, FileRecordHeader, ParsedFileRecord, StandardInformationAttribute,
+    };
     use diskloom_core::{EntryFlags, FileKind};
 
     #[cfg(windows)]
@@ -579,5 +586,46 @@ mod tests {
                 .flags
                 .contains(EntryFlags::HARD_LINK)
         );
+    }
+
+    #[test]
+    fn raw_entry_from_record_should_prefer_standard_information_modified_time() {
+        let parsed = ParsedFileRecord {
+            header: FileRecordHeader {
+                sequence_number: 1,
+                hard_link_count: 1,
+                first_attribute_offset: 56,
+                flags: 0x0001,
+                bytes_in_use: 0,
+                bytes_allocated: 0,
+                base_file_record: 0,
+                next_attribute_id: 0,
+                record_number: 42,
+            },
+            standard_information: Some(StandardInformationAttribute {
+                created_unix: 10,
+                modified_unix: 200,
+                mft_changed_unix: 300,
+                accessed_unix: 400,
+                file_attributes: 0x20,
+            }),
+            file_names: vec![FileNameAttribute {
+                parent_reference: ROOT_RECORD_NUMBER,
+                parent_record_number: ROOT_RECORD_NUMBER,
+                allocated_size: 16,
+                data_size: 10,
+                flags: 0,
+                modified_unix: 100,
+                namespace: 1,
+                name: "data.bin".to_owned(),
+            }],
+            data_size: 10,
+            allocated_size: 16,
+            data_runs: Vec::new(),
+        };
+
+        let entry = raw_entry_from_record(42, &parsed).unwrap();
+
+        assert_eq!(entry.modified_unix, 200);
     }
 }
