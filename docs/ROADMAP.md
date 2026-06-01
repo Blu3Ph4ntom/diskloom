@@ -23,7 +23,7 @@
 
 ## Milestone 3: GUI
 
-- Tree view sorted by size.
+- Tree view sorted by size. Initial bounded hierarchy tab done.
 - File view sorted by size. Initial implementation done.
 - Treemap. Initial implementation done.
 - File type stats. Initial implementation done.
