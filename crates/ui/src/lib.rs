@@ -1,11 +1,12 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
     time::Instant,
 };
 
 use diskloom_core::{EntryFlags, FileGraph};
+use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
     FileTypeStat, SortKey, SortOrder, TreemapBounds, TreemapItem, TreemapRect, file_type_stats,
     layout_treemap, sort_entries,
@@ -15,6 +16,7 @@ use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 #[derive(Debug)]
 pub struct DiskLoomApp {
     path: String,
+    scanner_mode: UiScannerMode,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
@@ -25,6 +27,23 @@ enum ActiveTab {
     Files,
     Types,
     Treemap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiScannerMode {
+    Auto,
+    Ntfs,
+    Fallback,
+}
+
+impl UiScannerMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Ntfs => "NTFS",
+            Self::Fallback => "Fallback",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -45,6 +64,8 @@ enum ScanMessage {
 struct ScanResult {
     summary: ScanSummary,
     elapsed_ms: u128,
+    scanner_label: &'static str,
+    fallback_reason: Option<String>,
     rows: Vec<ResultRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
@@ -62,6 +83,7 @@ impl Default for DiskLoomApp {
     fn default() -> Self {
         Self {
             path: ".".to_owned(),
+            scanner_mode: UiScannerMode::Auto,
             active_tab: ActiveTab::Files,
             state: UiState::Idle,
             receiver: None,
@@ -97,6 +119,26 @@ impl eframe::App for DiskLoomApp {
             });
 
             ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Scanner");
+                ui.selectable_value(
+                    &mut self.scanner_mode,
+                    UiScannerMode::Auto,
+                    UiScannerMode::Auto.label(),
+                );
+                ui.selectable_value(
+                    &mut self.scanner_mode,
+                    UiScannerMode::Ntfs,
+                    UiScannerMode::Ntfs.label(),
+                );
+                ui.selectable_value(
+                    &mut self.scanner_mode,
+                    UiScannerMode::Fallback,
+                    UiScannerMode::Fallback.label(),
+                );
+            });
+
+            ui.add_space(8.0);
             self.status_line(ui);
             ui.separator();
             self.tabs(ui);
@@ -112,28 +154,28 @@ impl eframe::App for DiskLoomApp {
 
 impl DiskLoomApp {
     fn start_scan(&mut self) {
-        let path = PathBuf::from(self.path.trim());
+        let trimmed = self.path.trim();
+        let path = PathBuf::from(if trimmed.is_empty() { "." } else { trimmed });
+        let scanner_mode = self.scanner_mode;
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         self.state = UiState::Scanning;
 
         thread::spawn(move || {
             let started = Instant::now();
-            let result = FallbackScanner::scan(ScanOptions {
-                root: path,
-                follow_symlinks: false,
-            })
-            .map(|(graph, summary)| ScanResult {
-                summary,
+            let result = scan_path(path, scanner_mode).map(|outcome| ScanResult {
+                summary: outcome.summary,
                 elapsed_ms: started.elapsed().as_millis(),
-                rows: rows_from_graph(&graph, 500),
-                file_types: file_type_stats(&graph, 50),
-                treemap_items: treemap_items_from_graph(&graph, 120),
+                scanner_label: outcome.scanner_label,
+                fallback_reason: outcome.fallback_reason,
+                rows: rows_from_graph(&outcome.graph, 500),
+                file_types: file_type_stats(&outcome.graph, 50),
+                treemap_items: treemap_items_from_graph(&outcome.graph, 120),
             });
 
             let message = match result {
                 Ok(result) => ScanMessage::Complete(result),
-                Err(error) => ScanMessage::Error(error.to_string()),
+                Err(error) => ScanMessage::Error(error),
             };
             let _ = sender.send(message);
         });
@@ -171,13 +213,20 @@ impl DiskLoomApp {
             }
             UiState::Complete(result) => {
                 ui.label(format!(
-                    "{} entries, {} files, {} directories, {} inaccessible, {} ms",
+                    "{} entries, {} files, {} directories, {} inaccessible, {} ms, {}",
                     result.summary.entries,
                     result.summary.files,
                     result.summary.directories,
                     result.summary.inaccessible,
-                    result.elapsed_ms
+                    result.elapsed_ms,
+                    result.scanner_label
                 ));
+                if let Some(reason) = &result.fallback_reason {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(224, 164, 82),
+                        format!("Fallback: {reason}"),
+                    );
+                }
             }
             UiState::Error(error) => {
                 ui.colored_label(egui::Color32::from_rgb(255, 128, 104), error);
@@ -281,6 +330,91 @@ impl DiskLoomApp {
             paint_treemap_rect(&painter, item, idx);
         }
     }
+}
+
+#[derive(Debug)]
+struct UiScanOutcome {
+    graph: FileGraph,
+    summary: ScanSummary,
+    scanner_label: &'static str,
+    fallback_reason: Option<String>,
+}
+
+fn scan_path(path: PathBuf, mode: UiScannerMode) -> Result<UiScanOutcome, String> {
+    match mode {
+        UiScannerMode::Fallback => scan_fallback(path, None),
+        UiScannerMode::Ntfs => scan_ntfs(&path),
+        UiScannerMode::Auto => {
+            if drive_volume(&path).is_some() {
+                match scan_ntfs(&path) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(error) => scan_fallback(path, Some(error)),
+                }
+            } else {
+                scan_fallback(path, None)
+            }
+        }
+    }
+}
+
+fn scan_fallback(path: PathBuf, fallback_reason: Option<String>) -> Result<UiScanOutcome, String> {
+    let (graph, summary) = FallbackScanner::scan(ScanOptions {
+        root: path,
+        follow_symlinks: false,
+    })
+    .map_err(|error| error.to_string())?;
+
+    Ok(UiScanOutcome {
+        graph,
+        summary,
+        scanner_label: "fallback traversal",
+        fallback_reason,
+    })
+}
+
+fn scan_ntfs(path: &Path) -> Result<UiScanOutcome, String> {
+    let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let graph = NtfsScanner::scan_volume(&volume).map_err(|error| error.to_string())?;
+    let summary = summary_from_graph(&graph);
+
+    Ok(UiScanOutcome {
+        graph,
+        summary,
+        scanner_label: "direct NTFS MFT",
+        fallback_reason: None,
+    })
+}
+
+fn summary_from_graph(graph: &FileGraph) -> ScanSummary {
+    let mut summary = ScanSummary {
+        entries: graph.len() as u64,
+        ..ScanSummary::default()
+    };
+
+    for id in graph.ids() {
+        let Some(entry) = graph.entry(id) else {
+            continue;
+        };
+        if entry.flags.contains(EntryFlags::DIRECTORY) {
+            summary.directories += 1;
+        } else {
+            summary.files += 1;
+        }
+    }
+
+    summary
+}
+
+fn drive_volume(path: &Path) -> Option<String> {
+    let value = path.to_string_lossy();
+    let trimmed = value.trim_end_matches(['\\', '/']);
+    let mut chars = trimmed.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' || chars.next().is_some() {
+        return None;
+    }
+
+    Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
 fn rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<ResultRow> {
