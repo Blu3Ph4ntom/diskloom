@@ -12,10 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+diskloom-core.workspace = true
+diskloom-query.workspace = true
 diskloom-scan.workspace = true
 eframe.workspace = true
 egui.workspace = true
 
 [lints]
 workspace = true
-

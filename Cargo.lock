@@ -542,6 +542,8 @@ name = "diskloom-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "diskloom-core",
+ "diskloom-query",
  "diskloom-scan",
  "eframe",
  "egui",
