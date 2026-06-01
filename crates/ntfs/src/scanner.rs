@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::mft::{FileNameAttribute, MftParseError, ParsedFileRecord, parse_file_record};
 
 const ROOT_RECORD_NUMBER: u64 = 5;
+const MFT_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct NtfsScanner;
@@ -324,6 +325,8 @@ fn read_mft_entries(
     let mut record_number = 0_u64;
     let mut progress = NtfsScanProgress::default();
     let mut last_progress_records = 0;
+    let records_per_chunk = records_per_mft_chunk(plan.record_size) as u64;
+    let mut buffer = vec![0_u8; records_per_chunk as usize * plan.record_size];
 
     for run in &plan.mft_record.data_runs {
         let Some(lcn) = run.lcn else {
@@ -341,8 +344,9 @@ fn read_mft_entries(
             .checked_mul(u64::from(plan.info.bytes_per_cluster))
             .ok_or(NtfsScanError::IntegerOverflow)?;
         let records_in_run = run_bytes / u64::from(plan.info.bytes_per_file_record);
+        let mut run_record_idx = 0_u64;
 
-        for idx in 0..records_in_run {
+        while run_record_idx < records_in_run {
             if record_number >= plan.record_count {
                 emit_ntfs_progress(
                     progress,
@@ -353,35 +357,56 @@ fn read_mft_entries(
                 return Ok(entries);
             }
 
+            let remaining_run_records = records_in_run - run_record_idx;
+            let remaining_mft_records = plan.record_count - record_number;
+            let chunk_records = records_per_chunk
+                .min(remaining_run_records)
+                .min(remaining_mft_records);
+            let chunk_bytes = chunk_records
+                .checked_mul(plan.record_size as u64)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(NtfsScanError::IntegerOverflow)?;
             let offset = run_offset
                 .checked_add(
-                    idx.checked_mul(u64::from(plan.info.bytes_per_file_record))
+                    run_record_idx
+                        .checked_mul(u64::from(plan.info.bytes_per_file_record))
                         .ok_or(NtfsScanError::IntegerOverflow)?,
                 )
                 .ok_or(NtfsScanError::IntegerOverflow)?;
-            let record = read_record_at(handle, offset, plan.record_size, plan.device_path)?;
-            progress.records_read += 1;
-            if let Ok(parsed) = parse_file_record(&record, plan.info.bytes_per_sector)
-                && let Some(entry) = raw_entry_from_record(record_number, &parsed)
-            {
-                progress.entries += 1;
-                if entry.kind == FileKind::Directory {
-                    progress.directories += 1;
-                } else {
-                    progress.files += 1;
-                }
-                entries.insert(record_number, entry);
-            } else {
-                progress.skipped += 1;
+            let bytes_read =
+                handle.read_at(offset, &mut buffer[..chunk_bytes], plan.device_path)?;
+            let records_read = bytes_read / plan.record_size;
+            if records_read == 0 {
+                emit_ntfs_progress(
+                    progress,
+                    plan.progress_every,
+                    &mut last_progress_records,
+                    &mut on_progress,
+                );
+                return Ok(entries);
             }
-            maybe_emit_ntfs_progress(
-                progress,
-                plan.progress_every,
-                &mut last_progress_records,
-                &mut on_progress,
-            );
 
-            record_number += 1;
+            for record_idx in 0..records_read {
+                let start = record_idx * plan.record_size;
+                let record = &buffer[start..start + plan.record_size];
+                if let Some(entry) = process_mft_record(
+                    record_number,
+                    record,
+                    plan.info.bytes_per_sector,
+                    &mut progress,
+                ) {
+                    entries.insert(record_number, entry);
+                }
+                maybe_emit_ntfs_progress(
+                    progress,
+                    plan.progress_every,
+                    &mut last_progress_records,
+                    &mut on_progress,
+                );
+
+                record_number += 1;
+                run_record_idx += 1;
+            }
         }
     }
 
@@ -392,6 +417,36 @@ fn read_mft_entries(
         &mut on_progress,
     );
     Ok(entries)
+}
+
+fn records_per_mft_chunk(record_size: usize) -> usize {
+    if record_size == 0 {
+        return 1;
+    }
+    (MFT_READ_CHUNK_BYTES / record_size).max(1)
+}
+
+fn process_mft_record(
+    record_number: u64,
+    record: &[u8],
+    bytes_per_sector: u32,
+    progress: &mut NtfsScanProgress,
+) -> Option<NtfsRawEntry> {
+    progress.records_read += 1;
+    if let Ok(parsed) = parse_file_record(record, bytes_per_sector)
+        && let Some(entry) = raw_entry_from_record(record_number, &parsed)
+    {
+        progress.entries += 1;
+        if entry.kind == FileKind::Directory {
+            progress.directories += 1;
+        } else {
+            progress.files += 1;
+        }
+        Some(entry)
+    } else {
+        progress.skipped += 1;
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -618,7 +673,8 @@ mod tests {
 
     use super::{
         NtfsRawEntry, NtfsScanProgress, ROOT_RECORD_NUMBER, build_graph_from_entries,
-        emit_ntfs_progress, maybe_emit_ntfs_progress, raw_entry_from_record,
+        emit_ntfs_progress, maybe_emit_ntfs_progress, process_mft_record, raw_entry_from_record,
+        records_per_mft_chunk,
     };
     use crate::mft::{
         FileNameAttribute, FileRecordHeader, ParsedFileRecord, StandardInformationAttribute,
@@ -786,5 +842,23 @@ mod tests {
         );
 
         assert_eq!(snapshots, vec![1, 4, 5]);
+    }
+
+    #[test]
+    fn records_per_mft_chunk_should_batch_records_with_floor_of_one() {
+        assert_eq!(records_per_mft_chunk(1024), 8192);
+        assert_eq!(records_per_mft_chunk(16 * 1024 * 1024), 1);
+        assert_eq!(records_per_mft_chunk(0), 1);
+    }
+
+    #[test]
+    fn process_mft_record_should_count_parse_failures_as_skipped() {
+        let mut progress = NtfsScanProgress::default();
+
+        let entry = process_mft_record(42, &[0_u8; 64], 512, &mut progress);
+
+        assert!(entry.is_none());
+        assert_eq!(progress.records_read, 1);
+        assert_eq!(progress.skipped, 1);
     }
 }
