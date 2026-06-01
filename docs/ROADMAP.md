@@ -30,7 +30,7 @@
 - Background scan worker. Initial implementation done.
 - Scanner mode selection. Initial implementation done.
 - Search/filter UI. Initial name, regex, extension, path, size, and allocated-size filters done.
-- Shell actions.
+- Shell actions. Initial Explorer, properties, recycle delete, and rename controls done.
 - Dark mode. Initial implementation done.
 - High-DPI polish.
 
