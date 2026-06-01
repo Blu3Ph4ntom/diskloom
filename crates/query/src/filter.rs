@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, path::Path};
+use std::{cmp::Ordering, collections::BinaryHeap, path::Path};
 
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use regex::{Regex, RegexBuilder};
@@ -193,6 +193,93 @@ pub fn sort_entries(graph: &FileGraph, ids: &mut [EntryId], key: SortKey, order:
     });
 }
 
+pub fn top_entries_by_total_size<I>(graph: &FileGraph, ids: I, limit: usize) -> Vec<EntryId>
+where
+    I: IntoIterator<Item = EntryId>,
+{
+    top_entries_by_size(ids, limit, |id| {
+        graph.stats(id).map_or(0, |stats| stats.total_size.bytes())
+    })
+}
+
+pub fn top_entries_by_own_size<I>(graph: &FileGraph, ids: I, limit: usize) -> Vec<EntryId>
+where
+    I: IntoIterator<Item = EntryId>,
+{
+    top_entries_by_size(ids, limit, |id| {
+        graph.stats(id).map_or(0, |stats| stats.own_size.bytes())
+    })
+}
+
+fn top_entries_by_size<I>(
+    ids: I,
+    limit: usize,
+    mut size_for: impl FnMut(EntryId) -> u64,
+) -> Vec<EntryId>
+where
+    I: IntoIterator<Item = EntryId>,
+{
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut heap = BinaryHeap::with_capacity(limit);
+    for id in ids {
+        let candidate = TopSizeCandidate {
+            size: size_for(id),
+            id,
+        };
+        if heap.len() < limit {
+            heap.push(candidate);
+        } else if heap
+            .peek()
+            .is_some_and(|worst| candidate.is_better_than(worst))
+        {
+            heap.pop();
+            heap.push(candidate);
+        }
+    }
+
+    let mut candidates = heap.into_vec();
+    candidates.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.id.0.cmp(&right.id.0))
+    });
+    candidates
+        .into_iter()
+        .map(|candidate| candidate.id)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TopSizeCandidate {
+    size: u64,
+    id: EntryId,
+}
+
+impl TopSizeCandidate {
+    fn is_better_than(self, other: &Self) -> bool {
+        self.size > other.size || (self.size == other.size && self.id.0 < other.id.0)
+    }
+}
+
+impl Ord for TopSizeCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .size
+            .cmp(&self.size)
+            .then_with(|| self.id.0.cmp(&other.id.0))
+    }
+}
+
+impl PartialOrd for TopSizeCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 fn compare_entries(graph: &FileGraph, left: EntryId, right: EntryId, key: SortKey) -> Ordering {
     match key {
         SortKey::Name => graph.name(left).cmp(&graph.name(right)),
@@ -227,7 +314,10 @@ fn extension_matches(name: &str, expected: &str) -> bool {
 mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
-    use super::{NameMatcher, QueryFilter, SortKey, SortOrder, sort_entries};
+    use super::{
+        NameMatcher, QueryFilter, SortKey, SortOrder, sort_entries, top_entries_by_own_size,
+        top_entries_by_total_size,
+    };
 
     fn sample_graph() -> FileGraph {
         let mut builder = FileGraphBuilder::new();
@@ -284,5 +374,34 @@ mod tests {
         sort_entries(&graph, &mut ids, SortKey::Size, SortOrder::Descending);
 
         assert_eq!(graph.name(ids[0]), Some("root"));
+    }
+
+    #[test]
+    fn top_entries_by_total_size_should_keep_largest_entries() {
+        let graph = sample_graph();
+
+        let ids = top_entries_by_total_size(&graph, graph.ids(), 2);
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(graph.name(ids[0]), Some("root"));
+        assert_eq!(graph.name(ids[1]), Some("app.exe"));
+    }
+
+    #[test]
+    fn top_entries_by_own_size_should_not_promote_directory_totals() {
+        let graph = sample_graph();
+
+        let ids = top_entries_by_own_size(&graph, graph.ids(), 1);
+
+        assert_eq!(graph.name(ids[0]), Some("app.exe"));
+    }
+
+    #[test]
+    fn top_entries_by_total_size_should_respect_zero_limit() {
+        let graph = sample_graph();
+
+        let ids = top_entries_by_total_size(&graph, graph.ids(), 0);
+
+        assert!(ids.is_empty());
     }
 }

@@ -8,8 +8,8 @@ use std::{
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
-    FileTypeStat, NameMatcher, QueryFilter, SortKey, SortOrder, TreemapBounds, TreemapItem,
-    TreemapRect, file_type_stats, layout_treemap, sort_entries,
+    FileTypeStat, NameMatcher, QueryFilter, TreemapBounds, TreemapItem, TreemapRect,
+    file_type_stats, layout_treemap, top_entries_by_own_size, top_entries_by_total_size,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_properties};
@@ -879,13 +879,17 @@ fn filtered_rows_from_graph(
         .query_filter()?
         .compile()
         .map_err(|error| error.to_string())?;
-    let mut ids: Vec<_> = filter.matching_ids(graph).collect();
-    let matched = ids.len();
-    sort_entries(graph, &mut ids, SortKey::Size, SortOrder::Descending);
+    let mut matched = 0;
+    let ids = top_entries_by_total_size(
+        graph,
+        filter.matching_ids(graph).inspect(|_| {
+            matched += 1;
+        }),
+        limit,
+    );
 
     let rows = ids
         .into_iter()
-        .take(limit)
         .filter_map(|id| {
             let stats = graph.stats(id)?;
             let entry = graph.entry(id)?;
@@ -1079,8 +1083,19 @@ fn compare_entry_ids_by_total_size(
 }
 
 fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem> {
-    let mut ids: Vec<_> = graph.ids().collect();
-    sort_entries(graph, &mut ids, SortKey::Size, SortOrder::Descending);
+    let ids = top_entries_by_own_size(
+        graph,
+        graph.ids().filter(|id| {
+            let Some(stats) = graph.stats(*id) else {
+                return false;
+            };
+            let Some(entry) = graph.entry(*id) else {
+                return false;
+            };
+            !entry.flags.contains(EntryFlags::DIRECTORY) && stats.own_size.bytes() > 0
+        }),
+        limit,
+    );
 
     ids.into_iter()
         .filter_map(|id| {
@@ -1095,7 +1110,6 @@ fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem>
                 size: stats.own_size.bytes(),
             })
         })
-        .take(limit)
         .collect()
 }
 

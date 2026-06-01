@@ -12,7 +12,7 @@ use diskloom_dupes::find_duplicate_candidates;
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
-    FileTypeStat, NameMatcher, QueryFilter, SortKey, SortOrder, file_type_stats, sort_entries,
+    FileTypeStat, NameMatcher, QueryFilter, file_type_stats, top_entries_by_total_size,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{VolumeKind, discover_volumes};
@@ -125,8 +125,7 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     let summary = outcome.summary;
 
     let filter = query_filter(&command)?.compile()?;
-    let mut ids: Vec<_> = filter.matching_ids(&graph).collect();
-    sort_entries(&graph, &mut ids, SortKey::Size, SortOrder::Descending);
+    let ids = top_entries_by_total_size(&graph, filter.matching_ids(&graph), command.limit);
 
     let mut stdout = io::stdout().lock();
     writeln!(
