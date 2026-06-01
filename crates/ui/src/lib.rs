@@ -1,11 +1,16 @@
 use std::{
+    fs::File,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     thread,
     time::Instant,
 };
 
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
+use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
     FileTypeStat, NameMatcher, QueryFilter, TreemapBounds, TreemapItem, TreemapRect,
@@ -25,7 +30,10 @@ pub struct DiskLoomApp {
     view_cache: Option<ViewCache>,
     selected_path: Option<PathBuf>,
     rename_target: String,
+    export_path: String,
+    export_include_directories: bool,
     action_status: Option<ActionStatus>,
+    action_receiver: Option<Receiver<ActionStatus>>,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
@@ -79,7 +87,7 @@ struct UiScanProgress {
 
 #[derive(Debug)]
 struct ScanResult {
-    graph: FileGraph,
+    graph: Arc<FileGraph>,
     summary: ScanSummary,
     elapsed_ms: u128,
     scanner_label: &'static str,
@@ -113,6 +121,7 @@ struct ResultRow {
     kind: &'static str,
     size: u64,
     allocated: u64,
+    modified_unix: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -121,7 +130,11 @@ struct FilterInputs {
     extension: String,
     path: String,
     min_size: String,
+    max_size: String,
     min_allocated: String,
+    max_allocated: String,
+    modified_after: String,
+    modified_before: String,
     regex: bool,
     include_directories: bool,
 }
@@ -132,7 +145,11 @@ struct FilterSignature {
     extension: String,
     path: String,
     min_size: String,
+    max_size: String,
     min_allocated: String,
+    max_allocated: String,
+    modified_after: String,
+    modified_before: String,
     regex: bool,
     include_directories: bool,
 }
@@ -162,7 +179,10 @@ impl Default for DiskLoomApp {
             view_cache: None,
             selected_path: None,
             rename_target: String::new(),
+            export_path: "diskloom-export.csv".to_owned(),
+            export_include_directories: true,
             action_status: None,
+            action_receiver: None,
             active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
@@ -174,6 +194,7 @@ impl eframe::App for DiskLoomApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
         self.receive_scan();
+        self.receive_action();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
@@ -260,11 +281,12 @@ impl DiskLoomApp {
                 }));
             };
             let result = scan_path(path, scanner_mode, &mut on_progress).map(|outcome| {
-                let tree_rows = tree_rows_from_graph(&outcome.graph, TREE_ROW_LIMIT);
-                let file_types = file_type_stats(&outcome.graph, 50);
-                let treemap_items = treemap_items_from_graph(&outcome.graph, 120);
+                let graph = Arc::new(outcome.graph);
+                let tree_rows = tree_rows_from_graph(&graph, TREE_ROW_LIMIT);
+                let file_types = file_type_stats(&graph, 50);
+                let treemap_items = treemap_items_from_graph(&graph, 120);
                 ScanResult {
-                    graph: outcome.graph,
+                    graph,
                     summary: outcome.summary,
                     elapsed_ms: started.elapsed().as_millis(),
                     scanner_label: outcome.scanner_label,
@@ -329,6 +351,27 @@ impl DiskLoomApp {
         }
     }
 
+    fn receive_action(&mut self) {
+        let Some(receiver) = self.action_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(status) => {
+                self.action_status = Some(status);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.action_receiver = Some(receiver);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.action_status = Some(ActionStatus {
+                    message: "background action stopped".to_owned(),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
     fn filter_controls(&mut self, ui: &mut egui::Ui) {
         let mut changed = false;
 
@@ -361,19 +404,50 @@ impl DiskLoomApp {
             ui.label("Min size");
             changed |= ui
                 .add_sized(
-                    [100.0, 24.0],
+                    [96.0, 24.0],
                     egui::TextEdit::singleline(&mut self.filters.min_size),
+                )
+                .changed();
+            ui.label("Max size");
+            changed |= ui
+                .add_sized(
+                    [96.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.max_size),
                 )
                 .changed();
             ui.label("Min allocated");
             changed |= ui
                 .add_sized(
-                    [100.0, 24.0],
+                    [96.0, 24.0],
                     egui::TextEdit::singleline(&mut self.filters.min_allocated),
+                )
+                .changed();
+            ui.label("Max allocated");
+            changed |= ui
+                .add_sized(
+                    [96.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.max_allocated),
                 )
                 .changed();
             changed |= ui
                 .checkbox(&mut self.filters.include_directories, "Dirs")
+                .changed();
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Modified after");
+            changed |= ui
+                .add_sized(
+                    [120.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.modified_after),
+                )
+                .changed();
+            ui.label("Modified before");
+            changed |= ui
+                .add_sized(
+                    [120.0, 24.0],
+                    egui::TextEdit::singleline(&mut self.filters.modified_before),
+                )
                 .changed();
         });
 
@@ -383,6 +457,23 @@ impl DiskLoomApp {
     }
 
     fn action_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("CSV");
+            ui.add_sized(
+                [260.0, 24.0],
+                egui::TextEdit::singleline(&mut self.export_path),
+            );
+            ui.checkbox(&mut self.export_include_directories, "Dirs");
+            let export_enabled =
+                matches!(self.state, UiState::Complete(_)) && self.action_receiver.is_none();
+            if ui
+                .add_enabled(export_enabled, egui::Button::new("Export"))
+                .clicked()
+            {
+                self.start_export();
+            }
+        });
+
         ui.horizontal(|ui| {
             ui.label("Selected");
             let selected = self
@@ -439,6 +530,54 @@ impl DiskLoomApp {
             };
             ui.colored_label(color, &status.message);
         }
+    }
+
+    fn start_export(&mut self) {
+        let Some((graph, output_path, include_directories)) = self.export_request() else {
+            return;
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        self.action_receiver = Some(receiver);
+        self.action_status = Some(ActionStatus {
+            message: "exporting CSV".to_owned(),
+            is_error: false,
+        });
+
+        thread::spawn(move || {
+            let status = match export_graph_to_csv(&graph, &output_path, include_directories) {
+                Ok(()) => ActionStatus {
+                    message: format!("CSV exported to {}", output_path.display()),
+                    is_error: false,
+                },
+                Err(error) => ActionStatus {
+                    message: error,
+                    is_error: true,
+                },
+            };
+            let _ = sender.send(status);
+        });
+    }
+
+    fn export_request(&mut self) -> Option<(Arc<FileGraph>, PathBuf, bool)> {
+        let graph = match &self.state {
+            UiState::Complete(result) => Arc::clone(&result.graph),
+            _ => return None,
+        };
+        let trimmed = self.export_path.trim();
+        if trimmed.is_empty() {
+            self.action_status = Some(ActionStatus {
+                message: "CSV path is empty".to_owned(),
+                is_error: true,
+            });
+            return None;
+        }
+
+        Some((
+            graph,
+            PathBuf::from(trimmed),
+            self.export_include_directories,
+        ))
     }
 
     fn status_line(&self, ui: &mut egui::Ui) {
@@ -570,6 +709,7 @@ impl DiskLoomApp {
                         ui.strong("Size");
                         ui.strong("Allocated");
                         ui.strong("Kind");
+                        ui.strong("Modified");
                         ui.strong("Path");
                         ui.end_row();
 
@@ -577,6 +717,7 @@ impl DiskLoomApp {
                             ui.monospace(row.size.to_string());
                             ui.monospace(row.allocated.to_string());
                             ui.label(row.kind);
+                            ui.monospace(row.modified_unix.to_string());
                             let selected = self.selected_path.as_ref() == Some(&row.path);
                             if ui.selectable_label(selected, &row.path_text).clicked() {
                                 self.select_path(row.path.clone());
@@ -844,7 +985,11 @@ impl FilterInputs {
             extension: self.extension.clone(),
             path: self.path.clone(),
             min_size: self.min_size.clone(),
+            max_size: self.max_size.clone(),
             min_allocated: self.min_allocated.clone(),
+            max_allocated: self.max_allocated.clone(),
+            modified_after: self.modified_after.clone(),
+            modified_before: self.modified_before.clone(),
             regex: self.regex,
             include_directories: self.include_directories,
         }
@@ -852,7 +997,7 @@ impl FilterInputs {
 
     fn query_filter(&self) -> Result<QueryFilter, String> {
         let name = matcher_from_input(&self.name, self.regex)?;
-        let path = matcher_from_input(&self.path, false)?;
+        let path = matcher_from_input(&self.path, self.regex)?;
         let extension = trimmed_string(&self.extension);
 
         Ok(QueryFilter {
@@ -860,11 +1005,11 @@ impl FilterInputs {
             extension,
             path,
             min_size: parse_optional_u64("Min size", &self.min_size)?,
-            max_size: None,
+            max_size: parse_optional_u64("Max size", &self.max_size)?,
             min_allocated: parse_optional_u64("Min allocated", &self.min_allocated)?,
-            max_allocated: None,
-            modified_after: None,
-            modified_before: None,
+            max_allocated: parse_optional_u64("Max allocated", &self.max_allocated)?,
+            modified_after: parse_optional_unix_seconds("Modified after", &self.modified_after)?,
+            modified_before: parse_optional_unix_seconds("Modified before", &self.modified_before)?,
             include_directories: self.include_directories,
         })
     }
@@ -906,6 +1051,7 @@ fn filtered_rows_from_graph(
                 kind,
                 size: stats.total_size.bytes(),
                 allocated: stats.total_allocated.bytes(),
+                modified_unix: entry.modified_unix,
             })
         })
         .collect();
@@ -939,6 +1085,76 @@ fn parse_optional_u64(label: &str, value: &str) -> Result<Option<u64>, String> {
         .parse()
         .map(Some)
         .map_err(|_| format!("{label} must be a non-negative integer"))
+}
+
+fn parse_optional_unix_seconds(label: &str, value: &str) -> Result<Option<i64>, String> {
+    let Some(trimmed) = trimmed_string(value) else {
+        return Ok(None);
+    };
+    if let Ok(value) = trimmed.parse() {
+        return Ok(Some(value));
+    }
+    parse_ymd_to_unix_seconds(&trimmed)
+        .map(Some)
+        .ok_or_else(|| format!("{label} must be Unix seconds or YYYY-MM-DD"))
+}
+
+fn parse_ymd_to_unix_seconds(value: &str) -> Option<i64> {
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse().ok()?;
+    let month = parts.next()?.parse().ok()?;
+    let day = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    Some(days.saturating_mul(86_400))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+
+    let year = i64::from(year) - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn export_graph_to_csv(
+    graph: &FileGraph,
+    output_path: &Path,
+    include_directories: bool,
+) -> Result<(), String> {
+    let file = File::create(output_path)
+        .map_err(|error| format!("failed to create {}: {error}", output_path.display()))?;
+    export_csv(
+        graph,
+        file,
+        CsvExportOptions {
+            include_directories,
+        },
+    )
+    .map_err(|error| format!("failed to export {}: {error}", output_path.display()))
 }
 
 fn tree_rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreeRow> {
@@ -1151,9 +1367,14 @@ fn paint_treemap_rect(painter: &egui::Painter, item: &TreemapRect, idx: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
-    use super::{FilterInputs, filtered_rows_from_graph, parse_optional_u64, tree_rows_from_graph};
+    use super::{
+        FilterInputs, export_graph_to_csv, filtered_rows_from_graph, parse_optional_u64,
+        parse_optional_unix_seconds, tree_rows_from_graph,
+    };
 
     fn sample_graph() -> FileGraph {
         let mut builder = FileGraphBuilder::new();
@@ -1161,10 +1382,24 @@ mod tests {
             .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
             .unwrap();
         builder
-            .add_entry(Some(root), "trace.log", FileKind::File, 40, 64, 0)
+            .add_entry(
+                Some(root),
+                "trace.log",
+                FileKind::File,
+                40,
+                64,
+                1_704_067_200,
+            )
             .unwrap();
         builder
-            .add_entry(Some(root), "notes.txt", FileKind::File, 10, 16, 0)
+            .add_entry(
+                Some(root),
+                "notes.txt",
+                FileKind::File,
+                10,
+                16,
+                1_672_531_200,
+            )
             .unwrap();
         builder.finish()
     }
@@ -1186,10 +1421,61 @@ mod tests {
     }
 
     #[test]
+    fn filtered_rows_should_apply_upper_bounds_and_modified_dates() {
+        let graph = sample_graph();
+        let filters = FilterInputs {
+            max_size: "20".to_owned(),
+            modified_after: "2023-01-01".to_owned(),
+            modified_before: "2023-12-31".to_owned(),
+            include_directories: false,
+            ..FilterInputs::default()
+        };
+
+        let rows = filtered_rows_from_graph(&graph, &filters, 10).unwrap();
+
+        assert_eq!(rows.matched, 1);
+        assert_eq!(rows.rows[0].path_text, "root\\notes.txt");
+    }
+
+    #[test]
     fn parse_optional_u64_should_accept_empty_or_integer_values() {
         assert_eq!(parse_optional_u64("Min size", "").unwrap(), None);
         assert_eq!(parse_optional_u64("Min size", "42").unwrap(), Some(42));
         assert!(parse_optional_u64("Min size", "abc").is_err());
+    }
+
+    #[test]
+    fn parse_optional_unix_seconds_should_accept_integer_or_date() {
+        assert_eq!(parse_optional_unix_seconds("Modified", "").unwrap(), None);
+        assert_eq!(
+            parse_optional_unix_seconds("Modified", "1704067200").unwrap(),
+            Some(1_704_067_200)
+        );
+        assert_eq!(
+            parse_optional_unix_seconds("Modified", "2024-01-01").unwrap(),
+            Some(1_704_067_200)
+        );
+        assert!(parse_optional_unix_seconds("Modified", "2024-02-31").is_err());
+    }
+
+    #[test]
+    fn export_graph_to_csv_should_write_scan_result() {
+        let graph = sample_graph();
+        let output_path = std::env::temp_dir().join(format!(
+            "diskloom-ui-export-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        export_graph_to_csv(&graph, &output_path, false).unwrap();
+        let output = fs::read_to_string(&output_path).unwrap();
+        fs::remove_file(output_path).unwrap();
+
+        assert!(output.contains("trace.log"));
+        assert!(!output.contains("directory"));
     }
 
     #[test]
