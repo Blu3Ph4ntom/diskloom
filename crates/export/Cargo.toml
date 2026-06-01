@@ -9,8 +9,8 @@ rust-version.workspace = true
 [dependencies]
 csv.workspace = true
 diskloom-core.workspace = true
+itoa.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
-

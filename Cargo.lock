@@ -511,6 +511,7 @@ version = "0.1.0"
 dependencies = [
  "csv",
  "diskloom-core",
+ "itoa",
  "thiserror 2.0.18",
 ]
 
