@@ -39,21 +39,33 @@ Early development. Implemented pieces include:
 - Non-admin fallback scanner with Windows allocated-size reporting.
 - CLI scan/export mode.
 - Windows volume discovery.
-- Direct NTFS volume probe using raw volume access and `FSCTL_GET_NTFS_VOLUME_DATA`.
-- MFT file-record header parser tests.
+- Direct NTFS MFT scanner using raw volume access, MFT data-run parsing, and file-record enumeration.
+- MFT file-record, fixup, `$FILE_NAME`, and `$DATA` runlist parser tests.
 - CSV export.
 - Duplicate candidate grouping by size/name/date.
 - egui desktop shell with background fallback scans.
 - Benchmark harness for repeated scan timing and synthetic dataset creation.
 
-The direct NTFS MFT scanner is not complete yet. DiskLoom falls back to directory traversal when raw volume access is unavailable or the fast path is incomplete. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
+The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
 
 ## Usage
 
 Run a fallback scan:
 
 ```powershell
-cargo run -p diskloom-cli -- scan . --limit 25
+cargo run -p diskloom-cli -- scan . --scanner fallback --limit 25
+```
+
+Run auto mode, which tries direct NTFS MFT scanning for drive roots and falls back if needed:
+
+```powershell
+cargo run -p diskloom-cli -- scan C:\ --scanner auto --limit 25
+```
+
+Force direct NTFS MFT scanning:
+
+```powershell
+cargo run -p diskloom-cli -- scan C:\ --scanner ntfs --limit 25
 ```
 
 Export CSV:

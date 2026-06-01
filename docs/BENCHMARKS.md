@@ -39,10 +39,18 @@ Repeated fallback scan timing:
 cargo run --release -p diskloom-bench -- scan C:\ --iterations 5
 ```
 
+CLI scanner modes:
+
+```powershell
+cargo run --release -p diskloom-cli -- scan C:\ --scanner auto --limit 25
+cargo run --release -p diskloom-cli -- scan C:\ --scanner ntfs --limit 25
+cargo run --release -p diskloom-cli -- scan C:\ --scanner fallback --limit 25
+```
+
 Synthetic dataset generation:
 
 ```powershell
 cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
 ```
 
-The harness currently emits CSV rows for elapsed time and entry counts. Peak working set, private bytes, UI responsiveness, and competitor automation still need dedicated collectors before public claims are made.
+The harness currently emits CSV rows for elapsed time and entry counts. Peak working set, private bytes, UI responsiveness, direct scanner timing, and competitor automation still need dedicated collectors before public claims are made.

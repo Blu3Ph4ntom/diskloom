@@ -15,10 +15,11 @@
 
 - Volume discovery. Done.
 - Direct NTFS volume access. Probe implemented.
-- MFT record parsing. Header parser implemented.
-- Hard link handling where possible.
-- Fallback behavior when fast path is unavailable.
-- Full MFT scan and graph construction.
+- MFT record parsing. Header, fixup, file-name, data-run parsing implemented.
+- Raw MFT scan and graph construction. Initial implementation done.
+- Hard link handling where possible. Initial file-record count flagging done.
+- Fallback behavior when fast path is unavailable. Initial CLI auto mode done.
+- Extend NTFS support for attribute-list records, additional namespaces, reparse points, and richer metadata.
 
 ## Milestone 3: GUI
 
