@@ -45,7 +45,7 @@ Early development. Implemented pieces include:
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
 - egui desktop shell with background scans, scanner mode selection, query-backed file filters, file actions, files, types, and treemap tabs.
-- Benchmark harness for repeated scan timing and synthetic dataset creation.
+- Benchmark harness for repeated scan timing, sampled process memory, and synthetic dataset creation.
 
 The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
 
@@ -102,7 +102,7 @@ cargo run -p diskloom-ui
 Run the benchmark harness:
 
 ```powershell
-cargo run -p diskloom-bench -- scan . --iterations 5
+cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10
 ```
 
 Create a synthetic dataset:

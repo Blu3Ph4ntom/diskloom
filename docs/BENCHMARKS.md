@@ -36,7 +36,7 @@ Compare against:
 Repeated fallback scan timing:
 
 ```powershell
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10
 ```
 
 CLI scanner modes:
@@ -53,4 +53,4 @@ Synthetic dataset generation:
 cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
 ```
 
-The harness currently emits CSV rows for elapsed time and entry counts. Peak working set, private bytes, UI responsiveness, direct scanner timing, and competitor automation still need dedicated collectors before public claims are made.
+The harness emits CSV rows for elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness, direct scanner timing, and competitor automation still need dedicated collectors before public claims are made.
