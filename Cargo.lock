@@ -547,6 +547,7 @@ dependencies = [
  "diskloom-ntfs",
  "diskloom-query",
  "diskloom-scan",
+ "diskloom-windows",
  "eframe",
  "egui",
 ]

@@ -12,6 +12,7 @@ use diskloom_query::{
     TreemapRect, file_type_stats, layout_treemap, sort_entries,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
+use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_properties};
 
 #[derive(Debug)]
 pub struct DiskLoomApp {
@@ -19,6 +20,9 @@ pub struct DiskLoomApp {
     scanner_mode: UiScannerMode,
     filters: FilterInputs,
     view_cache: Option<ViewCache>,
+    selected_path: Option<PathBuf>,
+    rename_target: String,
+    action_status: Option<ActionStatus>,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
@@ -73,9 +77,10 @@ struct ScanResult {
     treemap_items: Vec<TreemapItem>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ResultRow {
-    path: String,
+    path: PathBuf,
+    path_text: String,
     kind: &'static str,
     size: u64,
     allocated: u64,
@@ -110,6 +115,12 @@ struct ViewCache {
     rows: Vec<ResultRow>,
 }
 
+#[derive(Debug, Clone)]
+struct ActionStatus {
+    message: String,
+    is_error: bool,
+}
+
 impl Default for DiskLoomApp {
     fn default() -> Self {
         Self {
@@ -120,6 +131,9 @@ impl Default for DiskLoomApp {
                 ..FilterInputs::default()
             },
             view_cache: None,
+            selected_path: None,
+            rename_target: String::new(),
+            action_status: None,
             active_tab: ActiveTab::Files,
             state: UiState::Idle,
             receiver: None,
@@ -178,6 +192,9 @@ impl eframe::App for DiskLoomApp {
             self.filter_controls(ui);
 
             ui.add_space(8.0);
+            self.action_controls(ui);
+
+            ui.add_space(8.0);
             self.status_line(ui);
             ui.separator();
             self.tabs(ui);
@@ -199,6 +216,10 @@ impl DiskLoomApp {
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         self.state = UiState::Scanning;
+        self.view_cache = None;
+        self.selected_path = None;
+        self.rename_target.clear();
+        self.action_status = None;
 
         thread::spawn(move || {
             let started = Instant::now();
@@ -233,10 +254,14 @@ impl DiskLoomApp {
             Ok(ScanMessage::Complete(result)) => {
                 self.state = UiState::Complete(result);
                 self.view_cache = None;
+                self.selected_path = None;
+                self.rename_target.clear();
             }
             Ok(ScanMessage::Error(error)) => {
                 self.state = UiState::Error(error);
                 self.view_cache = None;
+                self.selected_path = None;
+                self.rename_target.clear();
             }
             Err(mpsc::TryRecvError::Empty) => {
                 self.receiver = Some(receiver);
@@ -244,6 +269,8 @@ impl DiskLoomApp {
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.state = UiState::Error("scan worker stopped".to_owned());
                 self.view_cache = None;
+                self.selected_path = None;
+                self.rename_target.clear();
             }
         }
     }
@@ -298,6 +325,65 @@ impl DiskLoomApp {
 
         if changed {
             self.view_cache = None;
+        }
+    }
+
+    fn action_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Selected");
+            let selected = self
+                .selected_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let mut selected_text = selected;
+            ui.add_enabled(
+                false,
+                egui::TextEdit::singleline(&mut selected_text).desired_width(240.0),
+            );
+
+            let enabled = self.selected_path.is_some();
+            if ui
+                .add_enabled(enabled, egui::Button::new("Explorer"))
+                .clicked()
+            {
+                self.run_shell_action("opened in Explorer", |path| open_in_explorer(path));
+            }
+            if ui
+                .add_enabled(enabled, egui::Button::new("Properties"))
+                .clicked()
+            {
+                self.run_shell_action("properties opened", |path| show_properties(path));
+            }
+            if ui
+                .add_enabled(enabled, egui::Button::new("Recycle"))
+                .clicked()
+            {
+                self.run_shell_action("sent to Recycle Bin", |path| recycle_delete(path));
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Rename");
+            ui.add_enabled(
+                self.selected_path.is_some(),
+                egui::TextEdit::singleline(&mut self.rename_target).desired_width(180.0),
+            );
+            if ui
+                .add_enabled(self.selected_path.is_some(), egui::Button::new("Apply"))
+                .clicked()
+            {
+                self.rename_selected();
+            }
+        });
+
+        if let Some(status) = &self.action_status {
+            let color = if status.is_error {
+                egui::Color32::from_rgb(255, 128, 104)
+            } else {
+                egui::Color32::from_rgb(132, 204, 153)
+            };
+            ui.colored_label(color, &status.message);
         }
     }
 
@@ -361,8 +447,10 @@ impl DiskLoomApp {
                 return;
             }
         };
+        let matched = cache.matched;
+        let rows = cache.rows.clone();
 
-        ui.label(format!("{} of {} entries", cache.matched, graph_len));
+        ui.label(format!("{matched} of {graph_len} entries"));
 
         egui::ScrollArea::both()
             .auto_shrink([false; 2])
@@ -377,11 +465,14 @@ impl DiskLoomApp {
                         ui.strong("Path");
                         ui.end_row();
 
-                        for row in &cache.rows {
+                        for row in &rows {
                             ui.monospace(row.size.to_string());
                             ui.monospace(row.allocated.to_string());
                             ui.label(row.kind);
-                            ui.label(&row.path);
+                            let selected = self.selected_path.as_ref() == Some(&row.path);
+                            if ui.selectable_label(selected, &row.path_text).clicked() {
+                                self.select_path(row.path.clone());
+                            }
                             ui.end_row();
                         }
                     });
@@ -461,6 +552,77 @@ impl DiskLoomApp {
         self.view_cache
             .as_ref()
             .ok_or_else(|| "view cache is empty".to_owned())
+    }
+
+    fn select_path(&mut self, path: PathBuf) {
+        self.rename_target = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.selected_path = Some(path);
+        self.action_status = None;
+    }
+
+    fn run_shell_action(
+        &mut self,
+        success_message: &'static str,
+        action: impl FnOnce(&Path) -> Result<(), diskloom_windows::ShellActionError>,
+    ) {
+        let Some(path) = self.selected_path.clone() else {
+            return;
+        };
+        match action(&path) {
+            Ok(()) => {
+                self.action_status = Some(ActionStatus {
+                    message: success_message.to_owned(),
+                    is_error: false,
+                });
+            }
+            Err(error) => {
+                self.action_status = Some(ActionStatus {
+                    message: error.to_string(),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    fn rename_selected(&mut self) {
+        let Some(from) = self.selected_path.clone() else {
+            return;
+        };
+        let target = self.rename_target.trim();
+        if target.is_empty() {
+            self.action_status = Some(ActionStatus {
+                message: "rename target is empty".to_owned(),
+                is_error: true,
+            });
+            return;
+        }
+        let Some(parent) = from.parent() else {
+            self.action_status = Some(ActionStatus {
+                message: "selected path has no parent".to_owned(),
+                is_error: true,
+            });
+            return;
+        };
+        let to = parent.join(target);
+
+        match rename_path(&from, &to) {
+            Ok(()) => {
+                self.selected_path = Some(to);
+                self.action_status = Some(ActionStatus {
+                    message: "renamed; scan data is stale".to_owned(),
+                    is_error: false,
+                });
+            }
+            Err(error) => {
+                self.action_status = Some(ActionStatus {
+                    message: error.to_string(),
+                    is_error: true,
+                });
+            }
+        }
     }
 }
 
@@ -612,9 +774,11 @@ fn filtered_rows_from_graph(
             } else {
                 "file"
             };
-            let path = graph.reconstruct_path(id)?.display().to_string();
+            let path = graph.reconstruct_path(id)?;
+            let path_text = path.display().to_string();
             Some(ResultRow {
                 path,
+                path_text,
                 kind,
                 size: stats.total_size.bytes(),
                 allocated: stats.total_allocated.bytes(),
@@ -743,7 +907,7 @@ mod tests {
         let rows = filtered_rows_from_graph(&graph, &filters, 10).unwrap();
 
         assert_eq!(rows.matched, 1);
-        assert_eq!(rows.rows[0].path, "root\\trace.log");
+        assert_eq!(rows.rows[0].path_text, "root\\trace.log");
     }
 
     #[test]

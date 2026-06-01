@@ -16,6 +16,7 @@ diskloom-core.workspace = true
 diskloom-ntfs.workspace = true
 diskloom-query.workspace = true
 diskloom-scan.workspace = true
+diskloom-windows.workspace = true
 eframe.workspace = true
 egui.workspace = true
 
