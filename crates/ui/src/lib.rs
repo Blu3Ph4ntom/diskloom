@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs::File,
     path::{Path, PathBuf},
     sync::{
@@ -28,6 +29,13 @@ const UI_PROGRESS_EVERY: u64 = 1_024;
 const TREE_ROW_LIMIT: usize = 500;
 const DUPLICATE_GROUP_LIMIT: usize = 100;
 const DUPLICATE_PATH_LIMIT: usize = 20;
+const TABLE_ROW_HEIGHT: f32 = 26.0;
+const TABLE_HEADER_HEIGHT: f32 = 24.0;
+const TABLE_PAD_X: f32 = 8.0;
+const SIZE_COL_WIDTH: f32 = 104.0;
+const KIND_COL_WIDTH: f32 = 64.0;
+const COUNT_COL_WIDTH: f32 = 72.0;
+const MODIFIED_COL_WIDTH: f32 = 112.0;
 
 #[derive(Debug)]
 pub struct DiskLoomApp {
@@ -36,12 +44,15 @@ pub struct DiskLoomApp {
     scanner_mode: UiScannerMode,
     filters: FilterInputs,
     view_cache: Option<ViewCache>,
+    selected_id: Option<EntryId>,
     selected_path: Option<PathBuf>,
     rename_target: String,
     export_path: String,
     export_include_directories: bool,
     action_status: Option<ActionStatus>,
     action_receiver: Option<Receiver<ActionStatus>>,
+    duplicate_state: DuplicateState,
+    duplicate_receiver: Option<Receiver<DuplicateMessage>>,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
@@ -114,6 +125,11 @@ enum ScanMessage {
     Error(String),
 }
 
+#[derive(Debug)]
+enum DuplicateMessage {
+    Complete(Vec<DuplicateGroup>),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct UiScanProgress {
     summary: ScanSummary,
@@ -132,14 +148,11 @@ struct ScanResult {
     tree_rows: Vec<TreeRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
-    duplicate_groups: Vec<DuplicateGroup>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct TreeRow {
-    path: PathBuf,
-    path_text: String,
-    name: String,
+    id: EntryId,
     depth: usize,
     kind: &'static str,
     size: u64,
@@ -154,7 +167,7 @@ struct ChildRange {
 
 #[derive(Debug, Clone)]
 struct ResultRow {
-    path: PathBuf,
+    id: EntryId,
     path_text: String,
     kind: &'static str,
     size: u64,
@@ -174,8 +187,21 @@ struct DuplicateGroup {
 
 #[derive(Debug, Clone)]
 struct DuplicatePath {
-    path: PathBuf,
+    id: EntryId,
     path_text: String,
+}
+
+#[derive(Debug)]
+enum DuplicateState {
+    Idle,
+    Running,
+    Ready(Vec<DuplicateGroup>),
+}
+
+struct CellTextStyle {
+    font: egui::FontId,
+    color: egui::Color32,
+    middle: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -234,12 +260,15 @@ impl Default for DiskLoomApp {
                 ..FilterInputs::default()
             },
             view_cache: None,
+            selected_id: None,
             selected_path: None,
             rename_target: String::new(),
             export_path: "diskloom-export.csv".to_owned(),
             export_include_directories: true,
             action_status: None,
             action_receiver: None,
+            duplicate_state: DuplicateState::Idle,
+            duplicate_receiver: None,
             active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
@@ -288,6 +317,7 @@ impl eframe::App for DiskLoomApp {
         apply_app_style(ctx);
         self.receive_scan();
         self.receive_action();
+        self.receive_duplicates();
         if self.start_on_launch {
             self.start_on_launch = false;
             self.start_scan();
@@ -305,27 +335,35 @@ impl eframe::App for DiskLoomApp {
 
         egui::SidePanel::left("control_panel")
             .resizable(true)
-            .default_width(360.0)
-            .width_range(300.0..=460.0)
+            .default_width(320.0)
+            .width_range(280.0..=380.0)
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-                self.scan_setup_controls(ui);
-                ui.separator();
-                self.status_line(ui);
-                ui.separator();
-                self.filter_controls(ui);
-                ui.separator();
-                self.action_controls(ui);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        ui.add_space(8.0);
+                        self.scan_setup_controls(ui);
+                        ui.separator();
+                        self.status_line(ui);
+                        ui.separator();
+                        self.filter_controls(ui);
+                        ui.separator();
+                        self.action_controls(ui);
+                    });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(8.0);
+            self.result_summary(ui);
+            ui.add_space(4.0);
             self.tabs(ui);
             ui.separator();
             self.active_view(ui);
         });
 
-        if matches!(self.state, UiState::Scanning(_)) {
+        if matches!(self.state, UiState::Scanning(_))
+            || matches!(self.duplicate_state, DuplicateState::Running)
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
@@ -360,9 +398,12 @@ impl DiskLoomApp {
         self.scan_cancel = Some(Arc::clone(&cancel));
         self.state = UiState::Scanning(None);
         self.view_cache = None;
+        self.selected_id = None;
         self.selected_path = None;
         self.rename_target.clear();
         self.action_status = None;
+        self.duplicate_state = DuplicateState::Idle;
+        self.duplicate_receiver = None;
 
         thread::spawn(move || {
             let started = Instant::now();
@@ -378,11 +419,6 @@ impl DiskLoomApp {
                 let tree_rows = tree_rows_from_graph(&graph, TREE_ROW_LIMIT);
                 let file_types = file_type_stats(&graph, 50);
                 let treemap_items = treemap_items_from_graph(&graph, 120);
-                let duplicate_groups = duplicate_groups_from_graph(
-                    &graph,
-                    DUPLICATE_GROUP_LIMIT,
-                    DUPLICATE_PATH_LIMIT,
-                );
                 let (total_size, total_allocated) = graph_totals(&graph);
                 ScanResult {
                     graph,
@@ -395,7 +431,6 @@ impl DiskLoomApp {
                     tree_rows,
                     file_types,
                     treemap_items,
-                    duplicate_groups,
                 }
             });
 
@@ -422,8 +457,11 @@ impl DiskLoomApp {
                     self.state = UiState::Complete(result);
                     self.scan_cancel = None;
                     self.view_cache = None;
+                    self.selected_id = None;
                     self.selected_path = None;
                     self.rename_target.clear();
+                    self.duplicate_state = DuplicateState::Idle;
+                    self.duplicate_receiver = None;
                     keep_receiver = false;
                     break;
                 }
@@ -431,8 +469,11 @@ impl DiskLoomApp {
                     self.state = UiState::Error(error);
                     self.scan_cancel = None;
                     self.view_cache = None;
+                    self.selected_id = None;
                     self.selected_path = None;
                     self.rename_target.clear();
+                    self.duplicate_state = DuplicateState::Idle;
+                    self.duplicate_receiver = None;
                     keep_receiver = false;
                     break;
                 }
@@ -443,8 +484,11 @@ impl DiskLoomApp {
                     self.state = UiState::Error("scan worker stopped".to_owned());
                     self.scan_cancel = None;
                     self.view_cache = None;
+                    self.selected_id = None;
                     self.selected_path = None;
                     self.rename_target.clear();
+                    self.duplicate_state = DuplicateState::Idle;
+                    self.duplicate_receiver = None;
                     keep_receiver = false;
                     break;
                 }
@@ -471,6 +515,28 @@ impl DiskLoomApp {
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.action_status = Some(ActionStatus {
                     message: "background action stopped".to_owned(),
+                    is_error: true,
+                });
+            }
+        }
+    }
+
+    fn receive_duplicates(&mut self) {
+        let Some(receiver) = self.duplicate_receiver.take() else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(DuplicateMessage::Complete(groups)) => {
+                self.duplicate_state = DuplicateState::Ready(groups);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.duplicate_receiver = Some(receiver);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.duplicate_state = DuplicateState::Idle;
+                self.action_status = Some(ActionStatus {
+                    message: "duplicate analysis stopped".to_owned(),
                     is_error: true,
                 });
             }
@@ -511,56 +577,59 @@ impl DiskLoomApp {
                 .changed();
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Min size");
-            changed |= ui
+        ui.columns(2, |columns| {
+            columns[0].label("Min size");
+            changed |= columns[0]
                 .add_sized(
-                    [96.0, 24.0],
+                    [columns[0].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.min_size),
                 )
                 .changed();
-            ui.label("Max size");
-            changed |= ui
+            columns[1].label("Max size");
+            changed |= columns[1]
                 .add_sized(
-                    [96.0, 24.0],
+                    [columns[1].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.max_size),
                 )
                 .changed();
-            ui.label("Min allocated");
-            changed |= ui
+        });
+
+        ui.columns(2, |columns| {
+            columns[0].label("Min allocated");
+            changed |= columns[0]
                 .add_sized(
-                    [96.0, 24.0],
+                    [columns[0].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.min_allocated),
                 )
                 .changed();
-            ui.label("Max allocated");
-            changed |= ui
+            columns[1].label("Max allocated");
+            changed |= columns[1]
                 .add_sized(
-                    [96.0, 24.0],
+                    [columns[1].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.max_allocated),
                 )
                 .changed();
-            changed |= ui
-                .checkbox(&mut self.filters.include_directories, "Dirs")
-                .changed();
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Modified after");
-            changed |= ui
+        ui.columns(2, |columns| {
+            columns[0].label("Modified after");
+            changed |= columns[0]
                 .add_sized(
-                    [120.0, 24.0],
+                    [columns[0].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.modified_after),
                 )
                 .changed();
-            ui.label("Modified before");
-            changed |= ui
+            columns[1].label("Modified before");
+            changed |= columns[1]
                 .add_sized(
-                    [120.0, 24.0],
+                    [columns[1].available_width(), 24.0],
                     egui::TextEdit::singleline(&mut self.filters.modified_before),
                 )
                 .changed();
         });
+        changed |= ui
+            .checkbox(&mut self.filters.include_directories, "Dirs")
+            .changed();
 
         if changed {
             self.view_cache = None;
@@ -781,6 +850,26 @@ impl DiskLoomApp {
         ))
     }
 
+    fn start_duplicate_scan(&mut self) {
+        let graph = match &self.state {
+            UiState::Complete(result) => Arc::clone(&result.graph),
+            _ => return,
+        };
+        if matches!(self.duplicate_state, DuplicateState::Running) {
+            return;
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        self.duplicate_receiver = Some(receiver);
+        self.duplicate_state = DuplicateState::Running;
+
+        thread::spawn(move || {
+            let groups =
+                duplicate_groups_from_graph(&graph, DUPLICATE_GROUP_LIMIT, DUPLICATE_PATH_LIMIT);
+            let _ = sender.send(DuplicateMessage::Complete(groups));
+        });
+    }
+
     fn status_line(&self, ui: &mut egui::Ui) {
         ui.strong("Status");
         ui.add_space(4.0);
@@ -840,6 +929,51 @@ impl DiskLoomApp {
         }
     }
 
+    fn result_summary(&self, ui: &mut egui::Ui) {
+        match &self.state {
+            UiState::Idle => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("Ready");
+                    ui.separator();
+                    ui.label("No scan loaded");
+                });
+            }
+            UiState::Scanning(progress) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spinner();
+                    ui.strong("Scanning");
+                    if let Some(progress) = progress {
+                        ui.separator();
+                        ui.monospace(format!(
+                            "{} entries",
+                            format_count(progress.summary.entries)
+                        ));
+                        ui.monospace(format!("{} files", format_count(progress.summary.files)));
+                        ui.monospace(format!("{} ms", progress.elapsed_ms));
+                    }
+                });
+            }
+            UiState::Complete(result) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(result.scanner_label);
+                    ui.separator();
+                    ui.monospace(format!("{} entries", format_count(result.summary.entries)));
+                    ui.monospace(format!("{} files", format_count(result.summary.files)));
+                    ui.monospace(format!("{} dirs", format_count(result.summary.directories)));
+                    ui.monospace(format!("size {}", format_bytes(result.total_size)));
+                    ui.monospace(format!(
+                        "allocated {}",
+                        format_bytes(result.total_allocated)
+                    ));
+                    ui.monospace(format!("{} ms", result.elapsed_ms));
+                });
+            }
+            UiState::Error(error) => {
+                ui.colored_label(egui::Color32::from_rgb(255, 128, 104), error);
+            }
+        }
+    }
+
     fn tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active_tab, ActiveTab::Tree, "Tree");
@@ -861,51 +995,57 @@ impl DiskLoomApp {
     }
 
     fn tree(&mut self, ui: &mut egui::Ui) {
-        let (graph_len, rows) = match &self.state {
-            UiState::Complete(result) => (result.graph.len(), result.tree_rows.clone()),
+        let (graph, graph_len, rows) = match &self.state {
+            UiState::Complete(result) => (
+                Arc::clone(&result.graph),
+                result.graph.len(),
+                result.tree_rows.clone(),
+            ),
             _ => return,
         };
 
         ui.label(format!("Showing {} of {} entries", rows.len(), graph_len));
+        table_header(
+            ui,
+            &[
+                ("Size", SIZE_COL_WIDTH),
+                ("Allocated", SIZE_COL_WIDTH),
+                ("Kind", KIND_COL_WIDTH),
+            ],
+            "Name",
+        );
 
-        egui::ScrollArea::both()
+        let mut clicked = None;
+        egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                egui::Grid::new("tree_grid")
-                    .striped(true)
-                    .min_col_width(80.0)
-                    .show(ui, |ui| {
-                        ui.strong("Size");
-                        ui.strong("Allocated");
-                        ui.strong("Kind");
-                        ui.strong("Name");
-                        ui.end_row();
-
-                        for row in &rows {
-                            ui.monospace(format_bytes(row.size));
-                            ui.monospace(format_bytes(row.allocated));
-                            ui.label(row.kind);
-                            ui.horizontal(|ui| {
-                                ui.add_space((row.depth as f32 * 14.0).min(180.0));
-                                let selected = self.selected_path.as_ref() == Some(&row.path);
-                                let response = ui
-                                    .selectable_label(selected, &row.name)
-                                    .on_hover_text(&row.path_text);
-                                if response.clicked() {
-                                    self.select_path(row.path.clone());
-                                }
-                            });
-                            ui.end_row();
-                        }
-                    });
+                for (idx, row) in rows.iter().enumerate() {
+                    let selected = self.selected_id == Some(row.id);
+                    let name = graph.name(row.id).unwrap_or_default();
+                    let response = paint_tree_row(ui, idx, selected, row, name);
+                    let row_clicked = response.clicked();
+                    if response.hovered()
+                        && let Some(path) = graph.reconstruct_path(row.id)
+                    {
+                        response.on_hover_text(path.display().to_string());
+                    }
+                    if row_clicked {
+                        clicked = Some(row.id);
+                    }
+                }
             });
+
+        if let Some(id) = clicked {
+            self.select_entry(&graph, id);
+        }
     }
 
     fn results(&mut self, ui: &mut egui::Ui) {
-        let UiState::Complete(result) = &self.state else {
-            return;
+        let graph = match &self.state {
+            UiState::Complete(result) => Arc::clone(&result.graph),
+            _ => return,
         };
-        let graph_len = result.graph.len();
+        let graph_len = graph.len();
         let cache = match self.ensure_view_cache() {
             Ok(cache) => cache,
             Err(error) => {
@@ -917,34 +1057,33 @@ impl DiskLoomApp {
         let rows = cache.rows.clone();
 
         ui.label(format!("{matched} of {graph_len} entries"));
+        table_header(
+            ui,
+            &[
+                ("Size", SIZE_COL_WIDTH),
+                ("Allocated", SIZE_COL_WIDTH),
+                ("Kind", KIND_COL_WIDTH),
+                ("Modified", MODIFIED_COL_WIDTH),
+            ],
+            "Path",
+        );
 
-        egui::ScrollArea::both()
+        let mut clicked = None;
+        egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                egui::Grid::new("results_grid")
-                    .striped(true)
-                    .min_col_width(80.0)
-                    .show(ui, |ui| {
-                        ui.strong("Size");
-                        ui.strong("Allocated");
-                        ui.strong("Kind");
-                        ui.strong("Modified");
-                        ui.strong("Path");
-                        ui.end_row();
-
-                        for row in &rows {
-                            ui.monospace(format_bytes(row.size));
-                            ui.monospace(format_bytes(row.allocated));
-                            ui.label(row.kind);
-                            ui.monospace(row.modified_unix.to_string());
-                            let selected = self.selected_path.as_ref() == Some(&row.path);
-                            if ui.selectable_label(selected, &row.path_text).clicked() {
-                                self.select_path(row.path.clone());
-                            }
-                            ui.end_row();
-                        }
-                    });
+                for (idx, row) in rows.iter().enumerate() {
+                    let selected = self.selected_id == Some(row.id);
+                    let response = paint_result_row(ui, idx, selected, row);
+                    if response.clicked() {
+                        clicked = Some(row.id);
+                    }
+                }
             });
+
+        if let Some(id) = clicked {
+            self.select_entry(&graph, id);
+        }
     }
 
     fn type_stats(&self, ui: &mut egui::Ui) {
@@ -1000,52 +1139,73 @@ impl DiskLoomApp {
     }
 
     fn duplicates(&mut self, ui: &mut egui::Ui) {
-        let groups = match &self.state {
-            UiState::Complete(result) => result.duplicate_groups.clone(),
+        let graph = match &self.state {
+            UiState::Complete(result) => Arc::clone(&result.graph),
             _ => return,
         };
 
-        ui.label(format!("{} duplicate candidate groups", groups.len()));
-        egui::ScrollArea::both()
+        ui.horizontal(|ui| {
+            let can_start = !matches!(self.duplicate_state, DuplicateState::Running);
+            if ui
+                .add_enabled(can_start, egui::Button::new("Find candidates"))
+                .clicked()
+            {
+                self.start_duplicate_scan();
+            }
+            match &self.duplicate_state {
+                DuplicateState::Idle => {
+                    ui.label("Not run");
+                }
+                DuplicateState::Running => {
+                    ui.spinner();
+                    ui.label("Finding duplicate candidates");
+                }
+                DuplicateState::Ready(groups) => {
+                    ui.label(format!("{} groups", groups.len()));
+                }
+            }
+        });
+
+        let groups = match &self.duplicate_state {
+            DuplicateState::Ready(groups) => groups.clone(),
+            _ => return,
+        };
+
+        table_header(
+            ui,
+            &[
+                ("Wasted", SIZE_COL_WIDTH),
+                ("Size", SIZE_COL_WIDTH),
+                ("Count", COUNT_COL_WIDTH),
+                ("Modified", MODIFIED_COL_WIDTH),
+            ],
+            "Name / Path",
+        );
+
+        let mut clicked = None;
+        egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
             .show(ui, |ui| {
-                egui::Grid::new("duplicates_grid")
-                    .striped(true)
-                    .min_col_width(80.0)
-                    .show(ui, |ui| {
-                        ui.strong("Wasted");
-                        ui.strong("Size");
-                        ui.strong("Count");
-                        ui.strong("Modified");
-                        ui.strong("Name");
-                        ui.end_row();
+                let mut row_idx = 0;
+                for group in &groups {
+                    paint_duplicate_group_row(ui, row_idx, group);
+                    row_idx += 1;
 
-                        for group in &groups {
-                            ui.monospace(format_bytes(group.wasted_bytes));
-                            ui.monospace(format_bytes(group.size));
-                            ui.monospace(format_count(group.count as u64));
-                            ui.monospace(group.modified_unix.to_string());
-                            ui.label(&group.name);
-                            ui.end_row();
-
-                            for duplicate_path in &group.paths {
-                                ui.label("");
-                                ui.label("");
-                                ui.label("");
-                                ui.label("");
-                                let selected =
-                                    self.selected_path.as_ref() == Some(&duplicate_path.path);
-                                if ui
-                                    .selectable_label(selected, &duplicate_path.path_text)
-                                    .clicked()
-                                {
-                                    self.select_path(duplicate_path.path.clone());
-                                }
-                                ui.end_row();
-                            }
+                    for duplicate_path in &group.paths {
+                        let selected = self.selected_id == Some(duplicate_path.id);
+                        let response =
+                            paint_duplicate_path_row(ui, row_idx, selected, duplicate_path);
+                        if response.clicked() {
+                            clicked = Some(duplicate_path.id);
                         }
-                    });
+                        row_idx += 1;
+                    }
+                }
             });
+
+        if let Some(id) = clicked {
+            self.select_entry(&graph, id);
+        }
     }
 
     fn ensure_view_cache(&mut self) -> Result<&ViewCache, String> {
@@ -1071,11 +1231,19 @@ impl DiskLoomApp {
             .ok_or_else(|| "view cache is empty".to_owned())
     }
 
-    fn select_path(&mut self, path: PathBuf) {
+    fn select_entry(&mut self, graph: &FileGraph, id: EntryId) {
+        let Some(path) = graph.reconstruct_path(id) else {
+            self.action_status = Some(ActionStatus {
+                message: "selected path is unavailable".to_owned(),
+                is_error: true,
+            });
+            return;
+        };
         self.rename_target = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        self.selected_id = Some(id);
         self.selected_path = Some(path);
         self.action_status = None;
     }
@@ -1128,6 +1296,7 @@ impl DiskLoomApp {
         match rename_path(&from, &to) {
             Ok(()) => {
                 self.selected_path = Some(to);
+                self.selected_id = None;
                 self.action_status = Some(ActionStatus {
                     message: "renamed; scan data is stale".to_owned(),
                     is_error: false,
@@ -1170,6 +1339,345 @@ fn metric_grid<const N: usize>(ui: &mut egui::Ui, rows: [(&'static str, String);
                 ui.end_row();
             }
         });
+}
+
+fn table_header(ui: &mut egui::Ui, fixed_columns: &[(&str, f32)], tail_label: &str) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TABLE_HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(31, 34, 37));
+
+    let font = egui::FontId::proportional(12.0);
+    let color = egui::Color32::from_rgb(184, 188, 190);
+    let mut x = rect.left() + TABLE_PAD_X;
+    for (label, width) in fixed_columns {
+        paint_text(
+            painter,
+            rect,
+            x,
+            *width,
+            label,
+            cell_text_style(font.clone(), color, false),
+        );
+        x += *width;
+    }
+    paint_text(
+        painter,
+        rect,
+        x,
+        (rect.right() - x - TABLE_PAD_X).max(24.0),
+        tail_label,
+        cell_text_style(font, color, false),
+    );
+}
+
+fn paint_tree_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    selected: bool,
+    row: &TreeRow,
+    name: &str,
+) -> egui::Response {
+    let (rect, response) = table_row(ui, row_idx, selected);
+    let painter = ui.painter();
+    let mono = egui::FontId::monospace(12.0);
+    let regular = egui::FontId::proportional(12.0);
+    let text_color = table_text_color(selected);
+    let muted = egui::Color32::from_rgb(150, 154, 156);
+
+    let mut x = rect.left() + TABLE_PAD_X;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(row.size),
+        cell_text_style(mono.clone(), text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(row.allocated),
+        cell_text_style(mono, text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        KIND_COL_WIDTH,
+        row.kind,
+        cell_text_style(regular.clone(), muted, false),
+    );
+    x += KIND_COL_WIDTH;
+
+    let indent = (row.depth as f32 * 14.0).min(180.0);
+    let name_x = x + indent;
+    paint_text(
+        painter,
+        rect,
+        name_x,
+        (rect.right() - name_x - TABLE_PAD_X).max(24.0),
+        name,
+        cell_text_style(regular, text_color, false),
+    );
+
+    response
+}
+
+fn paint_result_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    selected: bool,
+    row: &ResultRow,
+) -> egui::Response {
+    let (rect, response) = table_row(ui, row_idx, selected);
+    let painter = ui.painter();
+    let mono = egui::FontId::monospace(12.0);
+    let regular = egui::FontId::proportional(12.0);
+    let text_color = table_text_color(selected);
+    let muted = egui::Color32::from_rgb(150, 154, 156);
+
+    let mut x = rect.left() + TABLE_PAD_X;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(row.size),
+        cell_text_style(mono.clone(), text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(row.allocated),
+        cell_text_style(mono.clone(), text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        KIND_COL_WIDTH,
+        row.kind,
+        cell_text_style(regular, muted, false),
+    );
+    x += KIND_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        MODIFIED_COL_WIDTH,
+        &row.modified_unix.to_string(),
+        cell_text_style(mono, muted, false),
+    );
+    x += MODIFIED_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        (rect.right() - x - TABLE_PAD_X).max(24.0),
+        &row.path_text,
+        cell_text_style(egui::FontId::proportional(12.0), text_color, true),
+    );
+
+    if response.hovered() {
+        response.on_hover_text(&row.path_text)
+    } else {
+        response
+    }
+}
+
+fn paint_duplicate_group_row(ui: &mut egui::Ui, row_idx: usize, group: &DuplicateGroup) {
+    let (rect, _) = table_row(ui, row_idx, false);
+    let painter = ui.painter();
+    let mono = egui::FontId::monospace(12.0);
+    let regular = egui::FontId::proportional(12.0);
+    let text_color = egui::Color32::from_rgb(226, 229, 230);
+    let muted = egui::Color32::from_rgb(150, 154, 156);
+
+    let mut x = rect.left() + TABLE_PAD_X;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(group.wasted_bytes),
+        cell_text_style(mono.clone(), text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        SIZE_COL_WIDTH,
+        &format_bytes(group.size),
+        cell_text_style(mono.clone(), text_color, false),
+    );
+    x += SIZE_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        COUNT_COL_WIDTH,
+        &format_count(group.count as u64),
+        cell_text_style(mono.clone(), muted, false),
+    );
+    x += COUNT_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        MODIFIED_COL_WIDTH,
+        &group.modified_unix.to_string(),
+        cell_text_style(mono, muted, false),
+    );
+    x += MODIFIED_COL_WIDTH;
+    paint_text(
+        painter,
+        rect,
+        x,
+        (rect.right() - x - TABLE_PAD_X).max(24.0),
+        &group.name,
+        cell_text_style(regular, text_color, false),
+    );
+}
+
+fn paint_duplicate_path_row(
+    ui: &mut egui::Ui,
+    row_idx: usize,
+    selected: bool,
+    duplicate_path: &DuplicatePath,
+) -> egui::Response {
+    let (rect, response) = table_row(ui, row_idx, selected);
+    let painter = ui.painter();
+    let text_color = table_text_color(selected);
+    let x = rect.left()
+        + TABLE_PAD_X
+        + SIZE_COL_WIDTH
+        + SIZE_COL_WIDTH
+        + COUNT_COL_WIDTH
+        + MODIFIED_COL_WIDTH
+        + 16.0;
+    paint_text(
+        painter,
+        rect,
+        x,
+        (rect.right() - x - TABLE_PAD_X).max(24.0),
+        &duplicate_path.path_text,
+        cell_text_style(egui::FontId::proportional(12.0), text_color, true),
+    );
+
+    if response.hovered() {
+        response.on_hover_text(&duplicate_path.path_text)
+    } else {
+        response
+    }
+}
+
+fn table_row(ui: &mut egui::Ui, row_idx: usize, selected: bool) -> (egui::Rect, egui::Response) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), TABLE_ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            egui::Color32::from_rgb(57, 91, 80)
+        } else if response.hovered() {
+            egui::Color32::from_rgb(37, 41, 44)
+        } else if row_idx.is_multiple_of(2) {
+            egui::Color32::from_rgb(28, 31, 34)
+        } else {
+            egui::Color32::from_rgb(23, 26, 28)
+        };
+        ui.painter().rect_filled(rect, 0.0, fill);
+    }
+    (rect, response)
+}
+
+fn table_text_color(selected: bool) -> egui::Color32 {
+    if selected {
+        egui::Color32::from_rgb(245, 249, 247)
+    } else {
+        egui::Color32::from_rgb(214, 218, 220)
+    }
+}
+
+fn cell_text_style(font: egui::FontId, color: egui::Color32, middle: bool) -> CellTextStyle {
+    CellTextStyle {
+        font,
+        color,
+        middle,
+    }
+}
+
+fn paint_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    x: f32,
+    width: f32,
+    text: &str,
+    style: CellTextStyle,
+) {
+    let fitted = if style.middle {
+        fit_middle_text(text, width)
+    } else {
+        fit_end_text(text, width)
+    };
+    painter.text(
+        egui::pos2(x, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        fitted.as_ref(),
+        style.font,
+        style.color,
+    );
+}
+
+fn fit_end_text(text: &str, width: f32) -> Cow<'_, str> {
+    let budget = text_char_budget(width);
+    let len = text.chars().count();
+    if len <= budget {
+        return Cow::Borrowed(text);
+    }
+    if budget <= 3 {
+        return Cow::Owned(".".repeat(budget));
+    }
+
+    let mut output = text.chars().take(budget - 3).collect::<String>();
+    output.push_str("...");
+    Cow::Owned(output)
+}
+
+fn fit_middle_text(text: &str, width: f32) -> Cow<'_, str> {
+    let budget = text_char_budget(width);
+    let len = text.chars().count();
+    if len <= budget {
+        return Cow::Borrowed(text);
+    }
+    if budget <= 8 {
+        return fit_end_text(text, width);
+    }
+
+    let head_len = (budget - 3) / 2;
+    let tail_len = budget - 3 - head_len;
+    let mut output = text.chars().take(head_len).collect::<String>();
+    output.push_str("...");
+    let mut tail = text.chars().rev().take(tail_len).collect::<Vec<_>>();
+    tail.reverse();
+    output.extend(tail);
+    Cow::Owned(output)
+}
+
+fn text_char_budget(width: f32) -> usize {
+    (width.max(0.0) / 7.2).floor() as usize
 }
 
 fn graph_totals(graph: &FileGraph) -> (u64, u64) {
@@ -1507,7 +2015,7 @@ fn filtered_rows_from_graph(
             let path = graph.reconstruct_path(id)?;
             let path_text = path.display().to_string();
             Some(ResultRow {
-                path,
+                id,
                 path_text,
                 kind,
                 size: stats.total_size.bytes(),
@@ -1715,9 +2223,6 @@ fn append_tree_rows(
 fn tree_row_from_graph(graph: &FileGraph, id: EntryId, depth: usize) -> Option<TreeRow> {
     let stats = graph.stats(id)?;
     let entry = graph.entry(id)?;
-    let name = graph.name(id)?.to_owned();
-    let path = graph.reconstruct_path(id)?;
-    let path_text = path.display().to_string();
     let kind = if entry.flags.contains(EntryFlags::DIRECTORY) {
         "dir"
     } else if entry.flags.contains(EntryFlags::SYMLINK) {
@@ -1727,9 +2232,7 @@ fn tree_row_from_graph(graph: &FileGraph, id: EntryId, depth: usize) -> Option<T
     };
 
     Some(TreeRow {
-        path,
-        path_text,
-        name,
+        id,
         depth,
         kind,
         size: stats.total_size.bytes(),
@@ -1823,7 +2326,7 @@ fn duplicate_group_from_candidate(
         .filter_map(|id| {
             let path = graph.reconstruct_path(*id)?;
             let path_text = path.display().to_string();
-            Some(DuplicatePath { path, path_text })
+            Some(DuplicatePath { id: *id, path_text })
         })
         .collect();
 
@@ -2113,12 +2616,12 @@ mod tests {
 
         let rows = tree_rows_from_graph(&graph, 10);
 
-        assert_eq!(rows[0].name, "root");
-        assert_eq!(rows[1].name, "big");
+        assert_eq!(graph.name(rows[0].id), Some("root"));
+        assert_eq!(graph.name(rows[1].id), Some("big"));
         assert_eq!(rows[1].depth, 1);
-        assert_eq!(rows[2].name, "large.bin");
+        assert_eq!(graph.name(rows[2].id), Some("large.bin"));
         assert_eq!(rows[2].depth, 2);
-        assert_eq!(rows[3].name, "small.bin");
+        assert_eq!(graph.name(rows[3].id), Some("small.bin"));
     }
 
     #[test]
