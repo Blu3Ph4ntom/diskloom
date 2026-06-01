@@ -16,6 +16,7 @@ clap.workspace = true
 diskloom-core.workspace = true
 diskloom-dupes.workspace = true
 diskloom-export.workspace = true
+diskloom-ntfs.workspace = true
 diskloom-query.workspace = true
 diskloom-scan.workspace = true
 diskloom-windows.workspace = true

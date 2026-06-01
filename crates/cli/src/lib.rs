@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::find_duplicate_candidates;
 use diskloom_export::{CsvExportOptions, export_csv};
+use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{NameMatcher, QueryFilter, SortKey, SortOrder, sort_entries};
 use diskloom_scan::{FallbackScanner, ScanOptions};
 use diskloom_windows::{VolumeKind, discover_volumes};
@@ -25,6 +26,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Scan(ScanCommand),
+    NtfsProbe { volume: String },
     Volumes,
 }
 
@@ -80,6 +82,7 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Command::Scan(command) => run_scan(command),
+        Command::NtfsProbe { volume } => run_ntfs_probe(&volume),
         Command::Volumes => run_volumes(),
     }
 }
@@ -225,5 +228,12 @@ fn run_volumes() -> Result<()> {
         writeln!(stdout, "{}\t{}", volume.root, kind)?;
     }
 
+    Ok(())
+}
+
+fn run_ntfs_probe(volume: &str) -> Result<()> {
+    let info = NtfsScanner::probe_volume(volume)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{info}")?;
     Ok(())
 }

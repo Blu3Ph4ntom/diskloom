@@ -1,5 +1,7 @@
 //! Direct NTFS scanner boundary.
 
+pub mod mft;
 pub mod scanner;
 
-pub use scanner::{NtfsScanError, NtfsScanner};
+pub use mft::{FileRecordHeader, MftParseError};
+pub use scanner::{NtfsScanError, NtfsScanner, NtfsVolumeInfo};

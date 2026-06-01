@@ -479,6 +479,7 @@ dependencies = [
  "diskloom-core",
  "diskloom-dupes",
  "diskloom-export",
+ "diskloom-ntfs",
  "diskloom-query",
  "diskloom-scan",
  "diskloom-windows",
