@@ -31,6 +31,8 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 10)]
         sample_ms: u64,
+        #[arg(long, default_value_t = 1024)]
+        progress_every: u64,
         #[arg(long, value_enum, default_value = "fallback")]
         scanner: ScannerMode,
     },
@@ -87,6 +89,7 @@ struct ScanMeasurement {
     scanner: &'static str,
     fallback: bool,
     elapsed_ms: u128,
+    first_result_ms: u128,
     entries: u64,
     files: u64,
     directories: u64,
@@ -138,6 +141,7 @@ struct MemoryPeak {
 #[derive(Debug, Clone, Copy)]
 struct ScanRun {
     elapsed_ms: u128,
+    first_result_ms: u128,
     scanner: &'static str,
     fallback: bool,
     summary: ScanSummary,
@@ -171,6 +175,7 @@ struct ParsedMeasurement {
     scanner: String,
     fallback: bool,
     elapsed_ms: u128,
+    first_result_ms: u128,
     entries: u64,
     peak_working_set_bytes: u64,
     peak_private_bytes: u64,
@@ -187,6 +192,9 @@ struct MeasurementSummary {
     elapsed_ms_min: u128,
     elapsed_ms_median: u128,
     elapsed_ms_max: u128,
+    first_result_ms_min: u128,
+    first_result_ms_median: u128,
+    first_result_ms_max: u128,
     peak_working_set_bytes_max: u64,
     peak_private_bytes_max: u64,
     peak_private_bytes_per_million_entries_max: u64,
@@ -225,8 +233,9 @@ fn main() -> Result<()> {
             path,
             iterations,
             sample_ms,
+            progress_every,
             scanner,
-        } => run_scan(path, iterations, sample_ms, scanner),
+        } => run_scan(path, iterations, sample_ms, progress_every, scanner),
         Command::Export {
             path,
             iterations,
@@ -253,12 +262,18 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64, scanner: ScannerMode) -> Result<()> {
+fn run_scan(
+    path: PathBuf,
+    iterations: usize,
+    sample_ms: u64,
+    progress_every: u64,
+    scanner: ScannerMode,
+) -> Result<()> {
     let mut measurements = Vec::with_capacity(iterations);
     let sample_interval = Duration::from_millis(sample_ms.max(1));
 
     for iteration in 1..=iterations {
-        let scan = run_measured_scan(path.clone(), sample_interval, scanner)
+        let scan = run_measured_scan(path.clone(), sample_interval, progress_every, scanner)
             .with_context(|| format!("scan failed for {}", path.display()))?;
         measurements.push(measurement_from_run(iteration, scan));
     }
@@ -303,11 +318,12 @@ fn run_export(
 fn run_measured_scan(
     path: PathBuf,
     sample_interval: Duration,
+    progress_every: u64,
     scanner: ScannerMode,
 ) -> Result<MeasuredScan> {
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let result = scan_once(path, scanner).map_err(|error| error.to_string());
+        let result = scan_once(path, scanner, progress_every).map_err(|error| error.to_string());
         let _ = sender.send(result);
     });
 
@@ -362,12 +378,21 @@ fn run_measured_export(
     Ok(MeasuredExport { run, memory })
 }
 
-fn scan_once(path: PathBuf, scanner: ScannerMode) -> Result<ScanRun> {
+fn scan_once(path: PathBuf, scanner: ScannerMode, progress_every: u64) -> Result<ScanRun> {
     let started = Instant::now();
-    let outcome = scan_path(path, scanner)?;
+    let mut first_result_ms = None;
+    let outcome = scan_path(
+        path,
+        scanner,
+        progress_every,
+        &started,
+        &mut first_result_ms,
+    )?;
+    let elapsed_ms = started.elapsed().as_millis();
 
     Ok(ScanRun {
-        elapsed_ms: started.elapsed().as_millis(),
+        elapsed_ms,
+        first_result_ms: first_result_ms.unwrap_or(elapsed_ms),
         scanner: outcome.scanner,
         fallback: outcome.fallback,
         summary: outcome.summary,
@@ -426,15 +451,6 @@ struct ScanGraphOutcome {
     summary: ScanSummary,
 }
 
-fn scan_path(path: PathBuf, scanner: ScannerMode) -> Result<ScanOutcome> {
-    let outcome = scan_graph_path(path, scanner)?;
-    Ok(ScanOutcome {
-        scanner: outcome.scanner,
-        fallback: outcome.fallback,
-        summary: outcome.summary,
-    })
-}
-
 fn scan_graph_path(path: PathBuf, scanner: ScannerMode) -> Result<ScanGraphOutcome> {
     match scanner {
         ScannerMode::Fallback => scan_graph_fallback(path, false),
@@ -478,6 +494,73 @@ fn scan_graph_ntfs(path: &Path) -> Result<ScanGraphOutcome> {
     })
 }
 
+fn scan_path(
+    path: PathBuf,
+    scanner: ScannerMode,
+    progress_every: u64,
+    started: &Instant,
+    first_result_ms: &mut Option<u128>,
+) -> Result<ScanOutcome> {
+    match scanner {
+        ScannerMode::Fallback => {
+            scan_fallback_with_progress(path, false, progress_every, started, first_result_ms)
+        }
+        ScannerMode::Ntfs => scan_ntfs(path.as_path()),
+        ScannerMode::Auto => {
+            if drive_volume(&path).is_some() {
+                match scan_ntfs(path.as_path()) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(_) => scan_fallback_with_progress(
+                        path,
+                        true,
+                        progress_every,
+                        started,
+                        first_result_ms,
+                    ),
+                }
+            } else {
+                scan_fallback_with_progress(path, false, progress_every, started, first_result_ms)
+            }
+        }
+    }
+}
+
+fn scan_fallback_with_progress(
+    path: PathBuf,
+    fallback: bool,
+    progress_every: u64,
+    started: &Instant,
+    first_result_ms: &mut Option<u128>,
+) -> Result<ScanOutcome> {
+    let (_, summary) = FallbackScanner::scan_with_progress(
+        ScanOptions {
+            root: path,
+            follow_symlinks: false,
+        },
+        progress_every,
+        |_| {
+            if first_result_ms.is_none() {
+                *first_result_ms = Some(started.elapsed().as_millis());
+            }
+        },
+    )?;
+
+    Ok(ScanOutcome {
+        scanner: "fallback",
+        fallback,
+        summary,
+    })
+}
+
+fn scan_ntfs(path: &Path) -> Result<ScanOutcome> {
+    let outcome = scan_graph_ntfs(path)?;
+    Ok(ScanOutcome {
+        scanner: outcome.scanner,
+        fallback: outcome.fallback,
+        summary: outcome.summary,
+    })
+}
+
 fn summary_from_graph(graph: &FileGraph) -> ScanSummary {
     let mut summary = ScanSummary {
         entries: graph.len() as u64,
@@ -515,6 +598,7 @@ fn measurement_from_run(iteration: usize, scan: MeasuredScan) -> ScanMeasurement
         scanner: scan.run.scanner,
         fallback: scan.run.fallback,
         elapsed_ms: scan.run.elapsed_ms,
+        first_result_ms: scan.run.first_result_ms,
         entries: summary.entries,
         files: summary.files,
         directories: summary.directories,
@@ -698,16 +782,17 @@ fn compare_public_claim(path: PathBuf, claim_id: PublicClaimId) -> Result<()> {
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
-        "iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
+        "iteration,scanner,fallback,elapsed_ms,first_result_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
     )?;
     for measurement in measurements {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             measurement.iteration,
             measurement.scanner,
             u8::from(measurement.fallback),
             measurement.elapsed_ms,
+            measurement.first_result_ms,
             measurement.entries,
             measurement.files,
             measurement.directories,
@@ -767,6 +852,7 @@ fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
     let scanner_idx = field_index(&headers, "scanner")?;
     let fallback_idx = field_index(&headers, "fallback")?;
     let elapsed_idx = field_index(&headers, "elapsed_ms")?;
+    let first_result_idx = optional_field_index(&headers, "first_result_ms");
     let entries_idx = field_index(&headers, "entries")?;
     let peak_ws_idx = field_index(&headers, "peak_working_set_bytes")?;
     let peak_private_idx = field_index(&headers, "peak_private_bytes")?;
@@ -776,10 +862,18 @@ fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
         .enumerate()
         .map(|(idx, line)| {
             let fields: Vec<_> = line.split(',').collect();
+            let elapsed_ms = parse_field(field(&fields, elapsed_idx, idx)?, "elapsed_ms")?;
+            let first_result_ms = match first_result_idx {
+                Some(first_result_idx) => {
+                    parse_field(field(&fields, first_result_idx, idx)?, "first_result_ms")?
+                }
+                None => elapsed_ms,
+            };
             Ok(ParsedMeasurement {
                 scanner: field(&fields, scanner_idx, idx)?.to_owned(),
                 fallback: parse_bool_field(field(&fields, fallback_idx, idx)?)?,
-                elapsed_ms: parse_field(field(&fields, elapsed_idx, idx)?, "elapsed_ms")?,
+                elapsed_ms,
+                first_result_ms,
                 entries: parse_field(field(&fields, entries_idx, idx)?, "entries")?,
                 peak_working_set_bytes: parse_field(
                     field(&fields, peak_ws_idx, idx)?,
@@ -803,6 +897,10 @@ fn field_index(headers: &[&str], name: &str) -> Result<usize> {
         .iter()
         .position(|candidate| *candidate == name)
         .ok_or_else(|| anyhow!("missing CSV field `{name}`"))
+}
+
+fn optional_field_index(headers: &[&str], name: &str) -> Option<usize> {
+    headers.iter().position(|candidate| *candidate == name)
 }
 
 fn field<'a>(fields: &'a [&str], idx: usize, row_idx: usize) -> Result<&'a str> {
@@ -837,6 +935,7 @@ fn summarize_rows(rows: &[ParsedMeasurement]) -> Result<MeasurementSummary> {
 
     let mut scanners = BTreeSet::new();
     let mut elapsed: Vec<_> = rows.iter().map(|row| row.elapsed_ms).collect();
+    let mut first_result: Vec<_> = rows.iter().map(|row| row.first_result_ms).collect();
     let entries: Vec<_> = rows.iter().map(|row| row.entries).collect();
     for row in rows {
         scanners.insert(row.scanner.as_str());
@@ -851,6 +950,9 @@ fn summarize_rows(rows: &[ParsedMeasurement]) -> Result<MeasurementSummary> {
         elapsed_ms_min: *elapsed.iter().min().unwrap_or(&0),
         elapsed_ms_median: median_u128(&mut elapsed),
         elapsed_ms_max: *elapsed.iter().max().unwrap_or(&0),
+        first_result_ms_min: *first_result.iter().min().unwrap_or(&0),
+        first_result_ms_median: median_u128(&mut first_result),
+        first_result_ms_max: *first_result.iter().max().unwrap_or(&0),
         peak_working_set_bytes_max: rows
             .iter()
             .map(|row| row.peak_working_set_bytes)
@@ -882,11 +984,11 @@ fn median_u128(values: &mut [u128]) -> u128 {
 fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Result<()> {
     writeln!(
         writer,
-        "runs,scanners,fallback_runs,entries_min,entries_max,elapsed_ms_min,elapsed_ms_median,elapsed_ms_max,peak_working_set_bytes_max,peak_private_bytes_max,peak_private_bytes_per_million_entries_max"
+        "runs,scanners,fallback_runs,entries_min,entries_max,elapsed_ms_min,elapsed_ms_median,elapsed_ms_max,first_result_ms_min,first_result_ms_median,first_result_ms_max,peak_working_set_bytes_max,peak_private_bytes_max,peak_private_bytes_per_million_entries_max"
     )?;
     writeln!(
         writer,
-        "{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         summary.runs,
         summary.scanners,
         summary.fallback_runs,
@@ -895,6 +997,9 @@ fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Resul
         summary.elapsed_ms_min,
         summary.elapsed_ms_median,
         summary.elapsed_ms_max,
+        summary.first_result_ms_min,
+        summary.first_result_ms_median,
+        summary.first_result_ms_max,
         summary.peak_working_set_bytes_max,
         summary.peak_private_bytes_max,
         summary.peak_private_bytes_per_million_entries_max
@@ -986,6 +1091,7 @@ mod tests {
             scanner: "fallback",
             fallback: false,
             elapsed_ms: 10,
+            first_result_ms: 2,
             entries: 3,
             files: 2,
             directories: 1,
@@ -1002,7 +1108,7 @@ mod tests {
         write_measurements(&mut output, &measurements).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("1,fallback,0,10,3,2,1,0,100,90,80,70,30000000,4"));
+        assert!(output.contains("1,fallback,0,10,2,3,2,1,0,100,90,80,70,30000000,4"));
     }
 
     #[test]
@@ -1062,6 +1168,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let summary = summarize_rows(&rows).unwrap();
 
         assert_eq!(summary.elapsed_ms_median, 20);
+        assert_eq!(summary.first_result_ms_median, 20);
         assert_eq!(summary.peak_private_bytes_max, 95);
     }
 
@@ -1076,6 +1183,9 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             elapsed_ms_min: 10,
             elapsed_ms_median: 20,
             elapsed_ms_max: 30,
+            first_result_ms_min: 1,
+            first_result_ms_median: 2,
+            first_result_ms_max: 3,
             peak_working_set_bytes_max: 110,
             peak_private_bytes_max: 95,
             peak_private_bytes_per_million_entries_max: 31_666_666,
@@ -1085,7 +1195,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         write_summary(&mut output, &summary).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("3,fallback,0,3,3,10,20,30,110,95,31666666"));
+        assert!(output.contains("3,fallback,0,3,3,10,20,30,1,2,3,110,95,31666666"));
     }
 
     #[test]
@@ -1099,6 +1209,9 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             elapsed_ms_min: 500,
             elapsed_ms_median: 1_046,
             elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
             peak_working_set_bytes_max: 100,
             peak_private_bytes_max: 95,
             peak_private_bytes_per_million_entries_max: 31_666_666,
@@ -1125,6 +1238,9 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             elapsed_ms_min: 500,
             elapsed_ms_median: 1_046,
             elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
             peak_working_set_bytes_max: 100,
             peak_private_bytes_max: 95,
             peak_private_bytes_per_million_entries_max: 31_666_666,
