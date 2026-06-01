@@ -306,6 +306,40 @@ struct SuiteRunContext {
     git_dirty: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditStatus {
+    Pass,
+    Warning,
+    Fail,
+}
+
+impl AuditStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warning => "warning",
+            Self::Fail => "fail",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuiteAuditRow {
+    check: &'static str,
+    status: AuditStatus,
+    message: String,
+}
+
+impl SuiteAuditRow {
+    fn new(check: &'static str, status: AuditStatus, message: impl Into<String>) -> Self {
+        Self {
+            check,
+            status,
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct SuiteReport<'a> {
     path: &'a Path,
@@ -322,6 +356,18 @@ struct SuiteReport<'a> {
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
     comparisons: &'a [PublicComparison],
+    audit_rows: &'a [SuiteAuditRow],
+}
+
+#[derive(Debug)]
+struct SuiteManifest<'a> {
+    options: &'a SuiteOptions,
+    run_context: &'a SuiteRunContext,
+    environment: &'a BenchmarkEnvironment,
+    scan_summary: &'a MeasurementSummary,
+    export_summary: &'a ExportSummary,
+    comparisons: &'a [PublicComparison],
+    audit_rows: &'a [SuiteAuditRow],
 }
 
 #[derive(Debug)]
@@ -483,6 +529,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .collect();
     let run_context = detect_suite_run_context();
     let environment = detect_benchmark_environment(&options.path);
+    let audit_rows = suite_audit_rows(&options, &run_context, &comparisons);
 
     let scan_csv = options.output_dir.join("scan.csv");
     let mut scan_file = File::create(&scan_csv)
@@ -504,6 +551,11 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .with_context(|| format!("failed to create {}", comparison_csv.display()))?;
     write_public_comparisons(&mut comparison_file, &comparisons)?;
 
+    let audit_csv = options.output_dir.join("audit.csv");
+    let mut audit_file = File::create(&audit_csv)
+        .with_context(|| format!("failed to create {}", audit_csv.display()))?;
+    write_suite_audit(&mut audit_file, &audit_rows)?;
+
     let metadata_txt = options.output_dir.join("metadata.txt");
     let mut metadata_file = File::create(&metadata_txt)
         .with_context(|| format!("failed to create {}", metadata_txt.display()))?;
@@ -515,41 +567,43 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         &selected_claim_ids,
     )?;
 
+    let suite_report = SuiteReport {
+        path: &options.path,
+        output_dir: &options.output_dir,
+        dataset_label: &options.dataset_label,
+        cache_state: &options.cache_state,
+        scanner: options.scanner,
+        iterations: options.iterations,
+        sample_ms: options.sample_ms,
+        progress_every: options.progress_every,
+        include_directories: options.include_directories,
+        run_context: &run_context,
+        environment: &environment,
+        scan_summary: &scan_summary,
+        export_summary: &export_summary,
+        comparisons: &comparisons,
+        audit_rows: &audit_rows,
+    };
+
+    let suite_manifest = SuiteManifest {
+        options: &options,
+        run_context: &run_context,
+        environment: &environment,
+        scan_summary: &scan_summary,
+        export_summary: &export_summary,
+        comparisons: &comparisons,
+        audit_rows: &audit_rows,
+    };
+
     let manifest_json = options.output_dir.join("manifest.json");
     let mut manifest_file = File::create(&manifest_json)
         .with_context(|| format!("failed to create {}", manifest_json.display()))?;
-    write_suite_manifest(
-        &mut manifest_file,
-        &options,
-        &run_context,
-        &environment,
-        &scan_summary,
-        &export_summary,
-        &comparisons,
-    )?;
+    write_suite_manifest(&mut manifest_file, &suite_manifest)?;
 
     let report_md = options.output_dir.join("report.md");
     let mut report_file = File::create(&report_md)
         .with_context(|| format!("failed to create {}", report_md.display()))?;
-    write_suite_report(
-        &mut report_file,
-        &SuiteReport {
-            path: &options.path,
-            output_dir: &options.output_dir,
-            dataset_label: &options.dataset_label,
-            cache_state: &options.cache_state,
-            scanner: options.scanner,
-            iterations: options.iterations,
-            sample_ms: options.sample_ms,
-            progress_every: options.progress_every,
-            include_directories: options.include_directories,
-            run_context: &run_context,
-            environment: &environment,
-            scan_summary: &scan_summary,
-            export_summary: &export_summary,
-            comparisons: &comparisons,
-        },
-    )?;
+    write_suite_report(&mut report_file, &suite_report)?;
 
     let mut stdout = io::stdout().lock();
     writeln!(
@@ -561,6 +615,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     writeln!(stdout, "scan summary: {}", scan_summary_csv.display())?;
     writeln!(stdout, "export: {}", export_csv.display())?;
     writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
+    writeln!(stdout, "audit: {}", audit_csv.display())?;
     writeln!(stdout, "metadata: {}", metadata_txt.display())?;
     writeln!(stdout, "manifest: {}", manifest_json.display())?;
     writeln!(stdout, "report: {}", report_md.display())?;
@@ -1527,6 +1582,141 @@ fn write_public_comparisons(
     Ok(())
 }
 
+fn suite_audit_rows(
+    options: &SuiteOptions,
+    run_context: &SuiteRunContext,
+    comparisons: &[PublicComparison],
+) -> Vec<SuiteAuditRow> {
+    let mut rows = Vec::new();
+
+    rows.push(if options.dataset_label == "unspecified" {
+        SuiteAuditRow::new(
+            "dataset_label",
+            AuditStatus::Fail,
+            "Set --dataset-label before publishing benchmark results.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "dataset_label",
+            AuditStatus::Pass,
+            "Dataset label is recorded.",
+        )
+    });
+
+    rows.push(if options.cache_state == "unknown" {
+        SuiteAuditRow::new(
+            "cache_state",
+            AuditStatus::Fail,
+            "Set --cache-state to cold, warm, or a documented custom state.",
+        )
+    } else {
+        SuiteAuditRow::new("cache_state", AuditStatus::Pass, "Cache state is recorded.")
+    });
+
+    rows.push(if options.iterations >= 3 {
+        SuiteAuditRow::new(
+            "iterations",
+            AuditStatus::Pass,
+            "Run count is sufficient for a median.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "iterations",
+            AuditStatus::Warning,
+            "Use at least 3 iterations for publishable benchmark summaries.",
+        )
+    });
+
+    rows.push(if run_context.git_dirty == "false" {
+        SuiteAuditRow::new("git_dirty", AuditStatus::Pass, "Git worktree was clean.")
+    } else {
+        SuiteAuditRow::new(
+            "git_dirty",
+            AuditStatus::Warning,
+            "Git worktree was not clean; record the exact diff if publishing.",
+        )
+    });
+
+    rows.push(if comparisons.is_empty() {
+        SuiteAuditRow::new(
+            "public_claims",
+            AuditStatus::Warning,
+            "No public claim reference rows were selected.",
+        )
+    } else if comparisons
+        .iter()
+        .all(|comparison| comparison.validity == "reference_only_vendor_claim_not_same_machine")
+    {
+        SuiteAuditRow::new(
+            "public_claims",
+            AuditStatus::Warning,
+            "Public WizTree rows are reference-only; same-machine competitor runs are required for speed claims.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "public_claims",
+            AuditStatus::Pass,
+            "Public claim validity includes stronger evidence than reference-only rows.",
+        )
+    });
+
+    rows.push(
+        if comparisons
+            .iter()
+            .all(|comparison| comparison.comparison_applicability == "aligned_ntfs_mft")
+        {
+            SuiteAuditRow::new(
+                "comparison_scope",
+                AuditStatus::Pass,
+                "DiskLoom scanner scope matches all selected public claims.",
+            )
+        } else {
+            SuiteAuditRow::new(
+                "comparison_scope",
+                AuditStatus::Warning,
+                "At least one public claim is NTFS MFT scoped but this suite is fallback or mixed.",
+            )
+        },
+    );
+
+    rows
+}
+
+fn suite_audit_status(rows: &[SuiteAuditRow]) -> AuditStatus {
+    if rows.iter().any(|row| row.status == AuditStatus::Fail) {
+        AuditStatus::Fail
+    } else if rows.iter().any(|row| row.status == AuditStatus::Warning) {
+        AuditStatus::Warning
+    } else {
+        AuditStatus::Pass
+    }
+}
+
+fn write_suite_audit(writer: &mut impl Write, rows: &[SuiteAuditRow]) -> Result<()> {
+    writeln!(writer, "check,status,message")?;
+    for row in rows {
+        write_csv_cell(writer, row.check)?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, row.status.label())?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, &row.message)?;
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
+fn write_csv_cell(writer: &mut impl Write, value: &str) -> Result<()> {
+    if value
+        .chars()
+        .any(|ch| matches!(ch, ',' | '"' | '\r' | '\n'))
+    {
+        write!(writer, "\"{}\"", value.replace('"', "\"\""))?;
+    } else {
+        write!(writer, "{value}")?;
+    }
+    Ok(())
+}
+
 fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Result<()> {
     writeln!(writer, "# DiskLoom Benchmark Suite")?;
     writeln!(writer)?;
@@ -1560,6 +1750,26 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         report.run_context.git_revision
     )?;
     writeln!(writer, "- Git dirty: `{}`", report.run_context.git_dirty)?;
+    writeln!(writer)?;
+    writeln!(writer, "## Benchmark Audit")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "- Overall status: `{}`",
+        suite_audit_status(report.audit_rows).label()
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "| check | status | message |")?;
+    writeln!(writer, "| --- | --- | --- |")?;
+    for row in report.audit_rows {
+        writeln!(
+            writer,
+            "| {} | {} | {} |",
+            row.check,
+            row.status.label(),
+            row.message
+        )?;
+    }
     writeln!(writer)?;
     writeln!(writer, "## Environment")?;
     writeln!(writer)?;
@@ -1757,15 +1967,15 @@ fn write_suite_metadata(
     Ok(())
 }
 
-fn write_suite_manifest(
-    writer: &mut impl Write,
-    options: &SuiteOptions,
-    run_context: &SuiteRunContext,
-    environment: &BenchmarkEnvironment,
-    scan_summary: &MeasurementSummary,
-    export_summary: &ExportSummary,
-    comparisons: &[PublicComparison],
-) -> Result<()> {
+fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -> Result<()> {
+    let options = manifest.options;
+    let run_context = manifest.run_context;
+    let environment = manifest.environment;
+    let scan_summary = manifest.scan_summary;
+    let export_summary = manifest.export_summary;
+    let comparisons = manifest.comparisons;
+    let audit_rows = manifest.audit_rows;
+
     writeln!(writer, "{{")?;
     writeln!(
         writer,
@@ -1791,6 +2001,11 @@ fn write_suite_manifest(
         writer,
         "  \"target_arch\": {},",
         json_string(std::env::consts::ARCH)
+    )?;
+    writeln!(
+        writer,
+        "  \"audit_status\": {},",
+        json_string(suite_audit_status(audit_rows).label())
     )?;
     writeln!(writer, "  \"run\": {{")?;
     writeln!(
@@ -1890,6 +2105,7 @@ fn write_suite_manifest(
     writeln!(writer, "    {},", json_string("scan-summary.csv"))?;
     writeln!(writer, "    {},", json_string("export.csv"))?;
     writeln!(writer, "    {},", json_string("public-comparison.csv"))?;
+    writeln!(writer, "    {},", json_string("audit.csv"))?;
     writeln!(writer, "    {},", json_string("metadata.txt"))?;
     writeln!(writer, "    {},", json_string("manifest.json"))?;
     writeln!(writer, "    {}", json_string("report.md"))?;
@@ -1977,6 +2193,20 @@ fn write_suite_manifest(
         export_summary.peak_private_bytes_max
     )?;
     writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"audit\": [")?;
+    for (idx, row) in audit_rows.iter().enumerate() {
+        let suffix = if idx + 1 == audit_rows.len() { "" } else { "," };
+        writeln!(writer, "    {{")?;
+        writeln!(writer, "      \"check\": {},", json_string(row.check))?;
+        writeln!(
+            writer,
+            "      \"status\": {},",
+            json_string(row.status.label())
+        )?;
+        writeln!(writer, "      \"message\": {}", json_string(&row.message))?;
+        writeln!(writer, "    }}{suffix}")?;
+    }
+    writeln!(writer, "  ],")?;
     writeln!(writer, "  \"public_claims\": [")?;
     for (idx, comparison) in comparisons.iter().enumerate() {
         let suffix = if idx + 1 == comparisons.len() {
@@ -2427,12 +2657,13 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement, ExportSummary,
-        MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport,
-        SuiteRunContext, compare_summary_to_claim, json_string, parse_measurements, per_million,
-        public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
-        single_line_value, summarize_export_measurements, summarize_rows,
-        write_export_measurements, write_measurements, write_public_comparisons,
+        Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
+        ExportSummary, MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteAuditRow,
+        SuiteManifest, SuiteOptions, SuiteReport, SuiteRunContext, compare_summary_to_claim,
+        json_string, parse_measurements, per_million, public_claim, ratio_decimal,
+        scan_measurements_to_rows, selected_claims, shell_quote_arg, single_line_value,
+        suite_audit_rows, suite_audit_status, summarize_export_measurements, summarize_rows,
+        write_export_measurements, write_measurements, write_public_comparisons, write_suite_audit,
         write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
@@ -2893,6 +3124,11 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         )];
         let run_context = sample_run_context();
         let environment = sample_environment();
+        let audit_rows = [SuiteAuditRow::new(
+            "public_claims",
+            AuditStatus::Warning,
+            "Public WizTree rows are reference-only; same-machine competitor runs are required for speed claims.",
+        )];
         let mut output = Vec::new();
 
         write_suite_report(
@@ -2912,6 +3148,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
                 comparisons: &comparisons,
+                audit_rows: &audit_rows,
             },
         )
         .unwrap();
@@ -2929,6 +3166,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("Git revision"));
         assert!(output.contains("Dataset label: `repo-smoke`"));
         assert!(output.contains("Cache state: `warm`"));
+        assert!(output.contains("## Benchmark Audit"));
+        assert!(output.contains("Overall status: `warning`"));
     }
 
     #[test]
@@ -2977,6 +3216,69 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         ));
         assert!(output.contains("same_machine_competitor_runs="));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+    }
+
+    #[test]
+    fn suite_audit_rows_should_fail_missing_context_and_warn_reference_claims() {
+        let options = SuiteOptions {
+            path: std::path::PathBuf::from("."),
+            output_dir: std::path::PathBuf::from("target/bench-suite"),
+            dataset_label: "unspecified".to_owned(),
+            cache_state: "unknown".to_owned(),
+            iterations: 1,
+            sample_ms: 10,
+            progress_every: 1024,
+            scanner: super::ScannerMode::Fallback,
+            include_directories: true,
+            claims: Vec::new(),
+        };
+        let summary = MeasurementSummary {
+            runs: 1,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 500,
+            elapsed_ms_max: 500,
+            first_result_ms_min: 10,
+            first_result_ms_median: 10,
+            first_result_ms_max: 10,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let comparisons = [compare_summary_to_claim(
+            &summary,
+            public_claim(PublicClaimId::WizTreeSsd460Gb),
+        )];
+
+        let rows = suite_audit_rows(&options, &sample_run_context(), &comparisons);
+
+        assert!(
+            rows.iter()
+                .any(|row| { row.check == "dataset_label" && row.status == AuditStatus::Fail })
+        );
+        assert!(
+            rows.iter()
+                .any(|row| { row.check == "public_claims" && row.status == AuditStatus::Warning })
+        );
+        assert_eq!(suite_audit_status(&rows), AuditStatus::Fail);
+    }
+
+    #[test]
+    fn write_suite_audit_should_escape_csv_messages() {
+        let rows = [SuiteAuditRow::new(
+            "sample",
+            AuditStatus::Warning,
+            "contains, comma and \"quote\"",
+        )];
+        let mut output = Vec::new();
+
+        write_suite_audit(&mut output, &rows).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("sample,warning,\"contains, comma and \"\"quote\"\"\""));
     }
 
     #[test]
@@ -3032,23 +3334,26 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         )];
         let run_context = sample_run_context();
         let environment = sample_environment();
+        let audit_rows = suite_audit_rows(&options, &run_context, &comparisons);
+        let manifest = SuiteManifest {
+            options: &options,
+            run_context: &run_context,
+            environment: &environment,
+            scan_summary: &scan_summary,
+            export_summary: &export_summary,
+            comparisons: &comparisons,
+            audit_rows: &audit_rows,
+        };
         let mut output = Vec::new();
 
-        write_suite_manifest(
-            &mut output,
-            &options,
-            &run_context,
-            &environment,
-            &scan_summary,
-            &export_summary,
-            &comparisons,
-        )
-        .unwrap();
+        write_suite_manifest(&mut output, &manifest).unwrap();
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("\"schema\": \"diskloom.benchmark-suite.v1\""));
+        assert!(output.contains("\"audit_status\": \"warning\""));
         assert!(output.contains("\"dataset_label\": \"repo-smoke\""));
         assert!(output.contains("\"cache_state\": \"warm\""));
+        assert!(output.contains("\"audit.csv\""));
         assert!(output.contains("\"manifest.json\""));
         assert!(output.contains("\"claim_id\": \"wiztree-ssd-460gb\""));
     }

@@ -103,6 +103,7 @@ try {
 
     Write-Host "Benchmark bundle: $outputDir"
     Write-Host "Report: $(Join-Path $outputDir "report.md")"
+    Write-Host "Audit: $(Join-Path $outputDir "audit.csv")"
     Write-Host "Public comparison CSV: $(Join-Path $outputDir "public-comparison.csv")"
 }
 finally {
