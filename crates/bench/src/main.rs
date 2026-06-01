@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -40,6 +41,9 @@ enum Command {
         files_per_dir: usize,
         #[arg(long, default_value_t = 0)]
         bytes_per_file: usize,
+    },
+    Summarize {
+        csv: PathBuf,
     },
 }
 
@@ -97,6 +101,32 @@ struct MeasuredScan {
     memory: MemoryPeak,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedMeasurement {
+    scanner: String,
+    fallback: bool,
+    elapsed_ms: u128,
+    entries: u64,
+    peak_working_set_bytes: u64,
+    peak_private_bytes: u64,
+    peak_private_bytes_per_million_entries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeasurementSummary {
+    runs: usize,
+    scanners: String,
+    fallback_runs: usize,
+    entries_min: u64,
+    entries_max: u64,
+    elapsed_ms_min: u128,
+    elapsed_ms_median: u128,
+    elapsed_ms_max: u128,
+    peak_working_set_bytes_max: u64,
+    peak_private_bytes_max: u64,
+    peak_private_bytes_per_million_entries_max: u64,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -113,6 +143,7 @@ fn main() -> Result<()> {
             files_per_dir,
             bytes_per_file,
         } => create_dataset(root, dirs, files_per_dir, bytes_per_file),
+        Command::Summarize { csv } => summarize_measurements(csv),
     }
 }
 
@@ -355,6 +386,15 @@ fn create_dataset(
     Ok(())
 }
 
+fn summarize_measurements(path: PathBuf) -> Result<()> {
+    let input =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let rows = parse_measurements(&input)?;
+    let summary = summarize_rows(&rows)?;
+    write_summary(&mut io::stdout().lock(), &summary)?;
+    Ok(())
+}
+
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
@@ -383,9 +423,157 @@ fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement])
     Ok(())
 }
 
+fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
+    let mut lines = input.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow!("measurement CSV is empty"))?;
+    let headers: Vec<_> = header.split(',').collect();
+
+    let scanner_idx = field_index(&headers, "scanner")?;
+    let fallback_idx = field_index(&headers, "fallback")?;
+    let elapsed_idx = field_index(&headers, "elapsed_ms")?;
+    let entries_idx = field_index(&headers, "entries")?;
+    let peak_ws_idx = field_index(&headers, "peak_working_set_bytes")?;
+    let peak_private_idx = field_index(&headers, "peak_private_bytes")?;
+    let per_million_idx = field_index(&headers, "peak_private_bytes_per_million_entries")?;
+
+    lines
+        .enumerate()
+        .map(|(idx, line)| {
+            let fields: Vec<_> = line.split(',').collect();
+            Ok(ParsedMeasurement {
+                scanner: field(&fields, scanner_idx, idx)?.to_owned(),
+                fallback: parse_bool_field(field(&fields, fallback_idx, idx)?)?,
+                elapsed_ms: parse_field(field(&fields, elapsed_idx, idx)?, "elapsed_ms")?,
+                entries: parse_field(field(&fields, entries_idx, idx)?, "entries")?,
+                peak_working_set_bytes: parse_field(
+                    field(&fields, peak_ws_idx, idx)?,
+                    "peak_working_set_bytes",
+                )?,
+                peak_private_bytes: parse_field(
+                    field(&fields, peak_private_idx, idx)?,
+                    "peak_private_bytes",
+                )?,
+                peak_private_bytes_per_million_entries: parse_field(
+                    field(&fields, per_million_idx, idx)?,
+                    "peak_private_bytes_per_million_entries",
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn field_index(headers: &[&str], name: &str) -> Result<usize> {
+    headers
+        .iter()
+        .position(|candidate| *candidate == name)
+        .ok_or_else(|| anyhow!("missing CSV field `{name}`"))
+}
+
+fn field<'a>(fields: &'a [&str], idx: usize, row_idx: usize) -> Result<&'a str> {
+    fields
+        .get(idx)
+        .copied()
+        .ok_or_else(|| anyhow!("row {} is missing field {}", row_idx + 1, idx))
+}
+
+fn parse_field<T>(value: &str, name: &str) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse()
+        .map_err(|error| anyhow!("invalid `{name}` value `{value}`: {error}"))
+}
+
+fn parse_bool_field(value: &str) -> Result<bool> {
+    match value {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(anyhow!("invalid `fallback` value `{value}`")),
+    }
+}
+
+fn summarize_rows(rows: &[ParsedMeasurement]) -> Result<MeasurementSummary> {
+    if rows.is_empty() {
+        return Err(anyhow!("measurement CSV has no data rows"));
+    }
+
+    let mut scanners = BTreeSet::new();
+    let mut elapsed: Vec<_> = rows.iter().map(|row| row.elapsed_ms).collect();
+    let entries: Vec<_> = rows.iter().map(|row| row.entries).collect();
+    for row in rows {
+        scanners.insert(row.scanner.as_str());
+    }
+
+    Ok(MeasurementSummary {
+        runs: rows.len(),
+        scanners: scanners.into_iter().collect::<Vec<_>>().join("+"),
+        fallback_runs: rows.iter().filter(|row| row.fallback).count(),
+        entries_min: *entries.iter().min().unwrap_or(&0),
+        entries_max: *entries.iter().max().unwrap_or(&0),
+        elapsed_ms_min: *elapsed.iter().min().unwrap_or(&0),
+        elapsed_ms_median: median_u128(&mut elapsed),
+        elapsed_ms_max: *elapsed.iter().max().unwrap_or(&0),
+        peak_working_set_bytes_max: rows
+            .iter()
+            .map(|row| row.peak_working_set_bytes)
+            .max()
+            .unwrap_or(0),
+        peak_private_bytes_max: rows
+            .iter()
+            .map(|row| row.peak_private_bytes)
+            .max()
+            .unwrap_or(0),
+        peak_private_bytes_per_million_entries_max: rows
+            .iter()
+            .map(|row| row.peak_private_bytes_per_million_entries)
+            .max()
+            .unwrap_or(0),
+    })
+}
+
+fn median_u128(values: &mut [u128]) -> u128 {
+    values.sort_unstable();
+    let mid = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[mid - 1] + values[mid]) / 2
+    } else {
+        values[mid]
+    }
+}
+
+fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Result<()> {
+    writeln!(
+        writer,
+        "runs,scanners,fallback_runs,entries_min,entries_max,elapsed_ms_min,elapsed_ms_median,elapsed_ms_max,peak_working_set_bytes_max,peak_private_bytes_max,peak_private_bytes_per_million_entries_max"
+    )?;
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{},{},{},{},{}",
+        summary.runs,
+        summary.scanners,
+        summary.fallback_runs,
+        summary.entries_min,
+        summary.entries_max,
+        summary.elapsed_ms_min,
+        summary.elapsed_ms_median,
+        summary.elapsed_ms_max,
+        summary.peak_working_set_bytes_max,
+        summary.peak_private_bytes_max,
+        summary.peak_private_bytes_per_million_entries_max
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ScanMeasurement, per_million, write_measurements};
+    use super::{
+        MeasurementSummary, ScanMeasurement, parse_measurements, per_million, summarize_rows,
+        write_measurements, write_summary,
+    };
 
     #[test]
     fn write_measurements_should_emit_csv_rows() {
@@ -417,5 +605,44 @@ mod tests {
     fn per_million_should_scale_without_floating_point() {
         assert_eq!(per_million(90, 3), 30_000_000);
         assert_eq!(per_million(90, 0), 0);
+    }
+
+    #[test]
+    fn summarize_rows_should_compute_range_and_median() {
+        let input = "\
+iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples
+1,fallback,0,10,3,2,1,0,100,90,80,70,30000000,4
+2,fallback,0,20,3,2,1,0,110,95,80,70,31666666,4
+3,fallback,0,30,3,2,1,0,105,92,80,70,30666666,4
+";
+
+        let rows = parse_measurements(input).unwrap();
+        let summary = summarize_rows(&rows).unwrap();
+
+        assert_eq!(summary.elapsed_ms_median, 20);
+        assert_eq!(summary.peak_private_bytes_max, 95);
+    }
+
+    #[test]
+    fn write_summary_should_emit_single_csv_row() {
+        let summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 10,
+            elapsed_ms_median: 20,
+            elapsed_ms_max: 30,
+            peak_working_set_bytes_max: 110,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let mut output = Vec::new();
+
+        write_summary(&mut output, &summary).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("3,fallback,0,3,3,10,20,30,110,95,31666666"));
     }
 }
