@@ -75,6 +75,8 @@ target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim w
 Compare a captured DiskLoom run to same-machine competitor measurements:
 
 ```powershell
+target\release\diskloom-bench.exe competitor-template > target\competitors.csv
+target\release\diskloom-bench.exe competitor-template --examples > target\competitors.example.csv
 target\release\diskloom-bench.exe compare-competitor target\bench-ntfs.csv target\competitors.csv --dataset-label workstation-c --cache-state warm
 ```
 
