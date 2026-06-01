@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -271,6 +272,13 @@ struct BenchmarkEnvironment {
     physical_memory_bytes: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuiteRunContext {
+    command_line: String,
+    git_revision: String,
+    git_dirty: String,
+}
+
 #[derive(Debug)]
 struct SuiteReport<'a> {
     path: &'a Path,
@@ -280,6 +288,7 @@ struct SuiteReport<'a> {
     sample_ms: u64,
     progress_every: u64,
     include_directories: bool,
+    run_context: &'a SuiteRunContext,
     environment: &'a BenchmarkEnvironment,
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
@@ -437,6 +446,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .iter()
         .map(|comparison| comparison.claim_id)
         .collect();
+    let run_context = detect_suite_run_context();
     let environment = detect_benchmark_environment(&options.path);
 
     let scan_csv = options.output_dir.join("scan.csv");
@@ -465,6 +475,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     write_suite_metadata(
         &mut metadata_file,
         &options,
+        &run_context,
         &environment,
         &selected_claim_ids,
     )?;
@@ -482,6 +493,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
             sample_ms: options.sample_ms,
             progress_every: options.progress_every,
             include_directories: options.include_directories,
+            run_context: &run_context,
             environment: &environment,
             scan_summary: &scan_summary,
             export_summary: &export_summary,
@@ -1433,6 +1445,13 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         "- Export includes directories: {}",
         report.include_directories
     )?;
+    writeln!(writer, "- Command: `{}`", report.run_context.command_line)?;
+    writeln!(
+        writer,
+        "- Git revision: `{}`",
+        report.run_context.git_revision
+    )?;
+    writeln!(writer, "- Git dirty: `{}`", report.run_context.git_dirty)?;
     writeln!(writer)?;
     writeln!(writer, "## Environment")?;
     writeln!(writer)?;
@@ -1553,6 +1572,7 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
 fn write_suite_metadata(
     writer: &mut impl Write,
     options: &SuiteOptions,
+    run_context: &SuiteRunContext,
     environment: &BenchmarkEnvironment,
     selected_claim_ids: &[&str],
 ) -> Result<()> {
@@ -1564,6 +1584,9 @@ fn write_suite_metadata(
     writeln!(writer, "generated_unix_seconds={}", unix_now_seconds())?;
     writeln!(writer, "target_os={}", std::env::consts::OS)?;
     writeln!(writer, "target_arch={}", std::env::consts::ARCH)?;
+    writeln!(writer, "command_line={}", run_context.command_line)?;
+    writeln!(writer, "git_revision={}", run_context.git_revision)?;
+    writeln!(writer, "git_dirty={}", run_context.git_dirty)?;
     writeln!(writer, "detected_volume_root={}", environment.volume_root)?;
     writeln!(writer, "detected_filesystem={}", environment.file_system)?;
     writeln!(writer, "detected_drive_type={}", environment.drive_type)?;
@@ -1620,6 +1643,63 @@ fn unix_now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn detect_suite_run_context() -> SuiteRunContext {
+    SuiteRunContext {
+        command_line: current_command_line(),
+        git_revision: git_revision(),
+        git_dirty: git_dirty_state(),
+    }
+}
+
+fn current_command_line() -> String {
+    std::env::args()
+        .map(|arg| shell_quote_arg(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_arg(arg: &str) -> String {
+    let sanitized = arg.replace(['\r', '\n'], " ");
+    if sanitized.is_empty()
+        || sanitized
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || ch == '"')
+    {
+        format!("\"{}\"", sanitized.replace('"', "\\\""))
+    } else {
+        sanitized
+    }
+}
+
+fn git_revision() -> String {
+    let output = ProcessCommand::new("git")
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+        Ok(output) => format!("unknown(exit={})", output.status),
+        Err(error) => format!("unknown({error})"),
+    }
+}
+
+fn git_dirty_state() -> String {
+    let output = ProcessCommand::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => bool_label(!output.stdout.is_empty()).to_owned(),
+        Ok(output) => format!("unknown(exit={})", output.status),
+        Err(error) => format!("unknown({error})"),
+    }
+}
+
+#[cfg(not(windows))]
+fn bool_label(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 fn logical_cpus() -> String {
@@ -1920,11 +2000,11 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 mod tests {
     use super::{
         BenchmarkEnvironment, CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary,
-        PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport, compare_summary_to_claim,
-        parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
-        selected_claims, summarize_export_measurements, summarize_rows, write_export_measurements,
-        write_measurements, write_public_comparison, write_public_comparisons,
-        write_suite_metadata, write_suite_report, write_summary,
+        PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport, SuiteRunContext,
+        compare_summary_to_claim, parse_measurements, per_million, public_claim, ratio_decimal,
+        scan_measurements_to_rows, selected_claims, shell_quote_arg, summarize_export_measurements,
+        summarize_rows, write_export_measurements, write_measurements, write_public_comparison,
+        write_public_comparisons, write_suite_metadata, write_suite_report, write_summary,
     };
 
     #[test]
@@ -2222,6 +2302,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             &scan_summary,
             public_claim(PublicClaimId::WizTreeSsd460Gb),
         )];
+        let run_context = sample_run_context();
         let environment = sample_environment();
         let mut output = Vec::new();
 
@@ -2235,6 +2316,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 sample_ms: 10,
                 progress_every: 1024,
                 include_directories: true,
+                run_context: &run_context,
                 environment: &environment,
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
@@ -2247,6 +2329,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
         assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
         assert!(output.contains("## Environment"));
+        assert!(output.contains("Git revision"));
     }
 
     #[test]
@@ -2261,12 +2344,14 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             include_directories: true,
             claims: Vec::new(),
         };
+        let run_context = sample_run_context();
         let environment = sample_environment();
         let mut output = Vec::new();
 
         write_suite_metadata(
             &mut output,
             &options,
+            &run_context,
             &environment,
             &["wiztree-ssd-460gb", "wiztree-hdd-25gb"],
         )
@@ -2274,11 +2359,21 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("publication_checklist:"));
+        assert!(output.contains("command_line=diskloom-bench suite . target/bench-suite"));
+        assert!(output.contains("git_revision=abcdef123456"));
+        assert!(output.contains("git_dirty=false"));
         assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
         assert!(output.contains("same_machine_competitor_runs="));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+    }
+
+    #[test]
+    fn shell_quote_arg_should_quote_spaces_and_quotes() {
+        assert_eq!(shell_quote_arg("simple"), "simple");
+        assert_eq!(shell_quote_arg("two words"), "\"two words\"");
+        assert_eq!(shell_quote_arg("a\"b"), "\"a\\\"b\"");
     }
 
     #[cfg(windows)]
@@ -2331,6 +2426,14 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             windows_version: "10.0.0".to_owned(),
             logical_cpus: "8".to_owned(),
             physical_memory_bytes: "17179869184".to_owned(),
+        }
+    }
+
+    fn sample_run_context() -> SuiteRunContext {
+        SuiteRunContext {
+            command_line: "diskloom-bench suite . target/bench-suite".to_owned(),
+            git_revision: "abcdef123456".to_owned(),
+            git_dirty: "false".to_owned(),
         }
     }
 }
