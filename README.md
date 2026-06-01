@@ -45,7 +45,7 @@ Early development. Implemented pieces include:
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
 - egui desktop shell with background scans, live fallback progress counts, scanner mode selection, query-backed file filters, file actions, and tree, files, types, and treemap tabs.
-- Benchmark harness for repeated scan timing, sampled process memory, synthetic dataset creation, suite manifests, and audit outputs.
+- Benchmark harness for repeated scan timing, sampled process memory, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 
 The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
 
@@ -119,8 +119,8 @@ cargo run -p diskloom-bench -- export . --iterations 5 --sample-ms 10 --scanner 
 cargo run -p diskloom-bench -- summarize target\bench.csv
 cargo run -p diskloom-bench -- compare-public target\bench.csv --claim wiztree-ssd-460gb
 cargo run -p diskloom-bench -- compare-competitor target\bench.csv target\competitors.csv --dataset-label repo-smoke --cache-state warm
-cargo run -p diskloom-bench -- suite . target\bench-suite --dataset-label repo-smoke --cache-state warm --iterations 5 --sample-ms 10 --scanner fallback
-.\scripts\run-bench-suite.ps1 -Path . -Scanner fallback -Iterations 5 -DatasetLabel repo-smoke -CacheState warm
+cargo run -p diskloom-bench -- suite . target\bench-suite --dataset-label repo-smoke --cache-state warm --iterations 5 --sample-ms 10 --scanner fallback --competitor-csv target\competitors.csv
+.\scripts\run-bench-suite.ps1 -Path . -Scanner fallback -Iterations 5 -DatasetLabel repo-smoke -CacheState warm -CompetitorCsv target\competitors.csv
 ```
 
 See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.
