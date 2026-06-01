@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -421,6 +421,10 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         .into_iter()
         .map(|claim_id| compare_summary_to_claim(&scan_summary, public_claim(claim_id)))
         .collect();
+    let selected_claim_ids: Vec<_> = comparisons
+        .iter()
+        .map(|comparison| comparison.claim_id)
+        .collect();
 
     let scan_csv = options.output_dir.join("scan.csv");
     let mut scan_file = File::create(&scan_csv)
@@ -441,6 +445,11 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     let mut comparison_file = File::create(&comparison_csv)
         .with_context(|| format!("failed to create {}", comparison_csv.display()))?;
     write_public_comparisons(&mut comparison_file, &comparisons)?;
+
+    let metadata_txt = options.output_dir.join("metadata.txt");
+    let mut metadata_file = File::create(&metadata_txt)
+        .with_context(|| format!("failed to create {}", metadata_txt.display()))?;
+    write_suite_metadata(&mut metadata_file, &options, &selected_claim_ids)?;
 
     let report_md = options.output_dir.join("report.md");
     let mut report_file = File::create(&report_md)
@@ -471,6 +480,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     writeln!(stdout, "scan summary: {}", scan_summary_csv.display())?;
     writeln!(stdout, "export: {}", export_csv.display())?;
     writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
+    writeln!(stdout, "metadata: {}", metadata_txt.display())?;
     writeln!(stdout, "report: {}", report_md.display())?;
 
     Ok(())
@@ -1487,6 +1497,58 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     Ok(())
 }
 
+fn write_suite_metadata(
+    writer: &mut impl Write,
+    options: &SuiteOptions,
+    selected_claim_ids: &[&str],
+) -> Result<()> {
+    writeln!(
+        writer,
+        "diskloom_bench_version={}",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(writer, "generated_unix_seconds={}", unix_now_seconds())?;
+    writeln!(writer, "target_os={}", std::env::consts::OS)?;
+    writeln!(writer, "target_arch={}", std::env::consts::ARCH)?;
+    writeln!(writer, "path={}", options.path.display())?;
+    writeln!(writer, "output_dir={}", options.output_dir.display())?;
+    writeln!(writer, "scanner={}", scanner_label(options.scanner))?;
+    writeln!(writer, "iterations={}", options.iterations)?;
+    writeln!(writer, "sample_ms={}", options.sample_ms)?;
+    writeln!(writer, "progress_every={}", options.progress_every)?;
+    writeln!(
+        writer,
+        "include_directories={}",
+        options.include_directories
+    )?;
+    writeln!(writer, "public_claims={}", selected_claim_ids.join(","))?;
+    writeln!(
+        writer,
+        "public_claim_validity=reference_only_vendor_claim_not_same_machine"
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "publication_checklist:")?;
+    writeln!(writer, "- hardware=")?;
+    writeln!(writer, "- windows_version=")?;
+    writeln!(writer, "- filesystem=")?;
+    writeln!(writer, "- drive_type=")?;
+    writeln!(writer, "- shell_elevated=")?;
+    writeln!(writer, "- cache_state=")?;
+    writeln!(writer, "- competitor_versions=")?;
+    writeln!(writer, "- same_machine_competitor_runs=")?;
+    writeln!(
+        writer,
+        "- note=Do not publish faster-than-WizTree claims from public reference rows alone."
+    )?;
+    Ok(())
+}
+
+fn unix_now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 fn scanner_label(scanner: ScannerMode) -> &'static str {
     match scanner {
         ScannerMode::Auto => "auto",
@@ -1499,11 +1561,11 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 mod tests {
     use super::{
         CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary, PublicClaimId,
-        ScanMeasurement, SuiteReport, compare_summary_to_claim, parse_measurements, per_million,
-        public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims,
+        ScanMeasurement, SuiteOptions, SuiteReport, compare_summary_to_claim, parse_measurements,
+        per_million, public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims,
         summarize_export_measurements, summarize_rows, write_export_measurements,
-        write_measurements, write_public_comparison, write_public_comparisons, write_suite_report,
-        write_summary,
+        write_measurements, write_public_comparison, write_public_comparisons,
+        write_suite_metadata, write_suite_report, write_summary,
     };
 
     #[test]
@@ -1823,6 +1885,33 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
         assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
+    }
+
+    #[test]
+    fn write_suite_metadata_should_include_publication_checklist() {
+        let options = SuiteOptions {
+            path: std::path::PathBuf::from("."),
+            output_dir: std::path::PathBuf::from("target/bench-suite"),
+            iterations: 3,
+            sample_ms: 10,
+            progress_every: 1024,
+            scanner: super::ScannerMode::Fallback,
+            include_directories: true,
+            claims: Vec::new(),
+        };
+        let mut output = Vec::new();
+
+        write_suite_metadata(
+            &mut output,
+            &options,
+            &["wiztree-ssd-460gb", "wiztree-hdd-25gb"],
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("publication_checklist:"));
+        assert!(output.contains("same_machine_competitor_runs="));
+        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
     }
 
     #[test]
