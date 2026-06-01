@@ -10,9 +10,13 @@ rust-version.workspace = true
 diskloom-core.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true
 
 [lints]
 workspace = true
-

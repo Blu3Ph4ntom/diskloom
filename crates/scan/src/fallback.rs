@@ -47,6 +47,7 @@ impl FallbackScanner {
         let root_metadata = metadata_for(&options.root, options.follow_symlinks)?;
         let root_kind = kind_for(&root_metadata);
         let root_size = logical_size(&root_metadata, root_kind);
+        let root_allocated = allocated_size(&options.root, root_kind, root_size);
         let root_name = root_name(&options.root);
 
         let mut builder = FileGraphBuilder::new();
@@ -55,7 +56,7 @@ impl FallbackScanner {
             &root_name,
             root_kind,
             root_size,
-            root_size,
+            root_allocated,
             modified_unix(&root_metadata),
         )?;
 
@@ -87,13 +88,14 @@ impl FallbackScanner {
 
                 let kind = kind_for(&metadata);
                 let size = logical_size(&metadata, kind);
+                let allocated = allocated_size(&path, kind, size);
                 let name = child.file_name().to_string_lossy().into_owned();
                 let id = builder.add_entry(
                     Some(parent),
                     &name,
                     kind,
                     size,
-                    size,
+                    allocated,
                     modified_unix(&metadata),
                 )?;
 
@@ -141,6 +143,32 @@ fn logical_size(metadata: &fs::Metadata, kind: FileKind) -> u64 {
         FileKind::File => metadata.len(),
         FileKind::Directory | FileKind::Symlink | FileKind::Other => 0,
     }
+}
+
+#[cfg(windows)]
+fn allocated_size(path: &Path, kind: FileKind, fallback: u64) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::{Win32::Storage::FileSystem::GetCompressedFileSizeW, core::PCWSTR};
+
+    if kind != FileKind::File {
+        return 0;
+    }
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut high = 0_u32;
+    // SAFETY: The path buffer is null-terminated and remains valid for the call.
+    let low = unsafe { GetCompressedFileSizeW(PCWSTR(wide.as_ptr()), Some(&mut high)) };
+    if low == u32::MAX && high == 0 {
+        return fallback;
+    }
+
+    ((high as u64) << 32) | u64::from(low)
+}
+
+#[cfg(not(windows))]
+fn allocated_size(_: &Path, kind: FileKind, fallback: u64) -> u64 {
+    if kind == FileKind::File { fallback } else { 0 }
 }
 
 fn modified_unix(metadata: &fs::Metadata) -> i64 {
