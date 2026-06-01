@@ -12,7 +12,7 @@ use std::{
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::{DuplicateCandidate, find_duplicate_candidates};
 use diskloom_export::{CsvExportOptions, export_csv};
-use diskloom_ntfs::NtfsScanner;
+use diskloom_ntfs::{NtfsScanProgress, NtfsScanner};
 use diskloom_query::{
     FileTypeStat, NameMatcher, QueryFilter, TreemapBounds, TreemapItem, TreemapRect,
     file_type_stats, layout_treemap, top_entries_by_own_size, top_entries_by_total_size,
@@ -968,10 +968,10 @@ fn scan_path(
 ) -> Result<UiScanOutcome, String> {
     match mode {
         UiScannerMode::Fallback => scan_fallback(path, None, on_progress),
-        UiScannerMode::Ntfs => scan_ntfs(&path),
+        UiScannerMode::Ntfs => scan_ntfs(&path, on_progress),
         UiScannerMode::Auto => {
             if drive_volume(&path).is_some() {
-                match scan_ntfs(&path) {
+                match scan_ntfs(&path, on_progress) {
                     Ok(outcome) => Ok(outcome),
                     Err(error) => scan_fallback(path, Some(error), on_progress),
                 }
@@ -1005,9 +1005,15 @@ fn scan_fallback(
     })
 }
 
-fn scan_ntfs(path: &Path) -> Result<UiScanOutcome, String> {
+fn scan_ntfs(
+    path: &Path,
+    on_progress: &mut impl FnMut(ScanSummary),
+) -> Result<UiScanOutcome, String> {
     let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let graph = NtfsScanner::scan_volume(&volume).map_err(|error| error.to_string())?;
+    let graph = NtfsScanner::scan_volume_with_progress(&volume, UI_PROGRESS_EVERY, |progress| {
+        on_progress(scan_summary_from_ntfs_progress(progress));
+    })
+    .map_err(|error| error.to_string())?;
     let summary = summary_from_graph(&graph);
 
     Ok(UiScanOutcome {
@@ -1016,6 +1022,15 @@ fn scan_ntfs(path: &Path) -> Result<UiScanOutcome, String> {
         scanner_label: "direct NTFS MFT",
         fallback_reason: None,
     })
+}
+
+fn scan_summary_from_ntfs_progress(progress: NtfsScanProgress) -> ScanSummary {
+    ScanSummary {
+        entries: progress.entries,
+        inaccessible: progress.skipped,
+        directories: progress.directories,
+        files: progress.files,
+    }
 }
 
 fn summary_from_graph(graph: &FileGraph) -> ScanSummary {

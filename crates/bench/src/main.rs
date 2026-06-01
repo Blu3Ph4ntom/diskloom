@@ -1160,10 +1160,17 @@ fn scan_path(
         ScannerMode::Fallback => {
             scan_fallback_with_progress(path, false, progress_every, started, first_result_ms)
         }
-        ScannerMode::Ntfs => scan_ntfs(path.as_path()),
+        ScannerMode::Ntfs => {
+            scan_ntfs_with_progress(path.as_path(), progress_every, started, first_result_ms)
+        }
         ScannerMode::Auto => {
             if drive_volume(&path).is_some() {
-                match scan_ntfs(path.as_path()) {
+                match scan_ntfs_with_progress(
+                    path.as_path(),
+                    progress_every,
+                    started,
+                    first_result_ms,
+                ) {
                     Ok(outcome) => Ok(outcome),
                     Err(_) => scan_fallback_with_progress(
                         path,
@@ -1207,12 +1214,24 @@ fn scan_fallback_with_progress(
     })
 }
 
-fn scan_ntfs(path: &Path) -> Result<ScanOutcome> {
-    let outcome = scan_graph_ntfs(path)?;
+fn scan_ntfs_with_progress(
+    path: &Path,
+    progress_every: u64,
+    started: &Instant,
+    first_result_ms: &mut Option<u128>,
+) -> Result<ScanOutcome> {
+    let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let graph = NtfsScanner::scan_volume_with_progress(&volume, progress_every, |_| {
+        if first_result_ms.is_none() {
+            *first_result_ms = Some(started.elapsed().as_millis());
+        }
+    })?;
+    let summary = summary_from_graph(&graph);
+
     Ok(ScanOutcome {
-        scanner: outcome.scanner,
-        fallback: outcome.fallback,
-        summary: outcome.summary,
+        scanner: "ntfs",
+        fallback: false,
+        summary,
     })
 }
 

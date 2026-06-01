@@ -15,6 +15,15 @@ const ROOT_RECORD_NUMBER: u64 = 5;
 #[derive(Debug, Default)]
 pub struct NtfsScanner;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NtfsScanProgress {
+    pub records_read: u64,
+    pub entries: u64,
+    pub files: u64,
+    pub directories: u64,
+    pub skipped: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NtfsVolumeInfo {
     pub volume_serial_number: i64,
@@ -53,14 +62,39 @@ pub enum NtfsScanError {
 impl NtfsScanner {
     #[cfg(windows)]
     pub fn scan_volume(volume: &str) -> Result<FileGraph, NtfsScanError> {
-        let device_path = volume_device_path(volume)?;
-        let handle = VolumeHandle::open(&device_path)?;
-        let info = query_ntfs_volume_data(handle.raw(), &device_path)?;
-        scan_mft(&handle, &info, volume, &device_path)
+        Self::scan_volume_with_progress(volume, 0, |_| {})
     }
 
     #[cfg(not(windows))]
     pub fn scan_volume(_: &str) -> Result<FileGraph, NtfsScanError> {
+        Err(NtfsScanError::UnsupportedPlatform)
+    }
+
+    #[cfg(windows)]
+    pub fn scan_volume_with_progress(
+        volume: &str,
+        progress_every: u64,
+        on_progress: impl FnMut(NtfsScanProgress),
+    ) -> Result<FileGraph, NtfsScanError> {
+        let device_path = volume_device_path(volume)?;
+        let handle = VolumeHandle::open(&device_path)?;
+        let info = query_ntfs_volume_data(handle.raw(), &device_path)?;
+        scan_mft(
+            &handle,
+            &info,
+            volume,
+            &device_path,
+            progress_every,
+            on_progress,
+        )
+    }
+
+    #[cfg(not(windows))]
+    pub fn scan_volume_with_progress(
+        _: &str,
+        _: u64,
+        _: impl FnMut(NtfsScanProgress),
+    ) -> Result<FileGraph, NtfsScanError> {
         Err(NtfsScanError::UnsupportedPlatform)
     }
 
@@ -245,6 +279,8 @@ fn scan_mft(
     info: &NtfsVolumeInfo,
     volume: &str,
     device_path: &str,
+    progress_every: u64,
+    on_progress: impl FnMut(NtfsScanProgress),
 ) -> Result<FileGraph, NtfsScanError> {
     let record_size = info.bytes_per_file_record as usize;
     let record0_offset = lcn_to_offset(info.mft_start_lcn, info.bytes_per_cluster)?;
@@ -255,69 +291,106 @@ fn scan_mft(
     }
 
     let record_count = mft_record.data_size / u64::from(info.bytes_per_file_record);
-    let entries = read_mft_entries(
-        handle,
+    let read_plan = MftReadPlan {
         info,
         device_path,
-        &mft_record,
+        mft_record: &mft_record,
         record_count,
         record_size,
-    )?;
+        progress_every,
+    };
+    let entries = read_mft_entries(handle, read_plan, on_progress)?;
 
     build_graph_from_entries(entries, root_display_name(volume))
 }
 
 #[cfg(windows)]
-fn read_mft_entries(
-    handle: &VolumeHandle,
-    info: &NtfsVolumeInfo,
-    device_path: &str,
-    mft_record: &ParsedFileRecord,
+struct MftReadPlan<'a> {
+    info: &'a NtfsVolumeInfo,
+    device_path: &'a str,
+    mft_record: &'a ParsedFileRecord,
     record_count: u64,
     record_size: usize,
+    progress_every: u64,
+}
+
+#[cfg(windows)]
+fn read_mft_entries(
+    handle: &VolumeHandle,
+    plan: MftReadPlan<'_>,
+    mut on_progress: impl FnMut(NtfsScanProgress),
 ) -> Result<HashMap<u64, NtfsRawEntry>, NtfsScanError> {
     let mut entries = HashMap::new();
     let mut record_number = 0_u64;
+    let mut progress = NtfsScanProgress::default();
+    let mut last_progress_records = 0;
 
-    for run in &mft_record.data_runs {
+    for run in &plan.mft_record.data_runs {
         let Some(lcn) = run.lcn else {
             record_number = record_number.saturating_add(
                 run.clusters
-                    .saturating_mul(u64::from(info.bytes_per_cluster))
-                    / u64::from(info.bytes_per_file_record),
+                    .saturating_mul(u64::from(plan.info.bytes_per_cluster))
+                    / u64::from(plan.info.bytes_per_file_record),
             );
             continue;
         };
 
-        let run_offset = lcn_to_offset(lcn, info.bytes_per_cluster)?;
+        let run_offset = lcn_to_offset(lcn, plan.info.bytes_per_cluster)?;
         let run_bytes = run
             .clusters
-            .checked_mul(u64::from(info.bytes_per_cluster))
+            .checked_mul(u64::from(plan.info.bytes_per_cluster))
             .ok_or(NtfsScanError::IntegerOverflow)?;
-        let records_in_run = run_bytes / u64::from(info.bytes_per_file_record);
+        let records_in_run = run_bytes / u64::from(plan.info.bytes_per_file_record);
 
         for idx in 0..records_in_run {
-            if record_number >= record_count {
+            if record_number >= plan.record_count {
+                emit_ntfs_progress(
+                    progress,
+                    plan.progress_every,
+                    &mut last_progress_records,
+                    &mut on_progress,
+                );
                 return Ok(entries);
             }
 
             let offset = run_offset
                 .checked_add(
-                    idx.checked_mul(u64::from(info.bytes_per_file_record))
+                    idx.checked_mul(u64::from(plan.info.bytes_per_file_record))
                         .ok_or(NtfsScanError::IntegerOverflow)?,
                 )
                 .ok_or(NtfsScanError::IntegerOverflow)?;
-            let record = read_record_at(handle, offset, record_size, device_path)?;
-            if let Ok(parsed) = parse_file_record(&record, info.bytes_per_sector)
+            let record = read_record_at(handle, offset, plan.record_size, plan.device_path)?;
+            progress.records_read += 1;
+            if let Ok(parsed) = parse_file_record(&record, plan.info.bytes_per_sector)
                 && let Some(entry) = raw_entry_from_record(record_number, &parsed)
             {
+                progress.entries += 1;
+                if entry.kind == FileKind::Directory {
+                    progress.directories += 1;
+                } else {
+                    progress.files += 1;
+                }
                 entries.insert(record_number, entry);
+            } else {
+                progress.skipped += 1;
             }
+            maybe_emit_ntfs_progress(
+                progress,
+                plan.progress_every,
+                &mut last_progress_records,
+                &mut on_progress,
+            );
 
             record_number += 1;
         }
     }
 
+    emit_ntfs_progress(
+        progress,
+        plan.progress_every,
+        &mut last_progress_records,
+        &mut on_progress,
+    );
     Ok(entries)
 }
 
@@ -486,6 +559,33 @@ fn root_display_name(volume: &str) -> String {
     }
 }
 
+fn maybe_emit_ntfs_progress(
+    progress: NtfsScanProgress,
+    progress_every: u64,
+    last_records: &mut u64,
+    on_progress: &mut impl FnMut(NtfsScanProgress),
+) {
+    if progress_every == 0 {
+        return;
+    }
+    if progress.records_read == 1 || progress.records_read.is_multiple_of(progress_every) {
+        emit_ntfs_progress(progress, progress_every, last_records, on_progress);
+    }
+}
+
+fn emit_ntfs_progress(
+    progress: NtfsScanProgress,
+    progress_every: u64,
+    last_records: &mut u64,
+    on_progress: &mut impl FnMut(NtfsScanProgress),
+) {
+    if progress_every == 0 || progress.records_read == *last_records {
+        return;
+    }
+    *last_records = progress.records_read;
+    on_progress(progress);
+}
+
 #[cfg(windows)]
 fn volume_device_path(volume: &str) -> Result<String, NtfsScanError> {
     let trimmed = volume.trim_end_matches(['\\', '/']);
@@ -517,7 +617,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        NtfsRawEntry, ROOT_RECORD_NUMBER, build_graph_from_entries, raw_entry_from_record,
+        NtfsRawEntry, NtfsScanProgress, ROOT_RECORD_NUMBER, build_graph_from_entries,
+        emit_ntfs_progress, maybe_emit_ntfs_progress, raw_entry_from_record,
     };
     use crate::mft::{
         FileNameAttribute, FileRecordHeader, ParsedFileRecord, StandardInformationAttribute,
@@ -627,5 +728,63 @@ mod tests {
         let entry = raw_entry_from_record(42, &parsed).unwrap();
 
         assert_eq!(entry.modified_unix, 200);
+    }
+
+    #[test]
+    fn ntfs_progress_should_emit_first_interval_and_final_snapshots() {
+        let mut last_records = 0;
+        let mut snapshots = Vec::new();
+        let mut collect = |progress: NtfsScanProgress| snapshots.push(progress.records_read);
+
+        maybe_emit_ntfs_progress(
+            NtfsScanProgress {
+                records_read: 1,
+                entries: 1,
+                files: 1,
+                directories: 0,
+                skipped: 0,
+            },
+            4,
+            &mut last_records,
+            &mut collect,
+        );
+        maybe_emit_ntfs_progress(
+            NtfsScanProgress {
+                records_read: 3,
+                entries: 2,
+                files: 2,
+                directories: 0,
+                skipped: 1,
+            },
+            4,
+            &mut last_records,
+            &mut collect,
+        );
+        maybe_emit_ntfs_progress(
+            NtfsScanProgress {
+                records_read: 4,
+                entries: 3,
+                files: 2,
+                directories: 1,
+                skipped: 1,
+            },
+            4,
+            &mut last_records,
+            &mut collect,
+        );
+        emit_ntfs_progress(
+            NtfsScanProgress {
+                records_read: 5,
+                entries: 4,
+                files: 3,
+                directories: 1,
+                skipped: 1,
+            },
+            4,
+            &mut last_records,
+            &mut collect,
+        );
+
+        assert_eq!(snapshots, vec![1, 4, 5]);
     }
 }
