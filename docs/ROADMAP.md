@@ -27,7 +27,7 @@
 - File view sorted by size. Initial implementation done.
 - Treemap. Initial implementation done.
 - File type stats. Initial implementation done.
-- Background scan worker. Initial implementation done.
+- Background scan worker. Initial implementation with fallback progress counts done.
 - Scanner mode selection. Initial implementation done.
 - Search/filter UI. Initial name, regex, extension, path, size, and allocated-size filters done.
 - Shell actions. Initial Explorer, properties, recycle delete, and rename controls done.
