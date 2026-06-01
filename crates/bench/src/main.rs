@@ -51,6 +51,17 @@ enum Command {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+    Responsiveness {
+        path: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long, default_value_t = 16)]
+        tick_ms: u64,
+        #[arg(long, default_value_t = 1024)]
+        progress_every: u64,
+        #[arg(long, value_enum, default_value = "fallback")]
+        scanner: ScannerMode,
+    },
     Suite {
         path: PathBuf,
         output_dir: PathBuf,
@@ -66,6 +77,8 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 10)]
         sample_ms: u64,
+        #[arg(long, default_value_t = 16)]
+        ui_tick_ms: u64,
         #[arg(long, default_value_t = 1024)]
         progress_every: u64,
         #[arg(long, value_enum, default_value = "fallback")]
@@ -184,6 +197,42 @@ struct ExportSummary {
     peak_private_bytes_per_million_entries_max: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ResponsivenessMeasurement {
+    iteration: usize,
+    scanner: &'static str,
+    fallback: bool,
+    elapsed_ms: u128,
+    first_result_ms: u128,
+    entries: u64,
+    files: u64,
+    directories: u64,
+    inaccessible: u64,
+    tick_interval_ms: u64,
+    tick_count: u64,
+    tick_gap_ms_min: u128,
+    tick_gap_ms_median: u128,
+    tick_gap_ms_max: u128,
+    tick_over_budget_ms_max: u128,
+    tick_over_budget_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResponsivenessSummary {
+    runs: usize,
+    scanners: String,
+    fallback_runs: usize,
+    entries_min: u64,
+    entries_max: u64,
+    tick_interval_ms: u64,
+    elapsed_ms_median: u128,
+    first_result_ms_median: u128,
+    max_tick_gap_ms_median: u128,
+    max_tick_gap_ms_max: u128,
+    max_tick_over_budget_ms: u128,
+    tick_over_budget_count_max: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct MemorySample {
     working_set_bytes: u64,
@@ -229,6 +278,22 @@ struct ExportRun {
 struct MeasuredExport {
     run: ExportRun,
     memory: MemoryPeak,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TickGapSummary {
+    count: u64,
+    min_ms: u128,
+    median_ms: u128,
+    max_ms: u128,
+    over_budget_ms_max: u128,
+    over_budget_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResponsivenessRun {
+    scan: ScanRun,
+    tick_gaps: TickGapSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -424,11 +489,13 @@ struct SuiteReport<'a> {
     iterations: usize,
     sample_ms: u64,
     progress_every: u64,
+    ui_tick_ms: u64,
     include_directories: bool,
     run_context: &'a SuiteRunContext,
     environment: &'a BenchmarkEnvironment,
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
+    responsiveness_summary: &'a ResponsivenessSummary,
     comparisons: &'a [PublicComparison],
     same_machine_comparisons: &'a [SameMachineComparison],
     audit_rows: &'a [SuiteAuditRow],
@@ -441,6 +508,7 @@ struct SuiteManifest<'a> {
     environment: &'a BenchmarkEnvironment,
     scan_summary: &'a MeasurementSummary,
     export_summary: &'a ExportSummary,
+    responsiveness_summary: &'a ResponsivenessSummary,
     comparisons: &'a [PublicComparison],
     same_machine_comparisons: &'a [SameMachineComparison],
     audit_rows: &'a [SuiteAuditRow],
@@ -456,6 +524,7 @@ struct SuiteOptions {
     dataset_shape: String,
     iterations: usize,
     sample_ms: u64,
+    ui_tick_ms: u64,
     progress_every: u64,
     scanner: ScannerMode,
     include_directories: bool,
@@ -489,6 +558,13 @@ fn main() -> Result<()> {
             include_directories,
             output_dir,
         ),
+        Command::Responsiveness {
+            path,
+            iterations,
+            tick_ms,
+            progress_every,
+            scanner,
+        } => run_responsiveness(path, iterations, tick_ms, progress_every, scanner),
         Command::Suite {
             path,
             output_dir,
@@ -498,6 +574,7 @@ fn main() -> Result<()> {
             dataset_shape,
             iterations,
             sample_ms,
+            ui_tick_ms,
             progress_every,
             scanner,
             include_directories,
@@ -512,6 +589,7 @@ fn main() -> Result<()> {
             dataset_shape: single_line_value(&dataset_shape, "unspecified"),
             iterations,
             sample_ms,
+            ui_tick_ms,
             progress_every,
             scanner,
             include_directories,
@@ -596,11 +674,32 @@ fn run_export(
     Ok(())
 }
 
+fn run_responsiveness(
+    path: PathBuf,
+    iterations: usize,
+    tick_ms: u64,
+    progress_every: u64,
+    scanner: ScannerMode,
+) -> Result<()> {
+    let tick_interval = Duration::from_millis(tick_ms.max(1));
+    let measurements = collect_responsiveness_measurements(
+        &path,
+        iterations,
+        tick_interval,
+        progress_every,
+        scanner,
+    )?;
+
+    write_responsiveness_measurements(&mut io::stdout().lock(), &measurements)?;
+    Ok(())
+}
+
 fn run_suite(options: SuiteOptions) -> Result<()> {
     fs::create_dir_all(&options.output_dir)
         .with_context(|| format!("failed to create {}", options.output_dir.display()))?;
 
     let sample_interval = Duration::from_millis(options.sample_ms.max(1));
+    let ui_tick_interval = Duration::from_millis(options.ui_tick_ms.max(1));
     let scan_measurements = collect_scan_measurements(
         &options.path,
         options.iterations,
@@ -617,6 +716,15 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         options.include_directories,
     )?;
     let export_summary = summarize_export_measurements(&export_measurements)?;
+    let responsiveness_measurements = collect_responsiveness_measurements(
+        &options.path,
+        options.iterations,
+        ui_tick_interval,
+        options.progress_every,
+        options.scanner,
+    )?;
+    let responsiveness_summary =
+        summarize_responsiveness_measurements(&responsiveness_measurements)?;
     let claims = selected_claims(&options.claims);
     let comparisons: Vec<_> = claims
         .into_iter()
@@ -650,6 +758,16 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     let mut export_file = File::create(&export_csv)
         .with_context(|| format!("failed to create {}", export_csv.display()))?;
     write_export_measurements(&mut export_file, &export_measurements)?;
+
+    let responsiveness_csv = options.output_dir.join("responsiveness.csv");
+    let mut responsiveness_file = File::create(&responsiveness_csv)
+        .with_context(|| format!("failed to create {}", responsiveness_csv.display()))?;
+    write_responsiveness_measurements(&mut responsiveness_file, &responsiveness_measurements)?;
+
+    let responsiveness_summary_csv = options.output_dir.join("responsiveness-summary.csv");
+    let mut responsiveness_summary_file = File::create(&responsiveness_summary_csv)
+        .with_context(|| format!("failed to create {}", responsiveness_summary_csv.display()))?;
+    write_responsiveness_summary(&mut responsiveness_summary_file, &responsiveness_summary)?;
 
     let comparison_csv = options.output_dir.join("public-comparison.csv");
     let mut comparison_file = File::create(&comparison_csv)
@@ -688,11 +806,13 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         iterations: options.iterations,
         sample_ms: options.sample_ms,
         progress_every: options.progress_every,
+        ui_tick_ms: options.ui_tick_ms,
         include_directories: options.include_directories,
         run_context: &run_context,
         environment: &environment,
         scan_summary: &scan_summary,
         export_summary: &export_summary,
+        responsiveness_summary: &responsiveness_summary,
         comparisons: &comparisons,
         same_machine_comparisons: &same_machine_comparisons,
         audit_rows: &audit_rows,
@@ -704,6 +824,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         environment: &environment,
         scan_summary: &scan_summary,
         export_summary: &export_summary,
+        responsiveness_summary: &responsiveness_summary,
         comparisons: &comparisons,
         same_machine_comparisons: &same_machine_comparisons,
         audit_rows: &audit_rows,
@@ -728,6 +849,12 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     writeln!(stdout, "scan: {}", scan_csv.display())?;
     writeln!(stdout, "scan summary: {}", scan_summary_csv.display())?;
     writeln!(stdout, "export: {}", export_csv.display())?;
+    writeln!(stdout, "responsiveness: {}", responsiveness_csv.display())?;
+    writeln!(
+        stdout,
+        "responsiveness summary: {}",
+        responsiveness_summary_csv.display()
+    )?;
     writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
     writeln!(
         stdout,
@@ -777,6 +904,29 @@ fn collect_export_measurements(
         )
         .with_context(|| format!("export benchmark failed for {}", path.display()))?;
         measurements.push(export_measurement_from_run(iteration, export));
+    }
+    Ok(measurements)
+}
+
+fn collect_responsiveness_measurements(
+    path: &Path,
+    iterations: usize,
+    tick_interval: Duration,
+    progress_every: u64,
+    scanner: ScannerMode,
+) -> Result<Vec<ResponsivenessMeasurement>> {
+    let mut measurements = Vec::with_capacity(iterations);
+    for iteration in 1..=iterations {
+        let responsiveness =
+            run_responsiveness_once(path.to_path_buf(), tick_interval, progress_every, scanner)
+                .with_context(|| {
+                    format!("responsiveness benchmark failed for {}", path.display())
+                })?;
+        measurements.push(responsiveness_measurement_from_run(
+            iteration,
+            tick_interval,
+            responsiveness,
+        ));
     }
     Ok(measurements)
 }
@@ -842,6 +992,45 @@ fn run_measured_export(
     memory.observe(current_process_memory()?);
 
     Ok(MeasuredExport { run, memory })
+}
+
+fn run_responsiveness_once(
+    path: PathBuf,
+    tick_interval: Duration,
+    progress_every: u64,
+    scanner: ScannerMode,
+) -> Result<ResponsivenessRun> {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = scan_once(path, scanner, progress_every).map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+
+    let mut tick_gaps = Vec::new();
+    let mut last_tick = Instant::now();
+    let scan_result = loop {
+        match receiver.recv_timeout(tick_interval) {
+            Ok(result) => {
+                tick_gaps.push(last_tick.elapsed().as_millis());
+                break result;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = Instant::now();
+                tick_gaps.push(now.duration_since(last_tick).as_millis());
+                last_tick = now;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("responsiveness scan worker stopped"));
+            }
+        }
+    };
+    handle
+        .join()
+        .map_err(|_| anyhow!("responsiveness scan worker panicked"))?;
+    let scan = scan_result.map_err(|error| anyhow!(error))?;
+    let tick_gaps = summarize_tick_gaps(tick_gaps, tick_interval.as_millis().max(1));
+
+    Ok(ResponsivenessRun { scan, tick_gaps })
 }
 
 fn scan_once(path: PathBuf, scanner: ScannerMode, progress_every: u64) -> Result<ScanRun> {
@@ -1107,6 +1296,32 @@ fn export_measurement_from_run(iteration: usize, export: MeasuredExport) -> Expo
     }
 }
 
+fn responsiveness_measurement_from_run(
+    iteration: usize,
+    tick_interval: Duration,
+    responsiveness: ResponsivenessRun,
+) -> ResponsivenessMeasurement {
+    let summary = responsiveness.scan.summary;
+    ResponsivenessMeasurement {
+        iteration,
+        scanner: responsiveness.scan.scanner,
+        fallback: responsiveness.scan.fallback,
+        elapsed_ms: responsiveness.scan.elapsed_ms,
+        first_result_ms: responsiveness.scan.first_result_ms,
+        entries: summary.entries,
+        files: summary.files,
+        directories: summary.directories,
+        inaccessible: summary.inaccessible,
+        tick_interval_ms: tick_interval.as_millis().max(1) as u64,
+        tick_count: responsiveness.tick_gaps.count,
+        tick_gap_ms_min: responsiveness.tick_gaps.min_ms,
+        tick_gap_ms_median: responsiveness.tick_gaps.median_ms,
+        tick_gap_ms_max: responsiveness.tick_gaps.max_ms,
+        tick_over_budget_ms_max: responsiveness.tick_gaps.over_budget_ms_max,
+        tick_over_budget_count: responsiveness.tick_gaps.over_budget_count,
+    }
+}
+
 impl MemoryPeak {
     fn observe(&mut self, sample: MemorySample) {
         self.samples += 1;
@@ -1114,6 +1329,30 @@ impl MemoryPeak {
         self.final_private_bytes = sample.private_bytes;
         self.peak_working_set_bytes = self.peak_working_set_bytes.max(sample.working_set_bytes);
         self.peak_private_bytes = self.peak_private_bytes.max(sample.private_bytes);
+    }
+}
+
+fn summarize_tick_gaps(mut gaps: Vec<u128>, tick_budget_ms: u128) -> TickGapSummary {
+    if gaps.is_empty() {
+        gaps.push(0);
+    }
+    let min_ms = *gaps.iter().min().unwrap_or(&0);
+    let max_ms = *gaps.iter().max().unwrap_or(&0);
+    let over_budget_count = gaps.iter().filter(|gap| **gap > tick_budget_ms).count() as u64;
+    let over_budget_ms_max = gaps
+        .iter()
+        .map(|gap| gap.saturating_sub(tick_budget_ms))
+        .max()
+        .unwrap_or(0);
+    let median_ms = median_u128(&mut gaps);
+
+    TickGapSummary {
+        count: gaps.len() as u64,
+        min_ms,
+        median_ms,
+        max_ms,
+        over_budget_ms_max,
+        over_budget_count,
     }
 }
 
@@ -1381,6 +1620,39 @@ fn write_export_measurements(
             measurement.final_private_bytes,
             measurement.peak_private_bytes_per_million_entries,
             measurement.memory_samples
+        )?;
+    }
+    Ok(())
+}
+
+fn write_responsiveness_measurements(
+    writer: &mut impl Write,
+    measurements: &[ResponsivenessMeasurement],
+) -> Result<()> {
+    writeln!(
+        writer,
+        "iteration,scanner,fallback,elapsed_ms,first_result_ms,entries,files,directories,inaccessible,tick_interval_ms,tick_count,tick_gap_ms_min,tick_gap_ms_median,tick_gap_ms_max,tick_over_budget_ms_max,tick_over_budget_count"
+    )?;
+    for measurement in measurements {
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            measurement.iteration,
+            measurement.scanner,
+            u8::from(measurement.fallback),
+            measurement.elapsed_ms,
+            measurement.first_result_ms,
+            measurement.entries,
+            measurement.files,
+            measurement.directories,
+            measurement.inaccessible,
+            measurement.tick_interval_ms,
+            measurement.tick_count,
+            measurement.tick_gap_ms_min,
+            measurement.tick_gap_ms_median,
+            measurement.tick_gap_ms_max,
+            measurement.tick_over_budget_ms_max,
+            measurement.tick_over_budget_count
         )?;
     }
     Ok(())
@@ -1661,6 +1933,65 @@ fn summarize_export_measurements(measurements: &[ExportMeasurement]) -> Result<E
     })
 }
 
+fn summarize_responsiveness_measurements(
+    measurements: &[ResponsivenessMeasurement],
+) -> Result<ResponsivenessSummary> {
+    if measurements.is_empty() {
+        return Err(anyhow!("responsiveness measurements have no data rows"));
+    }
+
+    let mut scanners = BTreeSet::new();
+    let entries: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.entries)
+        .collect();
+    let mut elapsed: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.elapsed_ms)
+        .collect();
+    let mut first_result: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.first_result_ms)
+        .collect();
+    let mut max_tick_gaps: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.tick_gap_ms_max)
+        .collect();
+    for measurement in measurements {
+        scanners.insert(measurement.scanner);
+    }
+
+    Ok(ResponsivenessSummary {
+        runs: measurements.len(),
+        scanners: scanners.into_iter().collect::<Vec<_>>().join("+"),
+        fallback_runs: measurements
+            .iter()
+            .filter(|measurement| measurement.fallback)
+            .count(),
+        entries_min: *entries.iter().min().unwrap_or(&0),
+        entries_max: *entries.iter().max().unwrap_or(&0),
+        tick_interval_ms: measurements[0].tick_interval_ms,
+        elapsed_ms_median: median_u128(&mut elapsed),
+        first_result_ms_median: median_u128(&mut first_result),
+        max_tick_gap_ms_median: median_u128(&mut max_tick_gaps),
+        max_tick_gap_ms_max: measurements
+            .iter()
+            .map(|measurement| measurement.tick_gap_ms_max)
+            .max()
+            .unwrap_or(0),
+        max_tick_over_budget_ms: measurements
+            .iter()
+            .map(|measurement| measurement.tick_over_budget_ms_max)
+            .max()
+            .unwrap_or(0),
+        tick_over_budget_count_max: measurements
+            .iter()
+            .map(|measurement| measurement.tick_over_budget_count)
+            .max()
+            .unwrap_or(0),
+    })
+}
+
 fn median_u128(values: &mut [u128]) -> u128 {
     values.sort_unstable();
     let mid = values.len() / 2;
@@ -1693,6 +2024,33 @@ fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Resul
         summary.peak_working_set_bytes_max,
         summary.peak_private_bytes_max,
         summary.peak_private_bytes_per_million_entries_max
+    )?;
+    Ok(())
+}
+
+fn write_responsiveness_summary(
+    writer: &mut impl Write,
+    summary: &ResponsivenessSummary,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "runs,scanners,fallback_runs,entries_min,entries_max,tick_interval_ms,elapsed_ms_median,first_result_ms_median,max_tick_gap_ms_median,max_tick_gap_ms_max,max_tick_over_budget_ms,tick_over_budget_count_max"
+    )?;
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{},{},{},{},{},{}",
+        summary.runs,
+        summary.scanners,
+        summary.fallback_runs,
+        summary.entries_min,
+        summary.entries_max,
+        summary.tick_interval_ms,
+        summary.elapsed_ms_median,
+        summary.first_result_ms_median,
+        summary.max_tick_gap_ms_median,
+        summary.max_tick_gap_ms_max,
+        summary.max_tick_over_budget_ms,
+        summary.tick_over_budget_count_max
     )?;
     Ok(())
 }
@@ -2113,6 +2471,20 @@ fn suite_audit_rows(
         )
     });
 
+    rows.push(if options.ui_tick_ms <= 50 {
+        SuiteAuditRow::new(
+            "ui_responsiveness",
+            AuditStatus::Pass,
+            "UI responsiveness collector uses a foreground tick interval suitable for publishable runs.",
+        )
+    } else {
+        SuiteAuditRow::new(
+            "ui_responsiveness",
+            AuditStatus::Warning,
+            "Use --ui-tick-ms 50 or lower when publishing UI responsiveness measurements.",
+        )
+    });
+
     rows.push(if run_context.git_dirty == "false" {
         SuiteAuditRow::new("git_dirty", AuditStatus::Pass, "Git worktree was clean.")
     } else {
@@ -2246,6 +2618,7 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     writeln!(writer, "- Scanner: `{}`", scanner_label(report.scanner))?;
     writeln!(writer, "- Iterations: {}", report.iterations)?;
     writeln!(writer, "- Sample interval: {} ms", report.sample_ms)?;
+    writeln!(writer, "- UI tick interval: {} ms", report.ui_tick_ms)?;
     writeln!(
         writer,
         "- Progress interval: {} entries",
@@ -2371,6 +2744,33 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         report.export_summary.export_elapsed_ms_max,
         report.export_summary.total_elapsed_ms_median,
         report.export_summary.peak_private_bytes_max
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "## DiskLoom UI Responsiveness")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| runs | scanners | fallback runs | entries | tick interval ms | scan median ms | first result median ms | max tick gap median/max ms | max over-budget ms | over-budget ticks max |"
+    )?;
+    writeln!(
+        writer,
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )?;
+    writeln!(
+        writer,
+        "| {} | {} | {} | {}-{} | {} | {} | {} | {} / {} | {} | {} |",
+        report.responsiveness_summary.runs,
+        report.responsiveness_summary.scanners,
+        report.responsiveness_summary.fallback_runs,
+        report.responsiveness_summary.entries_min,
+        report.responsiveness_summary.entries_max,
+        report.responsiveness_summary.tick_interval_ms,
+        report.responsiveness_summary.elapsed_ms_median,
+        report.responsiveness_summary.first_result_ms_median,
+        report.responsiveness_summary.max_tick_gap_ms_median,
+        report.responsiveness_summary.max_tick_gap_ms_max,
+        report.responsiveness_summary.max_tick_over_budget_ms,
+        report.responsiveness_summary.tick_over_budget_count_max
     )?;
     writeln!(writer)?;
     writeln!(writer, "## Same-Machine Competitor Comparisons")?;
@@ -2500,6 +2900,7 @@ fn write_suite_metadata(
     writeln!(writer, "scanner={}", scanner_label(options.scanner))?;
     writeln!(writer, "iterations={}", options.iterations)?;
     writeln!(writer, "sample_ms={}", options.sample_ms)?;
+    writeln!(writer, "ui_tick_ms={}", options.ui_tick_ms)?;
     writeln!(writer, "progress_every={}", options.progress_every)?;
     writeln!(
         writer,
@@ -2520,6 +2921,7 @@ fn write_suite_metadata(
     writeln!(writer, "- drive_type=")?;
     writeln!(writer, "- shell_elevated=")?;
     writeln!(writer, "- cache_state=")?;
+    writeln!(writer, "- ui_responsiveness=")?;
     writeln!(writer, "- competitor_versions=")?;
     writeln!(writer, "- same_machine_competitor_runs=")?;
     writeln!(
@@ -2535,6 +2937,7 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
     let environment = manifest.environment;
     let scan_summary = manifest.scan_summary;
     let export_summary = manifest.export_summary;
+    let responsiveness_summary = manifest.responsiveness_summary;
     let comparisons = manifest.comparisons;
     let same_machine_comparisons = manifest.same_machine_comparisons;
     let audit_rows = manifest.audit_rows;
@@ -2618,6 +3021,7 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
     )?;
     writeln!(writer, "    \"iterations\": {},", options.iterations)?;
     writeln!(writer, "    \"sample_ms\": {},", options.sample_ms)?;
+    writeln!(writer, "    \"ui_tick_ms\": {},", options.ui_tick_ms)?;
     writeln!(
         writer,
         "    \"progress_every\": {},",
@@ -2687,6 +3091,8 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
     writeln!(writer, "    {},", json_string("scan.csv"))?;
     writeln!(writer, "    {},", json_string("scan-summary.csv"))?;
     writeln!(writer, "    {},", json_string("export.csv"))?;
+    writeln!(writer, "    {},", json_string("responsiveness.csv"))?;
+    writeln!(writer, "    {},", json_string("responsiveness-summary.csv"))?;
     writeln!(writer, "    {},", json_string("public-comparison.csv"))?;
     writeln!(
         writer,
@@ -2779,6 +3185,54 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
         writer,
         "    \"peak_private_bytes_max\": {}",
         export_summary.peak_private_bytes_max
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"responsiveness_summary\": {{")?;
+    writeln!(writer, "    \"runs\": {},", responsiveness_summary.runs)?;
+    writeln!(
+        writer,
+        "    \"scanners\": {},",
+        json_string(&responsiveness_summary.scanners)
+    )?;
+    writeln!(
+        writer,
+        "    \"fallback_runs\": {},",
+        responsiveness_summary.fallback_runs
+    )?;
+    writeln!(
+        writer,
+        "    \"tick_interval_ms\": {},",
+        responsiveness_summary.tick_interval_ms
+    )?;
+    writeln!(
+        writer,
+        "    \"elapsed_ms_median\": {},",
+        responsiveness_summary.elapsed_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"first_result_ms_median\": {},",
+        responsiveness_summary.first_result_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"max_tick_gap_ms_median\": {},",
+        responsiveness_summary.max_tick_gap_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"max_tick_gap_ms_max\": {},",
+        responsiveness_summary.max_tick_gap_ms_max
+    )?;
+    writeln!(
+        writer,
+        "    \"max_tick_over_budget_ms\": {},",
+        responsiveness_summary.max_tick_over_budget_ms
+    )?;
+    writeln!(
+        writer,
+        "    \"tick_over_budget_count_max\": {}",
+        responsiveness_summary.tick_over_budget_count_max
     )?;
     writeln!(writer, "  }},")?;
     writeln!(writer, "  \"audit\": [")?;
@@ -3318,15 +3772,17 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 mod tests {
     use super::{
         Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
-        ExportSummary, MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteAuditRow,
-        SuiteManifest, SuiteOptions, SuiteReport, SuiteRunContext, compare_summary_to_claim,
-        compare_summary_to_competitors, json_string, parse_competitor_measurements,
-        parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
-        selected_claims, shell_quote_arg, single_line_value, suite_audit_rows, suite_audit_status,
-        suite_same_machine_comparisons, summarize_export_measurements, summarize_rows,
+        ExportSummary, MeasurementSummary, PublicClaimId, ResponsivenessMeasurement,
+        ResponsivenessSummary, ScanMeasurement, SuiteAuditRow, SuiteManifest, SuiteOptions,
+        SuiteReport, SuiteRunContext, compare_summary_to_claim, compare_summary_to_competitors,
+        json_string, parse_competitor_measurements, parse_measurements, per_million, public_claim,
+        ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
+        single_line_value, suite_audit_rows, suite_audit_status, suite_same_machine_comparisons,
+        summarize_export_measurements, summarize_responsiveness_measurements, summarize_rows,
         write_competitor_template, write_export_measurements, write_measurements,
-        write_public_comparisons, write_same_machine_comparisons, write_suite_audit,
-        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
+        write_public_comparisons, write_responsiveness_measurements, write_responsiveness_summary,
+        write_same_machine_comparisons, write_suite_audit, write_suite_manifest,
+        write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -3399,6 +3855,61 @@ mod tests {
         assert_eq!(summary.export_elapsed_ms_median, 5);
         assert_eq!(summary.export_elapsed_ms_min, 3);
         assert_eq!(summary.export_elapsed_ms_max, 7);
+    }
+
+    #[test]
+    fn write_responsiveness_measurements_should_emit_csv_rows() {
+        let measurements = [ResponsivenessMeasurement {
+            iteration: 1,
+            scanner: "fallback",
+            fallback: false,
+            elapsed_ms: 20,
+            first_result_ms: 2,
+            entries: 3,
+            files: 2,
+            directories: 1,
+            inaccessible: 0,
+            tick_interval_ms: 16,
+            tick_count: 2,
+            tick_gap_ms_min: 1,
+            tick_gap_ms_median: 8,
+            tick_gap_ms_max: 17,
+            tick_over_budget_ms_max: 1,
+            tick_over_budget_count: 1,
+        }];
+        let mut output = Vec::new();
+
+        write_responsiveness_measurements(&mut output, &measurements).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("1,fallback,0,20,2,3,2,1,0,16,2,1,8,17,1,1"));
+    }
+
+    #[test]
+    fn summarize_responsiveness_measurements_should_track_worst_tick_gap() {
+        let measurements = [
+            responsiveness_measurement(1, 20, 17, 1),
+            responsiveness_measurement(2, 30, 24, 8),
+            responsiveness_measurement(3, 25, 20, 4),
+        ];
+
+        let summary = summarize_responsiveness_measurements(&measurements).unwrap();
+
+        assert_eq!(summary.elapsed_ms_median, 25);
+        assert_eq!(summary.max_tick_gap_ms_median, 20);
+        assert_eq!(summary.max_tick_gap_ms_max, 24);
+        assert_eq!(summary.max_tick_over_budget_ms, 8);
+    }
+
+    #[test]
+    fn write_responsiveness_summary_should_emit_single_csv_row() {
+        let summary = sample_responsiveness_summary();
+        let mut output = Vec::new();
+
+        write_responsiveness_summary(&mut output, &summary).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("3,fallback,0,3,3,16,1000,20,17,24,8,1"));
     }
 
     #[test]
@@ -3884,6 +4395,7 @@ TreeSize,9.0,other,warm,traversal,2000,
             dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
+            ui_tick_ms: 16,
             progress_every: 1024,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
@@ -3925,6 +4437,7 @@ WizTree,4.25,repo-smoke,warm,traversal,700,50
             dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
+            ui_tick_ms: 16,
             progress_every: 1024,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
@@ -3971,6 +4484,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             cache_state,
             hardware_label,
             dataset_shape,
+            ui_tick_ms,
             ..
         } = args.command
         else {
@@ -3980,6 +4494,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert_eq!(cache_state, "unknown");
         assert_eq!(hardware_label, "unspecified");
         assert_eq!(dataset_shape, "unspecified");
+        assert_eq!(ui_tick_ms, 16);
     }
 
     #[test]
@@ -4023,6 +4538,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         )];
         let run_context = sample_run_context();
         let environment = sample_environment();
+        let responsiveness_summary = sample_responsiveness_summary();
         let audit_rows = [SuiteAuditRow::new(
             "public_claims",
             AuditStatus::Warning,
@@ -4042,12 +4558,14 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
                 scanner: super::ScannerMode::Fallback,
                 iterations: 3,
                 sample_ms: 10,
+                ui_tick_ms: 16,
                 progress_every: 1024,
                 include_directories: true,
                 run_context: &run_context,
                 environment: &environment,
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
+                responsiveness_summary: &responsiveness_summary,
                 comparisons: &comparisons,
                 same_machine_comparisons: &[],
                 audit_rows: &audit_rows,
@@ -4070,6 +4588,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("Cache state: `warm`"));
         assert!(output.contains("Hardware label: `workstation-a`"));
         assert!(output.contains("Dataset shape: `repo tree`"));
+        assert!(output.contains("## DiskLoom UI Responsiveness"));
         assert!(output.contains("## Benchmark Audit"));
         assert!(output.contains("Overall status: `warning`"));
         assert!(output.contains("## Same-Machine Competitor Comparisons"));
@@ -4099,6 +4618,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         let same_machine_comparisons = [sample_same_machine_comparison()];
         let run_context = sample_run_context();
         let environment = sample_environment();
+        let responsiveness_summary = sample_responsiveness_summary();
         let mut output = Vec::new();
 
         write_suite_report(
@@ -4113,12 +4633,14 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
                 scanner: super::ScannerMode::Fallback,
                 iterations: 3,
                 sample_ms: 10,
+                ui_tick_ms: 16,
                 progress_every: 1024,
                 include_directories: true,
                 run_context: &run_context,
                 environment: &environment,
                 scan_summary: &scan_summary,
                 export_summary: &export_summary,
+                responsiveness_summary: &responsiveness_summary,
                 comparisons: &[],
                 same_machine_comparisons: &same_machine_comparisons,
                 audit_rows: &[],
@@ -4141,6 +4663,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
+            ui_tick_ms: 16,
             progress_every: 1024,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
@@ -4173,6 +4696,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("cache_state=warm"));
         assert!(output.contains("hardware_label=workstation-a"));
         assert!(output.contains("dataset_shape=repo tree"));
+        assert!(output.contains("ui_tick_ms=16"));
         assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
@@ -4194,6 +4718,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             dataset_shape: "unspecified".to_owned(),
             iterations: 1,
             sample_ms: 10,
+            ui_tick_ms: 16,
             progress_every: 1024,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
@@ -4277,6 +4802,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             dataset_shape: "repo tree".to_owned(),
             iterations: 3,
             sample_ms: 10,
+            ui_tick_ms: 16,
             progress_every: 1024,
             scanner: super::ScannerMode::Fallback,
             include_directories: true,
@@ -4323,6 +4849,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         let same_machine_comparisons = [sample_same_machine_comparison()];
         let run_context = sample_run_context();
         let environment = sample_environment();
+        let responsiveness_summary = sample_responsiveness_summary();
         let audit_rows = suite_audit_rows(
             &options,
             &run_context,
@@ -4335,6 +4862,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             environment: &environment,
             scan_summary: &scan_summary,
             export_summary: &export_summary,
+            responsiveness_summary: &responsiveness_summary,
             comparisons: &comparisons,
             same_machine_comparisons: &same_machine_comparisons,
             audit_rows: &audit_rows,
@@ -4350,8 +4878,11 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("\"cache_state\": \"warm\""));
         assert!(output.contains("\"hardware_label\": \"workstation-a\""));
         assert!(output.contains("\"dataset_shape\": \"repo tree\""));
+        assert!(output.contains("\"ui_tick_ms\": 16"));
         assert!(output.contains("\"competitor_csv\": \"\""));
         assert!(output.contains("\"audit.csv\""));
+        assert!(output.contains("\"responsiveness-summary.csv\""));
+        assert!(output.contains("\"responsiveness_summary\""));
         assert!(output.contains("\"manifest.json\""));
         assert!(output.contains("\"claim_id\": \"wiztree-ssd-460gb\""));
         assert!(output.contains("\"same-machine-comparison.csv\""));
@@ -4422,6 +4953,32 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         }
     }
 
+    fn responsiveness_measurement(
+        iteration: usize,
+        elapsed_ms: u128,
+        tick_gap_ms_max: u128,
+        tick_over_budget_ms_max: u128,
+    ) -> ResponsivenessMeasurement {
+        ResponsivenessMeasurement {
+            iteration,
+            scanner: "fallback",
+            fallback: false,
+            elapsed_ms,
+            first_result_ms: 2,
+            entries: 3,
+            files: 2,
+            directories: 1,
+            inaccessible: 0,
+            tick_interval_ms: 16,
+            tick_count: 2,
+            tick_gap_ms_min: 1,
+            tick_gap_ms_median: 8,
+            tick_gap_ms_max,
+            tick_over_budget_ms_max,
+            tick_over_budget_count: 1,
+        }
+    }
+
     fn sample_environment() -> BenchmarkEnvironment {
         BenchmarkEnvironment {
             volume_root: "C:\\".to_owned(),
@@ -4458,6 +5015,23 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             peak_working_set_bytes_max: 120,
             peak_private_bytes_max: 95,
             peak_private_bytes_per_million_entries_max: 31_666_666,
+        }
+    }
+
+    fn sample_responsiveness_summary() -> ResponsivenessSummary {
+        ResponsivenessSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            tick_interval_ms: 16,
+            elapsed_ms_median: 1_000,
+            first_result_ms_median: 20,
+            max_tick_gap_ms_median: 17,
+            max_tick_gap_ms_max: 24,
+            max_tick_over_budget_ms: 8,
+            tick_over_budget_count_max: 1,
         }
     }
 

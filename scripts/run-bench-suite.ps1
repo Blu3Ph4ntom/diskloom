@@ -10,6 +10,7 @@ param(
     [string]$CacheState = "unknown",
     [string]$HardwareLabel = "unspecified",
     [string]$DatasetShape = "unspecified",
+    [int]$UiTickMs = 16,
     [string]$CompetitorCsv = "",
     [string[]]$Claim = @(),
     [switch]$FilesOnly,
@@ -48,6 +49,7 @@ function Assert-Positive {
 
 Assert-Positive -Name "Iterations" -Value $Iterations
 Assert-Positive -Name "SampleMs" -Value $SampleMs
+Assert-Positive -Name "UiTickMs" -Value $UiTickMs
 Assert-Positive -Name "ProgressEvery" -Value $ProgressEvery
 Assert-UnderPath -Child $outputRootPath -Parent $repoRoot
 
@@ -87,6 +89,8 @@ try {
         $Iterations.ToString(),
         "--sample-ms",
         $SampleMs.ToString(),
+        "--ui-tick-ms",
+        $UiTickMs.ToString(),
         "--progress-every",
         $ProgressEvery.ToString(),
         "--scanner",
@@ -115,6 +119,8 @@ try {
     Write-Host "Benchmark bundle: $outputDir"
     Write-Host "Report: $(Join-Path $outputDir "report.md")"
     Write-Host "Audit: $(Join-Path $outputDir "audit.csv")"
+    Write-Host "Responsiveness CSV: $(Join-Path $outputDir "responsiveness.csv")"
+    Write-Host "Responsiveness summary CSV: $(Join-Path $outputDir "responsiveness-summary.csv")"
     Write-Host "Same-machine comparison CSV: $(Join-Path $outputDir "same-machine-comparison.csv")"
     Write-Host "Public comparison CSV: $(Join-Path $outputDir "public-comparison.csv")"
 }
