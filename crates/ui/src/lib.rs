@@ -10,6 +10,7 @@ use std::{
 };
 
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
+use diskloom_dupes::{DuplicateCandidate, find_duplicate_candidates};
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
@@ -21,6 +22,8 @@ use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_prope
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
 const TREE_ROW_LIMIT: usize = 500;
+const DUPLICATE_GROUP_LIMIT: usize = 100;
+const DUPLICATE_PATH_LIMIT: usize = 20;
 
 #[derive(Debug)]
 pub struct DiskLoomApp {
@@ -45,6 +48,7 @@ enum ActiveTab {
     Files,
     Types,
     Treemap,
+    Duplicates,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +99,7 @@ struct ScanResult {
     tree_rows: Vec<TreeRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
+    duplicate_groups: Vec<DuplicateGroup>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +127,22 @@ struct ResultRow {
     size: u64,
     allocated: u64,
     modified_unix: i64,
+}
+
+#[derive(Debug, Clone)]
+struct DuplicateGroup {
+    name: String,
+    size: u64,
+    modified_unix: i64,
+    count: usize,
+    wasted_bytes: u64,
+    paths: Vec<DuplicatePath>,
+}
+
+#[derive(Debug, Clone)]
+struct DuplicatePath {
+    path: PathBuf,
+    path_text: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -285,6 +306,11 @@ impl DiskLoomApp {
                 let tree_rows = tree_rows_from_graph(&graph, TREE_ROW_LIMIT);
                 let file_types = file_type_stats(&graph, 50);
                 let treemap_items = treemap_items_from_graph(&graph, 120);
+                let duplicate_groups = duplicate_groups_from_graph(
+                    &graph,
+                    DUPLICATE_GROUP_LIMIT,
+                    DUPLICATE_PATH_LIMIT,
+                );
                 ScanResult {
                     graph,
                     summary: outcome.summary,
@@ -294,6 +320,7 @@ impl DiskLoomApp {
                     tree_rows,
                     file_types,
                     treemap_items,
+                    duplicate_groups,
                 }
             });
 
@@ -629,6 +656,7 @@ impl DiskLoomApp {
             ui.selectable_value(&mut self.active_tab, ActiveTab::Files, "Files");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Types, "Types");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Treemap, "Treemap");
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Duplicates, "Duplicates");
         });
     }
 
@@ -638,6 +666,7 @@ impl DiskLoomApp {
             ActiveTab::Files => self.results(ui),
             ActiveTab::Types => self.type_stats(ui),
             ActiveTab::Treemap => self.treemap(ui),
+            ActiveTab::Duplicates => self.duplicates(ui),
         }
     }
 
@@ -778,6 +807,55 @@ impl DiskLoomApp {
         for (idx, item) in treemap.iter().enumerate() {
             paint_treemap_rect(&painter, item, idx);
         }
+    }
+
+    fn duplicates(&mut self, ui: &mut egui::Ui) {
+        let groups = match &self.state {
+            UiState::Complete(result) => result.duplicate_groups.clone(),
+            _ => return,
+        };
+
+        ui.label(format!("{} duplicate candidate groups", groups.len()));
+        egui::ScrollArea::both()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                egui::Grid::new("duplicates_grid")
+                    .striped(true)
+                    .min_col_width(80.0)
+                    .show(ui, |ui| {
+                        ui.strong("Wasted");
+                        ui.strong("Size");
+                        ui.strong("Count");
+                        ui.strong("Modified");
+                        ui.strong("Name");
+                        ui.end_row();
+
+                        for group in &groups {
+                            ui.monospace(group.wasted_bytes.to_string());
+                            ui.monospace(group.size.to_string());
+                            ui.monospace(group.count.to_string());
+                            ui.monospace(group.modified_unix.to_string());
+                            ui.label(&group.name);
+                            ui.end_row();
+
+                            for duplicate_path in &group.paths {
+                                ui.label("");
+                                ui.label("");
+                                ui.label("");
+                                ui.label("");
+                                let selected =
+                                    self.selected_path.as_ref() == Some(&duplicate_path.path);
+                                if ui
+                                    .selectable_label(selected, &duplicate_path.path_text)
+                                    .clicked()
+                                {
+                                    self.select_path(duplicate_path.path.clone());
+                                }
+                                ui.end_row();
+                            }
+                        }
+                    });
+            });
     }
 
     fn ensure_view_cache(&mut self) -> Result<&ViewCache, String> {
@@ -1329,6 +1407,59 @@ fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem>
         .collect()
 }
 
+fn duplicate_groups_from_graph(
+    graph: &FileGraph,
+    group_limit: usize,
+    path_limit: usize,
+) -> Vec<DuplicateGroup> {
+    let mut candidates = find_duplicate_candidates(graph);
+    candidates.sort_by(|left, right| {
+        duplicate_wasted_bytes(right)
+            .cmp(&duplicate_wasted_bytes(left))
+            .then_with(|| right.size.cmp(&left.size))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    candidates
+        .into_iter()
+        .take(group_limit)
+        .map(|candidate| duplicate_group_from_candidate(graph, candidate, path_limit))
+        .collect()
+}
+
+fn duplicate_group_from_candidate(
+    graph: &FileGraph,
+    candidate: DuplicateCandidate,
+    path_limit: usize,
+) -> DuplicateGroup {
+    let wasted_bytes = duplicate_wasted_bytes(&candidate);
+    let paths = candidate
+        .entries
+        .iter()
+        .take(path_limit)
+        .filter_map(|id| {
+            let path = graph.reconstruct_path(*id)?;
+            let path_text = path.display().to_string();
+            Some(DuplicatePath { path, path_text })
+        })
+        .collect();
+
+    DuplicateGroup {
+        name: candidate.name,
+        size: candidate.size,
+        modified_unix: candidate.modified_unix,
+        count: candidate.entries.len(),
+        wasted_bytes,
+        paths,
+    }
+}
+
+fn duplicate_wasted_bytes(candidate: &DuplicateCandidate) -> u64 {
+    candidate
+        .size
+        .saturating_mul(candidate.entries.len().saturating_sub(1) as u64)
+}
+
 fn paint_treemap_rect(painter: &egui::Painter, item: &TreemapRect, idx: usize) {
     let bounds = egui::Rect::from_min_size(
         egui::pos2(item.bounds.x, item.bounds.y),
@@ -1372,8 +1503,8 @@ mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
     use super::{
-        FilterInputs, export_graph_to_csv, filtered_rows_from_graph, parse_optional_u64,
-        parse_optional_unix_seconds, tree_rows_from_graph,
+        FilterInputs, duplicate_groups_from_graph, export_graph_to_csv, filtered_rows_from_graph,
+        parse_optional_u64, parse_optional_unix_seconds, tree_rows_from_graph,
     };
 
     fn sample_graph() -> FileGraph {
@@ -1476,6 +1607,33 @@ mod tests {
 
         assert!(output.contains("trace.log"));
         assert!(!output.contains("directory"));
+    }
+
+    #[test]
+    fn duplicate_groups_should_order_by_wasted_bytes() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "small.bin", FileKind::File, 10, 10, 100)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "SMALL.bin", FileKind::File, 10, 10, 100)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "large.bin", FileKind::File, 100, 100, 100)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "LARGE.bin", FileKind::File, 100, 100, 100)
+            .unwrap();
+        let graph = builder.finish();
+
+        let groups = duplicate_groups_from_graph(&graph, 10, 10);
+
+        assert_eq!(groups[0].name, "large.bin");
+        assert_eq!(groups[0].wasted_bytes, 100);
+        assert_eq!(groups[0].paths.len(), 2);
     }
 
     #[test]
