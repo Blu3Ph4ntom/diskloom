@@ -3,6 +3,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "DiskLoom",
         native_options,
-        Box::new(|_| Ok(Box::<diskloom_ui::DiskLoomApp>::default())),
+        Box::new(|_| Ok(Box::new(diskloom_ui::DiskLoomApp::from_env_args()))),
     )
 }

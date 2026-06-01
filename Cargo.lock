@@ -472,6 +472,7 @@ dependencies = [
  "diskloom-export",
  "diskloom-ntfs",
  "diskloom-scan",
+ "diskloom-windows",
  "windows",
 ]
 

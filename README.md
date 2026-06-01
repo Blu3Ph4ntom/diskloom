@@ -57,7 +57,7 @@ Run a fallback scan:
 cargo run -p diskloom-cli -- scan . --scanner fallback --limit 25
 ```
 
-Run auto mode, which tries direct NTFS MFT scanning for drive roots and falls back if needed:
+Run auto mode, which uses direct NTFS MFT scanning for drive roots and fallback traversal for folders:
 
 ```powershell
 cargo run -p diskloom-cli -- scan C:\ --scanner auto --limit 25
@@ -68,6 +68,8 @@ Force direct NTFS MFT scanning:
 ```powershell
 cargo run -p diskloom-cli -- scan C:\ --scanner ntfs --limit 25
 ```
+
+Direct NTFS drive scans require administrator access on Windows. If DiskLoom is not already elevated, the CLI, GUI, and benchmark harness request UAC elevation and relaunch the same command instead of silently falling back to traversal.
 
 Export CSV:
 

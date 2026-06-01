@@ -22,14 +22,14 @@ Accessed: 2026-06-01.
 | WizTree publishes 46x and 22x faster results versus WinDirStat on older systems. | Treat those as historical reference points, not current proof. DiskLoom must publish same-machine comparisons against current WizTree, TreeSize, WinDirStat, and Explorer traversal. | Methodology exists; competitor automation is not implemented yet. |
 | Direct MFT reading is the core speed advantage on NTFS. | DiskLoom's `ntfs` scanner must be measured separately from `fallback` so failures and fallback behavior are visible. | `diskloom-bench` records `scanner` and `fallback` columns. |
 | Public WizTree timing claims are NTFS MFT-scan claims. | Public comparison rows must mark whether the DiskLoom run used an aligned scanner class. | `public-comparison.csv` includes `claim_scan_scope` and `comparison_applicability`; fallback rows are marked `not_aligned_requires_ntfs_mft`. |
-| High-speed NTFS scanning requires admin rights. | Runs must record whether the shell was elevated, and `auto` mode must show if it fell back. | CLI, GUI, and benchmark auto modes report fallback behavior. |
+| High-speed NTFS scanning requires admin rights. | Runs must record whether the shell was elevated, and direct NTFS scans should not silently downgrade to fallback traversal. | CLI, GUI, and benchmark direct-drive scans request UAC elevation when needed. |
 | Non-NTFS drives, network drives, USB drives, and folders are supported through non-MFT scanning. | Benchmark fallback traversal separately on folders, network paths, and removable drives. | Non-admin fallback scanner exists and emits timing/memory data. |
 | Hard links are handled without double-counting where possible. | Include synthetic hard-link datasets and compare allocated-size totals against Windows/WizTree. | Initial NTFS hard-link flagging exists; full correctness proof is still pending. |
 | CSV export/import and duplicate location are product capabilities. | Benchmark CSV export time and duplicate grouping separately from scan time. | CSV export and first-pass duplicate candidates exist; import and content hashing are not done. |
 
 ## DiskLoom Commands
 
-Run all benchmark commands from a release build. Use the same shell elevation state for every tool in a comparison set.
+Run all benchmark commands from a release build. Use the same shell elevation state for every tool in a comparison set. DiskLoom requests UAC elevation for direct NTFS drive scans when the current process is not elevated; for redirected benchmark output, running an elevated shell up front is still the most reproducible setup.
 
 ```powershell
 cargo build --release -p diskloom-bench -p diskloom-cli

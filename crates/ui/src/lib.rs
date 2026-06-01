@@ -18,7 +18,10 @@ use diskloom_query::{
     file_type_stats, layout_treemap, top_entries_by_own_size, top_entries_by_total_size,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
-use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_properties};
+use diskloom_windows::{
+    is_process_elevated, open_in_explorer, recycle_delete, relaunch_current_process_elevated,
+    rename_path, show_properties,
+};
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
 const TREE_ROW_LIMIT: usize = 500;
@@ -40,6 +43,7 @@ pub struct DiskLoomApp {
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
+    start_on_launch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,23 @@ impl UiScannerMode {
             Self::Auto => "Auto",
             Self::Ntfs => "NTFS",
             Self::Fallback => "Fallback",
+        }
+    }
+
+    fn arg_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ntfs => "ntfs",
+            Self::Fallback => "fallback",
+        }
+    }
+
+    fn from_arg(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "ntfs" => Some(Self::Ntfs),
+            "fallback" => Some(Self::Fallback),
+            _ => None,
         }
     }
 }
@@ -207,7 +228,42 @@ impl Default for DiskLoomApp {
             active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
+            start_on_launch: false,
         }
+    }
+}
+
+impl DiskLoomApp {
+    #[must_use]
+    pub fn from_env_args() -> Self {
+        Self::from_launch_args(std::env::args().skip(1))
+    }
+
+    fn from_launch_args(args: impl IntoIterator<Item = String>) -> Self {
+        let mut app = Self::default();
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--path" => {
+                    if let Some(path) = args.next() {
+                        app.path = path;
+                    }
+                }
+                "--scanner" => {
+                    if let Some(scanner) = args
+                        .next()
+                        .and_then(|value| UiScannerMode::from_arg(&value))
+                    {
+                        app.scanner_mode = scanner;
+                    }
+                }
+                "--scan" => {
+                    app.start_on_launch = true;
+                }
+                _ => {}
+            }
+        }
+        app
     }
 }
 
@@ -216,6 +272,10 @@ impl eframe::App for DiskLoomApp {
         ctx.set_visuals(egui::Visuals::dark());
         self.receive_scan();
         self.receive_action();
+        if self.start_on_launch {
+            self.start_on_launch = false;
+            self.start_scan();
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered_justified(|ui| {
@@ -284,6 +344,24 @@ impl DiskLoomApp {
         let trimmed = self.path.trim();
         let path = PathBuf::from(if trimmed.is_empty() { "." } else { trimmed });
         let scanner_mode = self.scanner_mode;
+        match maybe_relaunch_ui_scan_elevated(&path, scanner_mode) {
+            Ok(true) => {
+                self.action_status = Some(ActionStatus {
+                    message: "administrator access requested for direct NTFS scanning".to_owned(),
+                    is_error: false,
+                });
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.action_status = Some(ActionStatus {
+                    message: error,
+                    is_error: true,
+                });
+                return;
+            }
+        }
+
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
         self.state = UiState::Scanning(None);
@@ -1065,6 +1143,42 @@ fn drive_volume(path: &Path) -> Option<String> {
     Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
+fn maybe_relaunch_ui_scan_elevated(
+    path: &Path,
+    scanner_mode: UiScannerMode,
+) -> Result<bool, String> {
+    if !ui_scan_needs_elevation(path, scanner_mode) || !should_request_elevation()? {
+        return Ok(false);
+    }
+
+    let args = [
+        "--path".to_owned(),
+        path.to_string_lossy().into_owned(),
+        "--scanner".to_owned(),
+        scanner_mode.arg_value().to_owned(),
+        "--scan".to_owned(),
+    ];
+    relaunch_current_process_elevated(args)
+        .map_err(|error| format!("failed to request administrator access: {error}"))?;
+    Ok(true)
+}
+
+fn ui_scan_needs_elevation(path: &Path, scanner_mode: UiScannerMode) -> bool {
+    scanner_mode != UiScannerMode::Fallback && drive_volume(path).is_some()
+}
+
+#[cfg(windows)]
+fn should_request_elevation() -> Result<bool, String> {
+    is_process_elevated()
+        .map(|is_elevated| !is_elevated)
+        .map_err(|error| format!("failed to check administrator elevation: {error}"))
+}
+
+#[cfg(not(windows))]
+fn should_request_elevation() -> Result<bool, String> {
+    Ok(false)
+}
+
 #[derive(Debug)]
 struct FilteredRows {
     matched: usize,
@@ -1520,6 +1634,7 @@ mod tests {
     use super::{
         FilterInputs, duplicate_groups_from_graph, export_graph_to_csv, filtered_rows_from_graph,
         parse_optional_u64, parse_optional_unix_seconds, tree_rows_from_graph,
+        ui_scan_needs_elevation,
     };
 
     fn sample_graph() -> FileGraph {
@@ -1602,6 +1717,41 @@ mod tests {
             Some(1_704_067_200)
         );
         assert!(parse_optional_unix_seconds("Modified", "2024-02-31").is_err());
+    }
+
+    #[test]
+    fn launch_args_should_restore_scan_request() {
+        let app = super::DiskLoomApp::from_launch_args([
+            "--path".to_owned(),
+            "C:\\".to_owned(),
+            "--scanner".to_owned(),
+            "ntfs".to_owned(),
+            "--scan".to_owned(),
+        ]);
+
+        assert_eq!(app.path, "C:\\");
+        assert_eq!(app.scanner_mode, super::UiScannerMode::Ntfs);
+        assert!(app.start_on_launch);
+    }
+
+    #[test]
+    fn ui_scan_needs_elevation_should_match_direct_drive_scans_only() {
+        assert!(ui_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            super::UiScannerMode::Auto
+        ));
+        assert!(ui_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            super::UiScannerMode::Ntfs
+        ));
+        assert!(!ui_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            super::UiScannerMode::Fallback
+        ));
+        assert!(!ui_scan_needs_elevation(
+            std::path::Path::new("C:\\Users"),
+            super::UiScannerMode::Auto
+        ));
     }
 
     #[test]

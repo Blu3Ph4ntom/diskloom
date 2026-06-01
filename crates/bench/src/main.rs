@@ -16,6 +16,7 @@ use diskloom_core::{EntryFlags, FileGraph};
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
+use diskloom_windows::{is_process_elevated, relaunch_current_process_elevated};
 
 #[derive(Debug, Parser)]
 #[command(name = "diskloom-bench")]
@@ -542,7 +543,12 @@ fn main() -> Result<()> {
             sample_ms,
             progress_every,
             scanner,
-        } => run_scan(path, iterations, sample_ms, progress_every, scanner),
+        } => {
+            if maybe_relaunch_bench_elevated(&path, scanner)? {
+                return Ok(());
+            }
+            run_scan(path, iterations, sample_ms, progress_every, scanner)
+        }
         Command::Export {
             path,
             iterations,
@@ -550,21 +556,31 @@ fn main() -> Result<()> {
             scanner,
             include_directories,
             output_dir,
-        } => run_export(
-            path,
-            iterations,
-            sample_ms,
-            scanner,
-            include_directories,
-            output_dir,
-        ),
+        } => {
+            if maybe_relaunch_bench_elevated(&path, scanner)? {
+                return Ok(());
+            }
+            run_export(
+                path,
+                iterations,
+                sample_ms,
+                scanner,
+                include_directories,
+                output_dir,
+            )
+        }
         Command::Responsiveness {
             path,
             iterations,
             tick_ms,
             progress_every,
             scanner,
-        } => run_responsiveness(path, iterations, tick_ms, progress_every, scanner),
+        } => {
+            if maybe_relaunch_bench_elevated(&path, scanner)? {
+                return Ok(());
+            }
+            run_responsiveness(path, iterations, tick_ms, progress_every, scanner)
+        }
         Command::Suite {
             path,
             output_dir,
@@ -580,22 +596,27 @@ fn main() -> Result<()> {
             include_directories,
             claim,
             competitor_csv,
-        } => run_suite(SuiteOptions {
-            path,
-            output_dir,
-            dataset_label: single_line_value(&dataset_label, "unspecified"),
-            cache_state: single_line_value(&cache_state, "unknown"),
-            hardware_label: single_line_value(&hardware_label, "unspecified"),
-            dataset_shape: single_line_value(&dataset_shape, "unspecified"),
-            iterations,
-            sample_ms,
-            ui_tick_ms,
-            progress_every,
-            scanner,
-            include_directories,
-            claims: claim,
-            competitor_csv,
-        }),
+        } => {
+            if maybe_relaunch_bench_elevated(&path, scanner)? {
+                return Ok(());
+            }
+            run_suite(SuiteOptions {
+                path,
+                output_dir,
+                dataset_label: single_line_value(&dataset_label, "unspecified"),
+                cache_state: single_line_value(&cache_state, "unknown"),
+                hardware_label: single_line_value(&hardware_label, "unspecified"),
+                dataset_shape: single_line_value(&dataset_shape, "unspecified"),
+                iterations,
+                sample_ms,
+                ui_tick_ms,
+                progress_every,
+                scanner,
+                include_directories,
+                claims: claim,
+                competitor_csv,
+            })
+        }
         Command::Dataset {
             root,
             dirs,
@@ -619,6 +640,32 @@ fn main() -> Result<()> {
             write_competitor_template(&mut io::stdout().lock(), examples)
         }
     }
+}
+
+fn maybe_relaunch_bench_elevated(path: &Path, scanner: ScannerMode) -> Result<bool> {
+    if !bench_scan_needs_elevation(path, scanner) || !should_request_elevation()? {
+        return Ok(false);
+    }
+
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    relaunch_current_process_elevated(&args)
+        .context("failed to request administrator access for benchmark scan")?;
+    eprintln!("DiskLoom requested administrator access for benchmark NTFS scanning.");
+    Ok(true)
+}
+
+fn bench_scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
+    scanner != ScannerMode::Fallback && drive_volume(path).is_some()
+}
+
+#[cfg(windows)]
+fn should_request_elevation() -> Result<bool> {
+    Ok(!is_process_elevated().context("failed to check administrator elevation")?)
+}
+
+#[cfg(not(windows))]
+fn should_request_elevation() -> Result<bool> {
+    Ok(false)
 }
 
 fn run_scan(
@@ -3792,9 +3839,10 @@ mod tests {
     use super::{
         Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
         ExportSummary, MeasurementSummary, PublicClaimId, ResponsivenessMeasurement,
-        ResponsivenessSummary, ScanMeasurement, SuiteAuditRow, SuiteManifest, SuiteOptions,
-        SuiteReport, SuiteRunContext, compare_summary_to_claim, compare_summary_to_competitors,
-        json_string, parse_competitor_measurements, parse_measurements, per_million, public_claim,
+        ResponsivenessSummary, ScanMeasurement, ScannerMode, SuiteAuditRow, SuiteManifest,
+        SuiteOptions, SuiteReport, SuiteRunContext, bench_scan_needs_elevation,
+        compare_summary_to_claim, compare_summary_to_competitors, json_string,
+        parse_competitor_measurements, parse_measurements, per_million, public_claim,
         ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
         single_line_value, suite_audit_rows, suite_audit_status, suite_same_machine_comparisons,
         summarize_export_measurements, summarize_responsiveness_measurements, summarize_rows,
@@ -3804,6 +3852,26 @@ mod tests {
         write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
+
+    #[test]
+    fn bench_scan_needs_elevation_should_match_direct_drive_scans_only() {
+        assert!(bench_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            ScannerMode::Auto
+        ));
+        assert!(bench_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            ScannerMode::Ntfs
+        ));
+        assert!(!bench_scan_needs_elevation(
+            std::path::Path::new("C:\\"),
+            ScannerMode::Fallback
+        ));
+        assert!(!bench_scan_needs_elevation(
+            std::path::Path::new("C:\\Users"),
+            ScannerMode::Auto
+        ));
+    }
 
     #[test]
     fn write_measurements_should_emit_csv_rows() {

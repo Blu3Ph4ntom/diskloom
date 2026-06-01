@@ -15,6 +15,7 @@
 
 - Volume discovery. Done.
 - Direct NTFS volume access. Probe implemented.
+- On-demand UAC elevation for direct drive scans. Initial CLI, GUI, and benchmark relaunch support done.
 - MFT record parsing. Header, fixup, file-name, data-run parsing implemented.
 - Raw MFT scan and graph construction. Initial implementation done.
 - Hard link handling where possible. Initial file-record count flagging done.

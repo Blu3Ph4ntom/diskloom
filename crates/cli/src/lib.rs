@@ -15,7 +15,9 @@ use diskloom_query::{
     FileTypeStat, NameMatcher, QueryFilter, file_type_stats, top_entries_by_total_size,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
-use diskloom_windows::{VolumeKind, discover_volumes};
+use diskloom_windows::{
+    VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "diskloom")]
@@ -111,12 +113,21 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Command::Scan(command) => run_scan(command),
-        Command::NtfsProbe { volume } => run_ntfs_probe(&volume),
+        Command::NtfsProbe { volume } => {
+            if maybe_relaunch_current_command_elevated_for_volume(&volume)? {
+                return Ok(());
+            }
+            run_ntfs_probe(&volume)
+        }
         Command::Volumes => run_volumes(),
     }
 }
 
 fn run_scan(command: ScanCommand) -> Result<()> {
+    if maybe_relaunch_scan_elevated(&command)? {
+        return Ok(());
+    }
+
     let started = Instant::now();
     let outcome = scan_path(&command)
         .with_context(|| format!("failed to scan {}", command.path.display()))?;
@@ -183,6 +194,57 @@ fn scan_path(command: &ScanCommand) -> Result<ScanOutcome> {
             }
         }
     }
+}
+
+fn maybe_relaunch_scan_elevated(command: &ScanCommand) -> Result<bool> {
+    if scan_needs_elevation(&command.path, command.scanner) {
+        maybe_relaunch_current_command_elevated("direct NTFS scanning")
+    } else {
+        Ok(false)
+    }
+}
+
+fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bool> {
+    if volume_arg_is_drive_root(volume) {
+        maybe_relaunch_current_command_elevated("direct NTFS volume probing")
+    } else {
+        Ok(false)
+    }
+}
+
+fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
+    scanner != ScannerMode::Fallback && drive_volume(path).is_some()
+}
+
+fn volume_arg_is_drive_root(volume: &str) -> bool {
+    let trimmed = volume.trim_end_matches(['\\', '/']);
+    let mut chars = trimmed.chars();
+    let Some(letter) = chars.next() else {
+        return false;
+    };
+    letter.is_ascii_alphabetic() && chars.next() == Some(':') && chars.next().is_none()
+}
+
+fn maybe_relaunch_current_command_elevated(reason: &str) -> Result<bool> {
+    if !should_request_elevation()? {
+        return Ok(false);
+    }
+
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    relaunch_current_process_elevated(&args)
+        .with_context(|| format!("failed to request administrator access for {reason}"))?;
+    eprintln!("DiskLoom requested administrator access for {reason}.");
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn should_request_elevation() -> Result<bool> {
+    Ok(!is_process_elevated().context("failed to check administrator elevation")?)
+}
+
+#[cfg(not(windows))]
+fn should_request_elevation() -> Result<bool> {
+    Ok(false)
 }
 
 fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Result<ScanOutcome> {
@@ -380,7 +442,10 @@ mod tests {
 
     use diskloom_core::{FileGraphBuilder, FileKind};
 
-    use super::{ScanCommand, ScannerMode, drive_volume, query_filter, write_duplicate_candidates};
+    use super::{
+        ScanCommand, ScannerMode, drive_volume, query_filter, scan_needs_elevation,
+        volume_arg_is_drive_root, write_duplicate_candidates,
+    };
 
     #[test]
     fn drive_volume_should_accept_drive_root() {
@@ -390,6 +455,27 @@ mod tests {
     #[test]
     fn drive_volume_should_reject_folder_path() {
         assert_eq!(drive_volume(Path::new("c:\\Users")), None);
+    }
+
+    #[test]
+    fn scan_needs_elevation_should_match_direct_drive_scans_only() {
+        assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
+        assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Ntfs));
+        assert!(!scan_needs_elevation(
+            Path::new("c:\\"),
+            ScannerMode::Fallback
+        ));
+        assert!(!scan_needs_elevation(
+            Path::new("c:\\Users"),
+            ScannerMode::Auto
+        ));
+    }
+
+    #[test]
+    fn volume_arg_is_drive_root_should_accept_drive_arguments() {
+        assert!(volume_arg_is_drive_root("c:"));
+        assert!(volume_arg_is_drive_root("c:\\"));
+        assert!(!volume_arg_is_drive_root("c:\\Users"));
     }
 
     #[test]
