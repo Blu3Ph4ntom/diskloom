@@ -842,6 +842,16 @@ fn build_graph_from_entries(
     let mut visiting = vec![false; entries.len()];
 
     let add_started = Instant::now();
+    if ROOT_RECORD_NUMBER < entries.len() as u64 {
+        add_entry_recursive(
+            ROOT_RECORD_NUMBER as usize,
+            &mut entries,
+            &mut builder,
+            &mut ids,
+            &mut visiting,
+            &root_name,
+        )?;
+    }
     for record_number in 0..entries.len() {
         if !entries.is_present(record_number) {
             continue;
@@ -896,6 +906,7 @@ fn add_entry_recursive(
         .map(|parent| add_entry_recursive(parent, entries, builder, ids, visiting, root_name))
         .transpose()?
         .flatten();
+    let parent = parent.or_else(|| fallback_root_parent(record_number, ids));
 
     let mut flags = EntryFlags::empty();
     if entries.hard_links[record_number] > 1 {
@@ -921,6 +932,13 @@ fn add_entry_recursive(
     visiting[record_number] = false;
 
     Ok(Some(id))
+}
+
+fn fallback_root_parent(record_number: usize, ids: &[Option<EntryId>]) -> Option<EntryId> {
+    if record_number as u64 == ROOT_RECORD_NUMBER {
+        return None;
+    }
+    ids.get(ROOT_RECORD_NUMBER as usize).copied().flatten()
 }
 
 fn root_display_name(volume: &str) -> String {
@@ -1076,6 +1094,51 @@ mod tests {
                 .unwrap()
                 .flags
                 .contains(EntryFlags::HARD_LINK)
+        );
+    }
+
+    #[test]
+    fn build_graph_from_entries_should_attach_orphans_to_volume_root() {
+        let mut entries = NtfsRawEntries::with_len(43);
+        entries.insert(
+            ROOT_RECORD_NUMBER as usize,
+            NtfsRawEntry {
+                parent_record_number: None,
+                name: ".".to_owned(),
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 0,
+                modified_unix: 0,
+                hard_links: 1,
+            },
+        );
+        entries.insert(
+            42,
+            NtfsRawEntry {
+                parent_record_number: Some(999),
+                name: "orphan.bin".to_owned(),
+                kind: FileKind::File,
+                size: 10,
+                allocated: 16,
+                modified_unix: 0,
+                hard_links: 1,
+            },
+        );
+
+        let graph = build_graph_from_entries(entries, "C:\\".to_owned()).unwrap();
+        let root_count = graph
+            .ids()
+            .filter(|id| graph.entry(*id).is_some_and(|entry| entry.parent.is_none()))
+            .count();
+        let orphan = graph
+            .ids()
+            .find(|id| graph.name(*id) == Some("orphan.bin"))
+            .unwrap();
+
+        assert_eq!(root_count, 1);
+        assert_eq!(
+            graph.reconstruct_path(orphan).unwrap().to_string_lossy(),
+            "C:\\orphan.bin"
         );
     }
 

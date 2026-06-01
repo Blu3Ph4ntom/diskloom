@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
-use diskloom_core::{EntryFlags, FileGraph};
+use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
@@ -66,6 +66,15 @@ enum Command {
         progress_every: u64,
         #[arg(long, value_enum, default_value = "fallback")]
         scanner: ScannerMode,
+    },
+    Inspect {
+        path: PathBuf,
+        #[arg(long, value_enum, default_value = "auto")]
+        scanner: ScannerMode,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Suite {
         path: PathBuf,
@@ -586,6 +595,17 @@ fn main() -> Result<()> {
             }
             run_responsiveness(path, iterations, tick_ms, progress_every, scanner)
         }
+        Command::Inspect {
+            path,
+            scanner,
+            limit,
+            output,
+        } => {
+            if maybe_relaunch_bench_elevated(&path, scanner, output.is_some())? {
+                return Ok(());
+            }
+            run_inspect(path, scanner, limit, output)
+        }
         Command::Suite {
             path,
             output_dir,
@@ -708,6 +728,26 @@ fn run_scan(
         write_output_file(&output, |file| write_measurements(file, &measurements))?;
     } else {
         write_measurements(&mut io::stdout().lock(), &measurements)?;
+    }
+    Ok(())
+}
+
+fn run_inspect(
+    path: PathBuf,
+    scanner: ScannerMode,
+    limit: usize,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let started = Instant::now();
+    let outcome = scan_graph_path(path, scanner)?;
+    let elapsed_ms = started.elapsed().as_millis();
+
+    if let Some(output) = output {
+        write_output_file(&output, |file| {
+            write_graph_inspection(file, &outcome, elapsed_ms, limit)
+        })?;
+    } else {
+        write_graph_inspection(&mut io::stdout().lock(), &outcome, elapsed_ms, limit)?;
     }
     Ok(())
 }
@@ -1691,6 +1731,72 @@ fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement])
         )?;
     }
     Ok(())
+}
+
+fn write_graph_inspection(
+    writer: &mut impl Write,
+    outcome: &ScanGraphOutcome,
+    elapsed_ms: u128,
+    limit: usize,
+) -> Result<()> {
+    let roots = graph_roots(&outcome.graph);
+    writeln!(writer, "scanner: {}", outcome.scanner)?;
+    writeln!(writer, "fallback: {}", outcome.fallback)?;
+    writeln!(writer, "elapsed_ms: {elapsed_ms}")?;
+    writeln!(writer, "entries: {}", outcome.summary.entries)?;
+    writeln!(writer, "files: {}", outcome.summary.files)?;
+    writeln!(writer, "directories: {}", outcome.summary.directories)?;
+    writeln!(writer, "inaccessible: {}", outcome.summary.inaccessible)?;
+    writeln!(writer, "root_count: {}", roots.len())?;
+    writeln!(writer)?;
+    writeln!(writer, "top_roots:")?;
+    writeln!(writer, "total_size\ttotal_allocated\tdescendants\tpath")?;
+
+    for id in roots.into_iter().take(limit) {
+        let Some(stats) = outcome.graph.stats(id) else {
+            continue;
+        };
+        let path = outcome
+            .graph
+            .reconstruct_path(id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}",
+            stats.total_size.bytes(),
+            stats.total_allocated.bytes(),
+            stats.descendants,
+            path
+        )?;
+    }
+
+    Ok(())
+}
+
+fn graph_roots(graph: &FileGraph) -> Vec<EntryId> {
+    let mut roots = graph
+        .ids()
+        .filter(|id| graph.entry(*id).is_some_and(|entry| entry.parent.is_none()))
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| compare_graph_ids_by_total_size(graph, *left, *right));
+    roots
+}
+
+fn compare_graph_ids_by_total_size(
+    graph: &FileGraph,
+    left: EntryId,
+    right: EntryId,
+) -> std::cmp::Ordering {
+    let left_stats = graph.stats(left);
+    let right_stats = graph.stats(right);
+    let left_size = left_stats.map_or(0, |stats| stats.total_size.bytes());
+    let right_size = right_stats.map_or(0, |stats| stats.total_size.bytes());
+    right_size.cmp(&left_size).then_with(|| {
+        let left_name = graph.name(left).unwrap_or_default();
+        let right_name = graph.name(right).unwrap_or_default();
+        left_name.cmp(right_name)
+    })
 }
 
 fn write_export_measurements(
@@ -3875,19 +3981,21 @@ mod tests {
     use super::{
         Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
         ExportSummary, MeasurementSummary, PublicClaimId, ResponsivenessMeasurement,
-        ResponsivenessSummary, ScanMeasurement, ScannerMode, SuiteAuditRow, SuiteManifest,
-        SuiteOptions, SuiteReport, SuiteRunContext, bench_scan_needs_elevation,
-        compare_summary_to_claim, compare_summary_to_competitors, json_string,
-        parse_competitor_measurements, parse_measurements, per_million, public_claim,
+        ResponsivenessSummary, ScanGraphOutcome, ScanMeasurement, ScanSummary, ScannerMode,
+        SuiteAuditRow, SuiteManifest, SuiteOptions, SuiteReport, SuiteRunContext,
+        bench_scan_needs_elevation, compare_summary_to_claim, compare_summary_to_competitors,
+        json_string, parse_competitor_measurements, parse_measurements, per_million, public_claim,
         ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
         single_line_value, suite_audit_rows, suite_audit_status, suite_same_machine_comparisons,
         summarize_export_measurements, summarize_responsiveness_measurements, summarize_rows,
-        write_competitor_template, write_export_measurements, write_measurements,
-        write_output_file, write_public_comparisons, write_responsiveness_measurements,
-        write_responsiveness_summary, write_same_machine_comparisons, write_suite_audit,
-        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
+        write_competitor_template, write_export_measurements, write_graph_inspection,
+        write_measurements, write_output_file, write_public_comparisons,
+        write_responsiveness_measurements, write_responsiveness_summary,
+        write_same_machine_comparisons, write_suite_audit, write_suite_manifest,
+        write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
+    use diskloom_core::{FileGraphBuilder, FileKind};
 
     #[test]
     fn bench_scan_needs_elevation_should_match_direct_drive_scans_only() {
@@ -3934,6 +4042,43 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("1,fallback,0,10,2,3,2,1,0,100,90,80,70,30000000,4"));
+    }
+
+    #[test]
+    fn write_graph_inspection_should_report_roots_by_total_size() {
+        let mut builder = FileGraphBuilder::new();
+        let primary = builder
+            .add_entry(None, "C:\\", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(primary), "big.bin", FileKind::File, 20, 24, 0)
+            .unwrap();
+        let secondary = builder
+            .add_entry(None, "D:\\", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(secondary), "small.bin", FileKind::File, 10, 16, 0)
+            .unwrap();
+        let outcome = ScanGraphOutcome {
+            scanner: "ntfs",
+            fallback: false,
+            graph: builder.finish(),
+            summary: ScanSummary {
+                entries: 4,
+                files: 2,
+                directories: 2,
+                inaccessible: 0,
+            },
+        };
+        let mut output = Vec::new();
+
+        write_graph_inspection(&mut output, &outcome, 12, 1).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert_eq!(
+            output,
+            "scanner: ntfs\nfallback: false\nelapsed_ms: 12\nentries: 4\nfiles: 2\ndirectories: 2\ninaccessible: 0\nroot_count: 2\n\ntop_roots:\ntotal_size\ttotal_allocated\tdescendants\tpath\n20\t24\t1\tC:\\\n"
+        );
     }
 
     #[test]
