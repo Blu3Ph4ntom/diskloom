@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use diskloom_core::{EntryFlags, FileGraph};
+use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
     FileTypeStat, NameMatcher, QueryFilter, SortKey, SortOrder, TreemapBounds, TreemapItem,
@@ -15,6 +15,7 @@ use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{open_in_explorer, recycle_delete, rename_path, show_properties};
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
+const TREE_ROW_LIMIT: usize = 500;
 
 #[derive(Debug)]
 pub struct DiskLoomApp {
@@ -32,6 +33,7 @@ pub struct DiskLoomApp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveTab {
+    Tree,
     Files,
     Types,
     Treemap,
@@ -82,8 +84,26 @@ struct ScanResult {
     elapsed_ms: u128,
     scanner_label: &'static str,
     fallback_reason: Option<String>,
+    tree_rows: Vec<TreeRow>,
     file_types: Vec<FileTypeStat>,
     treemap_items: Vec<TreemapItem>,
+}
+
+#[derive(Debug, Clone)]
+struct TreeRow {
+    path: PathBuf,
+    path_text: String,
+    name: String,
+    depth: usize,
+    kind: &'static str,
+    size: u64,
+    allocated: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChildRange {
+    start: u32,
+    len: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +163,7 @@ impl Default for DiskLoomApp {
             selected_path: None,
             rename_target: String::new(),
             action_status: None,
-            active_tab: ActiveTab::Files,
+            active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
         }
@@ -240,6 +260,7 @@ impl DiskLoomApp {
                 }));
             };
             let result = scan_path(path, scanner_mode, &mut on_progress).map(|outcome| {
+                let tree_rows = tree_rows_from_graph(&outcome.graph, TREE_ROW_LIMIT);
                 let file_types = file_type_stats(&outcome.graph, 50);
                 let treemap_items = treemap_items_from_graph(&outcome.graph, 120);
                 ScanResult {
@@ -248,6 +269,7 @@ impl DiskLoomApp {
                     elapsed_ms: started.elapsed().as_millis(),
                     scanner_label: outcome.scanner_label,
                     fallback_reason: outcome.fallback_reason,
+                    tree_rows,
                     file_types,
                     treemap_items,
                 }
@@ -464,6 +486,7 @@ impl DiskLoomApp {
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.active_tab, ActiveTab::Tree, "Tree");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Files, "Files");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Types, "Types");
             ui.selectable_value(&mut self.active_tab, ActiveTab::Treemap, "Treemap");
@@ -472,10 +495,52 @@ impl DiskLoomApp {
 
     fn active_view(&mut self, ui: &mut egui::Ui) {
         match self.active_tab {
+            ActiveTab::Tree => self.tree(ui),
             ActiveTab::Files => self.results(ui),
             ActiveTab::Types => self.type_stats(ui),
             ActiveTab::Treemap => self.treemap(ui),
         }
+    }
+
+    fn tree(&mut self, ui: &mut egui::Ui) {
+        let (graph_len, rows) = match &self.state {
+            UiState::Complete(result) => (result.graph.len(), result.tree_rows.clone()),
+            _ => return,
+        };
+
+        ui.label(format!("Showing {} of {} entries", rows.len(), graph_len));
+
+        egui::ScrollArea::both()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                egui::Grid::new("tree_grid")
+                    .striped(true)
+                    .min_col_width(80.0)
+                    .show(ui, |ui| {
+                        ui.strong("Size");
+                        ui.strong("Allocated");
+                        ui.strong("Kind");
+                        ui.strong("Name");
+                        ui.end_row();
+
+                        for row in &rows {
+                            ui.monospace(row.size.to_string());
+                            ui.monospace(row.allocated.to_string());
+                            ui.label(row.kind);
+                            ui.horizontal(|ui| {
+                                ui.add_space((row.depth as f32 * 14.0).min(180.0));
+                                let selected = self.selected_path.as_ref() == Some(&row.path);
+                                let response = ui
+                                    .selectable_label(selected, &row.name)
+                                    .on_hover_text(&row.path_text);
+                                if response.clicked() {
+                                    self.select_path(row.path.clone());
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     fn results(&mut self, ui: &mut egui::Ui) {
@@ -872,6 +937,147 @@ fn parse_optional_u64(label: &str, value: &str) -> Result<Option<u64>, String> {
         .map_err(|_| format!("{label} must be a non-negative integer"))
 }
 
+fn tree_rows_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreeRow> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut child_pairs = Vec::with_capacity(graph.len().saturating_sub(1));
+    let mut roots = Vec::new();
+
+    for id in graph.ids() {
+        let Some(entry) = graph.entry(id) else {
+            continue;
+        };
+        if let Some(parent) = entry.parent {
+            child_pairs.push((parent, id));
+        } else {
+            roots.push(id);
+        }
+    }
+
+    sort_entry_ids_by_total_size(graph, &mut roots);
+    child_pairs.sort_by(|(left_parent, left_child), (right_parent, right_child)| {
+        left_parent
+            .0
+            .cmp(&right_parent.0)
+            .then_with(|| compare_entry_ids_by_total_size(graph, left_child, right_child))
+    });
+
+    let mut child_ids = Vec::with_capacity(child_pairs.len());
+    let mut child_ranges = vec![ChildRange::default(); graph.len()];
+    let mut pair_idx = 0;
+    while pair_idx < child_pairs.len() {
+        let parent = child_pairs[pair_idx].0;
+        let start = child_ids.len();
+        while pair_idx < child_pairs.len() && child_pairs[pair_idx].0 == parent {
+            child_ids.push(child_pairs[pair_idx].1);
+            pair_idx += 1;
+        }
+        child_ranges[parent.0 as usize] = ChildRange {
+            start: start as u32,
+            len: (child_ids.len() - start) as u32,
+        };
+    }
+
+    let mut rows = Vec::with_capacity(limit.min(graph.len()));
+    for root in roots {
+        append_tree_rows(graph, &child_ids, &child_ranges, root, 0, limit, &mut rows);
+        if rows.len() >= limit {
+            break;
+        }
+    }
+
+    rows
+}
+
+fn append_tree_rows(
+    graph: &FileGraph,
+    child_ids: &[EntryId],
+    child_ranges: &[ChildRange],
+    id: EntryId,
+    depth: usize,
+    limit: usize,
+    rows: &mut Vec<TreeRow>,
+) {
+    if rows.len() >= limit {
+        return;
+    }
+
+    if let Some(row) = tree_row_from_graph(graph, id, depth) {
+        rows.push(row);
+    }
+
+    let Some(range) = child_ranges.get(id.0 as usize).copied() else {
+        return;
+    };
+    let start = range.start as usize;
+    let end = start
+        .saturating_add(range.len as usize)
+        .min(child_ids.len());
+    for child in &child_ids[start..end] {
+        append_tree_rows(
+            graph,
+            child_ids,
+            child_ranges,
+            *child,
+            depth + 1,
+            limit,
+            rows,
+        );
+        if rows.len() >= limit {
+            break;
+        }
+    }
+}
+
+fn tree_row_from_graph(graph: &FileGraph, id: EntryId, depth: usize) -> Option<TreeRow> {
+    let stats = graph.stats(id)?;
+    let entry = graph.entry(id)?;
+    let name = graph.name(id)?.to_owned();
+    let path = graph.reconstruct_path(id)?;
+    let path_text = path.display().to_string();
+    let kind = if entry.flags.contains(EntryFlags::DIRECTORY) {
+        "dir"
+    } else if entry.flags.contains(EntryFlags::SYMLINK) {
+        "link"
+    } else {
+        "file"
+    };
+
+    Some(TreeRow {
+        path,
+        path_text,
+        name,
+        depth,
+        kind,
+        size: stats.total_size.bytes(),
+        allocated: stats.total_allocated.bytes(),
+    })
+}
+
+fn sort_entry_ids_by_total_size(graph: &FileGraph, ids: &mut [EntryId]) {
+    ids.sort_by(|left, right| compare_entry_ids_by_total_size(graph, left, right));
+}
+
+fn compare_entry_ids_by_total_size(
+    graph: &FileGraph,
+    left: &EntryId,
+    right: &EntryId,
+) -> std::cmp::Ordering {
+    let left_size = graph
+        .stats(*left)
+        .map_or(0, |stats| stats.total_size.bytes());
+    let right_size = graph
+        .stats(*right)
+        .map_or(0, |stats| stats.total_size.bytes());
+    right_size.cmp(&left_size).then_with(|| {
+        let left_name = graph.name(*left).unwrap_or_default();
+        let right_name = graph.name(*right).unwrap_or_default();
+        left_name.cmp(right_name)
+    })
+}
+
 fn treemap_items_from_graph(graph: &FileGraph, limit: usize) -> Vec<TreemapItem> {
     let mut ids: Vec<_> = graph.ids().collect();
     sort_entries(graph, &mut ids, SortKey::Size, SortOrder::Descending);
@@ -933,7 +1139,7 @@ fn paint_treemap_rect(painter: &egui::Painter, item: &TreemapRect, idx: usize) {
 mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
-    use super::{FilterInputs, filtered_rows_from_graph, parse_optional_u64};
+    use super::{FilterInputs, filtered_rows_from_graph, parse_optional_u64, tree_rows_from_graph};
 
     fn sample_graph() -> FileGraph {
         let mut builder = FileGraphBuilder::new();
@@ -970,5 +1176,41 @@ mod tests {
         assert_eq!(parse_optional_u64("Min size", "").unwrap(), None);
         assert_eq!(parse_optional_u64("Min size", "42").unwrap(), Some(42));
         assert!(parse_optional_u64("Min size", "abc").is_err());
+    }
+
+    #[test]
+    fn tree_rows_should_sort_children_by_total_size() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let big = builder
+            .add_entry(Some(root), "big", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(big), "large.bin", FileKind::File, 100, 128, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(root), "small.bin", FileKind::File, 10, 16, 0)
+            .unwrap();
+        let graph = builder.finish();
+
+        let rows = tree_rows_from_graph(&graph, 10);
+
+        assert_eq!(rows[0].name, "root");
+        assert_eq!(rows[1].name, "big");
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[2].name, "large.bin");
+        assert_eq!(rows[2].depth, 2);
+        assert_eq!(rows[3].name, "small.bin");
+    }
+
+    #[test]
+    fn tree_rows_should_respect_limit() {
+        let graph = sample_graph();
+
+        let rows = tree_rows_from_graph(&graph, 2);
+
+        assert_eq!(rows.len(), 2);
     }
 }
