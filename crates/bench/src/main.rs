@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs::{self, File},
     io::{self, Write},
@@ -87,6 +87,14 @@ enum Command {
         csv: PathBuf,
         #[arg(long, value_enum)]
         claim: Vec<PublicClaimId>,
+    },
+    CompareCompetitor {
+        csv: PathBuf,
+        competitor_csv: PathBuf,
+        #[arg(long, default_value = "unspecified")]
+        dataset_label: String,
+        #[arg(long, default_value = "unknown")]
+        cache_state: String,
     },
 }
 
@@ -289,6 +297,59 @@ struct PublicComparison {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CompetitorMeasurement {
+    tool: String,
+    version: String,
+    dataset_label: String,
+    cache_state: String,
+    scanner_scope: String,
+    elapsed_ms: u128,
+    peak_private_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CompetitorKey {
+    tool: String,
+    version: String,
+    dataset_label: String,
+    cache_state: String,
+    scanner_scope: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompetitorSummary {
+    key: CompetitorKey,
+    runs: usize,
+    elapsed_ms_min: u128,
+    elapsed_ms_median: u128,
+    elapsed_ms_max: u128,
+    peak_private_bytes_max: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SameMachineComparison {
+    tool: String,
+    version: String,
+    dataset_label: String,
+    cache_state: String,
+    scanner_scope: String,
+    context_match: &'static str,
+    competitor_runs: usize,
+    diskloom_runs: usize,
+    competitor_elapsed_ms_min: u128,
+    competitor_elapsed_ms_median: u128,
+    competitor_elapsed_ms_max: u128,
+    diskloom_elapsed_ms_min: u128,
+    diskloom_elapsed_ms_median: u128,
+    diskloom_elapsed_ms_max: u128,
+    diskloom_vs_competitor_median_ratio: String,
+    competitor_peak_private_bytes_max: Option<u64>,
+    diskloom_peak_private_bytes_max: u64,
+    diskloom_private_bytes_delta: Option<i128>,
+    validity: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkEnvironment {
     volume_root: String,
     file_system: String,
@@ -441,6 +502,17 @@ fn main() -> Result<()> {
         } => create_dataset(root, dirs, files_per_dir, bytes_per_file),
         Command::Summarize { csv } => summarize_measurements(csv),
         Command::ComparePublic { csv, claim } => compare_public_claims(csv, &claim),
+        Command::CompareCompetitor {
+            csv,
+            competitor_csv,
+            dataset_label,
+            cache_state,
+        } => compare_competitor_measurements(
+            csv,
+            competitor_csv,
+            single_line_value(&dataset_label, "unspecified"),
+            single_line_value(&cache_state, "unknown"),
+        ),
     }
 }
 
@@ -1129,6 +1201,29 @@ fn compare_public_claims(path: PathBuf, claims: &[PublicClaimId]) -> Result<()> 
     Ok(())
 }
 
+fn compare_competitor_measurements(
+    diskloom_csv: PathBuf,
+    competitor_csv: PathBuf,
+    dataset_label: String,
+    cache_state: String,
+) -> Result<()> {
+    let diskloom_input = fs::read_to_string(&diskloom_csv)
+        .with_context(|| format!("failed to read {}", diskloom_csv.display()))?;
+    let competitor_input = fs::read_to_string(&competitor_csv)
+        .with_context(|| format!("failed to read {}", competitor_csv.display()))?;
+    let diskloom_rows = parse_measurements(&diskloom_input)?;
+    let diskloom_summary = summarize_rows(&diskloom_rows)?;
+    let competitor_rows = parse_competitor_measurements(&competitor_input)?;
+    let comparisons = compare_summary_to_competitors(
+        &diskloom_summary,
+        &competitor_rows,
+        &dataset_label,
+        &cache_state,
+    )?;
+    write_same_machine_comparisons(&mut io::stdout().lock(), &comparisons)?;
+    Ok(())
+}
+
 fn selected_claims(claims: &[PublicClaimId]) -> Vec<PublicClaimId> {
     if claims.is_empty() {
         all_public_claims().to_vec()
@@ -1258,6 +1353,44 @@ fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
         .collect()
 }
 
+fn parse_competitor_measurements(input: &str) -> Result<Vec<CompetitorMeasurement>> {
+    let mut lines = input.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow!("competitor CSV is empty"))?;
+    let headers: Vec<_> = header.split(',').collect();
+
+    let tool_idx = field_index(&headers, "tool")?;
+    let version_idx = field_index(&headers, "version")?;
+    let dataset_label_idx = field_index(&headers, "dataset_label")?;
+    let cache_state_idx = field_index(&headers, "cache_state")?;
+    let scanner_scope_idx = field_index(&headers, "scanner_scope")?;
+    let elapsed_ms_idx = field_index(&headers, "elapsed_ms")?;
+    let peak_private_bytes_idx = optional_field_index(&headers, "peak_private_bytes");
+
+    lines
+        .enumerate()
+        .map(|(idx, line)| {
+            let fields: Vec<_> = line.split(',').collect();
+            Ok(CompetitorMeasurement {
+                tool: field(&fields, tool_idx, idx)?.trim().to_owned(),
+                version: field(&fields, version_idx, idx)?.trim().to_owned(),
+                dataset_label: field(&fields, dataset_label_idx, idx)?.trim().to_owned(),
+                cache_state: field(&fields, cache_state_idx, idx)?.trim().to_owned(),
+                scanner_scope: field(&fields, scanner_scope_idx, idx)?.trim().to_owned(),
+                elapsed_ms: parse_field(field(&fields, elapsed_ms_idx, idx)?.trim(), "elapsed_ms")?,
+                peak_private_bytes: match peak_private_bytes_idx {
+                    Some(peak_private_bytes_idx) => parse_optional_u64_field(
+                        field(&fields, peak_private_bytes_idx, idx)?.trim(),
+                        "peak_private_bytes",
+                    )?,
+                    None => None,
+                },
+            })
+        })
+        .collect()
+}
+
 fn field_index(headers: &[&str], name: &str) -> Result<usize> {
     headers
         .iter()
@@ -1291,6 +1424,14 @@ fn parse_bool_field(value: &str) -> Result<bool> {
         "0" => Ok(false),
         "1" => Ok(true),
         _ => Err(anyhow!("invalid `fallback` value `{value}`")),
+    }
+}
+
+fn parse_optional_u64_field(value: &str, name: &str) -> Result<Option<u64>> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        parse_field(value, name).map(Some)
     }
 }
 
@@ -1545,6 +1686,177 @@ fn ratio_decimal(numerator: u128, denominator: u128) -> String {
     }
     let scaled = numerator.saturating_mul(1_000) / denominator;
     format!("{}.{:03}", scaled / 1_000, scaled % 1_000)
+}
+
+fn compare_summary_to_competitors(
+    diskloom_summary: &MeasurementSummary,
+    competitor_rows: &[CompetitorMeasurement],
+    dataset_label: &str,
+    cache_state: &str,
+) -> Result<Vec<SameMachineComparison>> {
+    let competitor_summaries = summarize_competitors(competitor_rows)?;
+    Ok(competitor_summaries
+        .iter()
+        .map(|summary| {
+            compare_summary_to_competitor(diskloom_summary, summary, dataset_label, cache_state)
+        })
+        .collect())
+}
+
+fn summarize_competitors(rows: &[CompetitorMeasurement]) -> Result<Vec<CompetitorSummary>> {
+    if rows.is_empty() {
+        return Err(anyhow!("competitor CSV has no data rows"));
+    }
+
+    let mut groups: BTreeMap<CompetitorKey, Vec<&CompetitorMeasurement>> = BTreeMap::new();
+    for row in rows {
+        groups
+            .entry(CompetitorKey {
+                tool: row.tool.clone(),
+                version: row.version.clone(),
+                dataset_label: row.dataset_label.clone(),
+                cache_state: row.cache_state.clone(),
+                scanner_scope: row.scanner_scope.clone(),
+            })
+            .or_default()
+            .push(row);
+    }
+
+    groups
+        .into_iter()
+        .map(|(key, rows)| summarize_competitor_group(key, &rows))
+        .collect()
+}
+
+fn summarize_competitor_group(
+    key: CompetitorKey,
+    rows: &[&CompetitorMeasurement],
+) -> Result<CompetitorSummary> {
+    let mut elapsed: Vec<_> = rows.iter().map(|row| row.elapsed_ms).collect();
+    let elapsed_ms_min = *elapsed.iter().min().unwrap_or(&0);
+    let elapsed_ms_max = *elapsed.iter().max().unwrap_or(&0);
+    let elapsed_ms_median = median_u128(&mut elapsed);
+    let peak_private_bytes_max = rows.iter().filter_map(|row| row.peak_private_bytes).max();
+
+    Ok(CompetitorSummary {
+        key,
+        runs: rows.len(),
+        elapsed_ms_min,
+        elapsed_ms_median,
+        elapsed_ms_max,
+        peak_private_bytes_max,
+    })
+}
+
+fn compare_summary_to_competitor(
+    diskloom_summary: &MeasurementSummary,
+    competitor_summary: &CompetitorSummary,
+    dataset_label: &str,
+    cache_state: &str,
+) -> SameMachineComparison {
+    let context_match = competitor_context_match(competitor_summary, dataset_label, cache_state);
+    let validity = same_machine_validity(context_match);
+    let diskloom_private_bytes_delta = competitor_summary
+        .peak_private_bytes_max
+        .map(|value| i128::from(diskloom_summary.peak_private_bytes_max) - i128::from(value));
+
+    SameMachineComparison {
+        tool: competitor_summary.key.tool.clone(),
+        version: competitor_summary.key.version.clone(),
+        dataset_label: competitor_summary.key.dataset_label.clone(),
+        cache_state: competitor_summary.key.cache_state.clone(),
+        scanner_scope: competitor_summary.key.scanner_scope.clone(),
+        context_match,
+        competitor_runs: competitor_summary.runs,
+        diskloom_runs: diskloom_summary.runs,
+        competitor_elapsed_ms_min: competitor_summary.elapsed_ms_min,
+        competitor_elapsed_ms_median: competitor_summary.elapsed_ms_median,
+        competitor_elapsed_ms_max: competitor_summary.elapsed_ms_max,
+        diskloom_elapsed_ms_min: diskloom_summary.elapsed_ms_min,
+        diskloom_elapsed_ms_median: diskloom_summary.elapsed_ms_median,
+        diskloom_elapsed_ms_max: diskloom_summary.elapsed_ms_max,
+        diskloom_vs_competitor_median_ratio: ratio_decimal(
+            diskloom_summary.elapsed_ms_median,
+            competitor_summary.elapsed_ms_median,
+        ),
+        competitor_peak_private_bytes_max: competitor_summary.peak_private_bytes_max,
+        diskloom_peak_private_bytes_max: diskloom_summary.peak_private_bytes_max,
+        diskloom_private_bytes_delta,
+        validity,
+    }
+}
+
+fn competitor_context_match(
+    competitor_summary: &CompetitorSummary,
+    dataset_label: &str,
+    cache_state: &str,
+) -> &'static str {
+    if dataset_label == "unspecified" || cache_state == "unknown" {
+        "missing_diskloom_context"
+    } else if competitor_summary.key.dataset_label == dataset_label
+        && competitor_summary.key.cache_state == cache_state
+    {
+        "matched"
+    } else {
+        "mismatch"
+    }
+}
+
+fn same_machine_validity(context_match: &str) -> &'static str {
+    match context_match {
+        "matched" => "same_machine_user_supplied",
+        "missing_diskloom_context" => "missing_diskloom_context",
+        _ => "context_mismatch",
+    }
+}
+
+fn optional_u64_csv(value: Option<u64>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn optional_i128_csv(value: Option<i128>) -> String {
+    value.map_or_else(String::new, |value| value.to_string())
+}
+
+fn write_same_machine_comparisons(
+    writer: &mut impl Write,
+    comparisons: &[SameMachineComparison],
+) -> Result<()> {
+    writeln!(
+        writer,
+        "tool,version,dataset_label,cache_state,scanner_scope,context_match,competitor_runs,diskloom_runs,competitor_elapsed_ms_min,competitor_elapsed_ms_median,competitor_elapsed_ms_max,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_vs_competitor_median_ratio,competitor_peak_private_bytes_max,diskloom_peak_private_bytes_max,diskloom_private_bytes_delta,validity"
+    )?;
+    for comparison in comparisons {
+        write_csv_cell(writer, &comparison.tool)?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, &comparison.version)?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, &comparison.dataset_label)?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, &comparison.cache_state)?;
+        write!(writer, ",")?;
+        write_csv_cell(writer, &comparison.scanner_scope)?;
+        write!(
+            writer,
+            ",{},{},{},{},{},{},{},{},{},{},{},{},{},",
+            comparison.context_match,
+            comparison.competitor_runs,
+            comparison.diskloom_runs,
+            comparison.competitor_elapsed_ms_min,
+            comparison.competitor_elapsed_ms_median,
+            comparison.competitor_elapsed_ms_max,
+            comparison.diskloom_elapsed_ms_min,
+            comparison.diskloom_elapsed_ms_median,
+            comparison.diskloom_elapsed_ms_max,
+            comparison.diskloom_vs_competitor_median_ratio,
+            optional_u64_csv(comparison.competitor_peak_private_bytes_max),
+            comparison.diskloom_peak_private_bytes_max,
+            optional_i128_csv(comparison.diskloom_private_bytes_delta),
+        )?;
+        write_csv_cell(writer, comparison.validity)?;
+        writeln!(writer)?;
+    }
+    Ok(())
 }
 
 fn write_public_comparisons(
@@ -2660,11 +2972,13 @@ mod tests {
         Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
         ExportSummary, MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteAuditRow,
         SuiteManifest, SuiteOptions, SuiteReport, SuiteRunContext, compare_summary_to_claim,
-        json_string, parse_measurements, per_million, public_claim, ratio_decimal,
-        scan_measurements_to_rows, selected_claims, shell_quote_arg, single_line_value,
-        suite_audit_rows, suite_audit_status, summarize_export_measurements, summarize_rows,
-        write_export_measurements, write_measurements, write_public_comparisons, write_suite_audit,
-        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
+        compare_summary_to_competitors, json_string, parse_competitor_measurements,
+        parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
+        selected_claims, shell_quote_arg, single_line_value, suite_audit_rows, suite_audit_status,
+        summarize_export_measurements, summarize_rows, write_export_measurements,
+        write_measurements, write_public_comparisons, write_same_machine_comparisons,
+        write_suite_audit, write_suite_manifest, write_suite_metadata, write_suite_report,
+        write_summary,
     };
     use clap::Parser;
 
@@ -3064,6 +3378,122 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 PublicClaimId::WizTreeSsd460Gb
             ]
         );
+    }
+
+    #[test]
+    fn compare_competitor_cli_should_accept_context_labels() {
+        let args = Args::try_parse_from([
+            "diskloom-bench",
+            "compare-competitor",
+            "target/bench.csv",
+            "target/competitors.csv",
+            "--dataset-label",
+            "workstation-c",
+            "--cache-state",
+            "warm",
+        ])
+        .unwrap();
+
+        let Command::CompareCompetitor {
+            dataset_label,
+            cache_state,
+            ..
+        } = args.command
+        else {
+            panic!("expected compare-competitor command");
+        };
+        assert_eq!(dataset_label, "workstation-c");
+        assert_eq!(cache_state, "warm");
+    }
+
+    #[test]
+    fn parse_competitor_measurements_should_parse_optional_memory() {
+        let input = "\
+tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes
+WizTree,4.25,workstation-c,warm,ntfs_mft,600,1000,manual run
+WizTree,4.25,workstation-c,warm,ntfs_mft,700,,
+";
+
+        let rows = parse_competitor_measurements(input).unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].tool, "WizTree");
+        assert_eq!(rows[0].peak_private_bytes, Some(1000));
+        assert_eq!(rows[1].peak_private_bytes, None);
+    }
+
+    #[test]
+    fn compare_summary_to_competitors_should_group_and_mark_context() {
+        let diskloom_summary = MeasurementSummary {
+            runs: 3,
+            scanners: "ntfs".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 900,
+            elapsed_ms_median: 1_000,
+            elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 120,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let rows = parse_competitor_measurements(
+            "\
+tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
+WizTree,4.25,workstation-c,warm,ntfs_mft,500,40
+WizTree,4.25,workstation-c,warm,ntfs_mft,700,50
+TreeSize,9.0,other,warm,traversal,2000,
+",
+        )
+        .unwrap();
+
+        let comparisons =
+            compare_summary_to_competitors(&diskloom_summary, &rows, "workstation-c", "warm")
+                .unwrap();
+
+        assert_eq!(comparisons.len(), 2);
+        assert_eq!(comparisons[1].tool, "WizTree");
+        assert_eq!(comparisons[1].competitor_elapsed_ms_median, 600);
+        assert_eq!(comparisons[1].diskloom_vs_competitor_median_ratio, "1.666");
+        assert_eq!(comparisons[1].context_match, "matched");
+        assert_eq!(comparisons[1].validity, "same_machine_user_supplied");
+        assert_eq!(comparisons[1].diskloom_private_bytes_delta, Some(45));
+    }
+
+    #[test]
+    fn write_same_machine_comparisons_should_emit_csv_rows() {
+        let comparison = super::SameMachineComparison {
+            tool: "WizTree".to_owned(),
+            version: "4.25".to_owned(),
+            dataset_label: "workstation-c".to_owned(),
+            cache_state: "warm".to_owned(),
+            scanner_scope: "ntfs_mft".to_owned(),
+            context_match: "matched",
+            competitor_runs: 2,
+            diskloom_runs: 3,
+            competitor_elapsed_ms_min: 500,
+            competitor_elapsed_ms_median: 600,
+            competitor_elapsed_ms_max: 700,
+            diskloom_elapsed_ms_min: 900,
+            diskloom_elapsed_ms_median: 1_000,
+            diskloom_elapsed_ms_max: 1_100,
+            diskloom_vs_competitor_median_ratio: "1.666".to_owned(),
+            competitor_peak_private_bytes_max: Some(50),
+            diskloom_peak_private_bytes_max: 95,
+            diskloom_private_bytes_delta: Some(45),
+            validity: "same_machine_user_supplied",
+        };
+        let mut output = Vec::new();
+
+        write_same_machine_comparisons(&mut output, &[comparison]).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("tool,version,dataset_label,cache_state"));
+        assert!(output.contains("WizTree,4.25,workstation-c,warm,ntfs_mft,matched"));
+        assert!(output.contains("same_machine_user_supplied"));
     }
 
     #[test]
