@@ -49,6 +49,22 @@ enum Command {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+    Suite {
+        path: PathBuf,
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        iterations: usize,
+        #[arg(long, default_value_t = 10)]
+        sample_ms: u64,
+        #[arg(long, default_value_t = 1024)]
+        progress_every: u64,
+        #[arg(long, value_enum, default_value = "fallback")]
+        scanner: ScannerMode,
+        #[arg(long, default_value_t = true)]
+        include_directories: bool,
+        #[arg(long, value_enum)]
+        claim: Vec<PublicClaimId>,
+    },
     Dataset {
         root: PathBuf,
         #[arg(long, default_value_t = 100)]
@@ -121,6 +137,25 @@ struct ExportMeasurement {
     final_private_bytes: u64,
     peak_private_bytes_per_million_entries: u64,
     memory_samples: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportSummary {
+    runs: usize,
+    scanners: String,
+    fallback_runs: usize,
+    entries_min: u64,
+    entries_max: u64,
+    export_bytes_min: u64,
+    export_bytes_max: u64,
+    scan_elapsed_ms_median: u128,
+    export_elapsed_ms_min: u128,
+    export_elapsed_ms_median: u128,
+    export_elapsed_ms_max: u128,
+    total_elapsed_ms_median: u128,
+    peak_working_set_bytes_max: u64,
+    peak_private_bytes_max: u64,
+    peak_private_bytes_per_million_entries_max: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -225,6 +260,32 @@ struct PublicComparison {
     validity: &'static str,
 }
 
+#[derive(Debug)]
+struct SuiteReport<'a> {
+    path: &'a Path,
+    output_dir: &'a Path,
+    scanner: ScannerMode,
+    iterations: usize,
+    sample_ms: u64,
+    progress_every: u64,
+    include_directories: bool,
+    scan_summary: &'a MeasurementSummary,
+    export_summary: &'a ExportSummary,
+    comparisons: &'a [PublicComparison],
+}
+
+#[derive(Debug)]
+struct SuiteOptions {
+    path: PathBuf,
+    output_dir: PathBuf,
+    iterations: usize,
+    sample_ms: u64,
+    progress_every: u64,
+    scanner: ScannerMode,
+    include_directories: bool,
+    claims: Vec<PublicClaimId>,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -251,6 +312,25 @@ fn main() -> Result<()> {
             include_directories,
             output_dir,
         ),
+        Command::Suite {
+            path,
+            output_dir,
+            iterations,
+            sample_ms,
+            progress_every,
+            scanner,
+            include_directories,
+            claim,
+        } => run_suite(SuiteOptions {
+            path,
+            output_dir,
+            iterations,
+            sample_ms,
+            progress_every,
+            scanner,
+            include_directories,
+            claims: claim,
+        }),
         Command::Dataset {
             root,
             dirs,
@@ -313,6 +393,126 @@ fn run_export(
 
     write_export_measurements(&mut io::stdout().lock(), &measurements)?;
     Ok(())
+}
+
+fn run_suite(options: SuiteOptions) -> Result<()> {
+    fs::create_dir_all(&options.output_dir)
+        .with_context(|| format!("failed to create {}", options.output_dir.display()))?;
+
+    let sample_interval = Duration::from_millis(options.sample_ms.max(1));
+    let scan_measurements = collect_scan_measurements(
+        &options.path,
+        options.iterations,
+        sample_interval,
+        options.progress_every,
+        options.scanner,
+    )?;
+    let scan_summary = summarize_rows(&scan_measurements_to_rows(&scan_measurements))?;
+    let export_measurements = collect_export_measurements(
+        &options.path,
+        options.iterations,
+        sample_interval,
+        options.scanner,
+        options.include_directories,
+    )?;
+    let export_summary = summarize_export_measurements(&export_measurements)?;
+    let claims = selected_claims(&options.claims);
+    let comparisons: Vec<_> = claims
+        .into_iter()
+        .map(|claim_id| compare_summary_to_claim(&scan_summary, public_claim(claim_id)))
+        .collect();
+
+    let scan_csv = options.output_dir.join("scan.csv");
+    let mut scan_file = File::create(&scan_csv)
+        .with_context(|| format!("failed to create {}", scan_csv.display()))?;
+    write_measurements(&mut scan_file, &scan_measurements)?;
+
+    let scan_summary_csv = options.output_dir.join("scan-summary.csv");
+    let mut scan_summary_file = File::create(&scan_summary_csv)
+        .with_context(|| format!("failed to create {}", scan_summary_csv.display()))?;
+    write_summary(&mut scan_summary_file, &scan_summary)?;
+
+    let export_csv = options.output_dir.join("export.csv");
+    let mut export_file = File::create(&export_csv)
+        .with_context(|| format!("failed to create {}", export_csv.display()))?;
+    write_export_measurements(&mut export_file, &export_measurements)?;
+
+    let comparison_csv = options.output_dir.join("public-comparison.csv");
+    let mut comparison_file = File::create(&comparison_csv)
+        .with_context(|| format!("failed to create {}", comparison_csv.display()))?;
+    write_public_comparisons(&mut comparison_file, &comparisons)?;
+
+    let report_md = options.output_dir.join("report.md");
+    let mut report_file = File::create(&report_md)
+        .with_context(|| format!("failed to create {}", report_md.display()))?;
+    write_suite_report(
+        &mut report_file,
+        &SuiteReport {
+            path: &options.path,
+            output_dir: &options.output_dir,
+            scanner: options.scanner,
+            iterations: options.iterations,
+            sample_ms: options.sample_ms,
+            progress_every: options.progress_every,
+            include_directories: options.include_directories,
+            scan_summary: &scan_summary,
+            export_summary: &export_summary,
+            comparisons: &comparisons,
+        },
+    )?;
+
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "benchmark suite written to {}",
+        options.output_dir.display()
+    )?;
+    writeln!(stdout, "scan: {}", scan_csv.display())?;
+    writeln!(stdout, "scan summary: {}", scan_summary_csv.display())?;
+    writeln!(stdout, "export: {}", export_csv.display())?;
+    writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
+    writeln!(stdout, "report: {}", report_md.display())?;
+
+    Ok(())
+}
+
+fn collect_scan_measurements(
+    path: &Path,
+    iterations: usize,
+    sample_interval: Duration,
+    progress_every: u64,
+    scanner: ScannerMode,
+) -> Result<Vec<ScanMeasurement>> {
+    let mut measurements = Vec::with_capacity(iterations);
+    for iteration in 1..=iterations {
+        let scan = run_measured_scan(path.to_path_buf(), sample_interval, progress_every, scanner)
+            .with_context(|| format!("scan failed for {}", path.display()))?;
+        measurements.push(measurement_from_run(iteration, scan));
+    }
+    Ok(measurements)
+}
+
+fn collect_export_measurements(
+    path: &Path,
+    iterations: usize,
+    sample_interval: Duration,
+    scanner: ScannerMode,
+    include_directories: bool,
+) -> Result<Vec<ExportMeasurement>> {
+    let mut measurements = Vec::with_capacity(iterations);
+    for iteration in 1..=iterations {
+        let export = run_measured_export(
+            path.to_path_buf(),
+            sample_interval,
+            scanner,
+            include_directories,
+            None,
+            iteration,
+        )
+        .with_context(|| format!("export benchmark failed for {}", path.display()))?;
+        measurements.push(export_measurement_from_run(iteration, export));
+    }
+    Ok(measurements)
 }
 
 fn run_measured_scan(
@@ -779,6 +979,21 @@ fn compare_public_claim(path: PathBuf, claim_id: PublicClaimId) -> Result<()> {
     Ok(())
 }
 
+fn selected_claims(claims: &[PublicClaimId]) -> Vec<PublicClaimId> {
+    if claims.is_empty() {
+        all_public_claims().to_vec()
+    } else {
+        claims.to_vec()
+    }
+}
+
+fn all_public_claims() -> [PublicClaimId; 2] {
+    [
+        PublicClaimId::WizTreeSsd460Gb,
+        PublicClaimId::WizTreeHdd25Gb,
+    ]
+}
+
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
@@ -971,6 +1186,87 @@ fn summarize_rows(rows: &[ParsedMeasurement]) -> Result<MeasurementSummary> {
     })
 }
 
+fn scan_measurements_to_rows(measurements: &[ScanMeasurement]) -> Vec<ParsedMeasurement> {
+    measurements
+        .iter()
+        .map(|measurement| ParsedMeasurement {
+            scanner: measurement.scanner.to_owned(),
+            fallback: measurement.fallback,
+            elapsed_ms: measurement.elapsed_ms,
+            first_result_ms: measurement.first_result_ms,
+            entries: measurement.entries,
+            peak_working_set_bytes: measurement.peak_working_set_bytes,
+            peak_private_bytes: measurement.peak_private_bytes,
+            peak_private_bytes_per_million_entries: measurement
+                .peak_private_bytes_per_million_entries,
+        })
+        .collect()
+}
+
+fn summarize_export_measurements(measurements: &[ExportMeasurement]) -> Result<ExportSummary> {
+    if measurements.is_empty() {
+        return Err(anyhow!("export measurements have no data rows"));
+    }
+
+    let mut scanners = BTreeSet::new();
+    let entries: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.entries)
+        .collect();
+    let export_bytes: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.export_bytes)
+        .collect();
+    let mut scan_elapsed: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.scan_elapsed_ms)
+        .collect();
+    let mut export_elapsed: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.export_elapsed_ms)
+        .collect();
+    let mut total_elapsed: Vec<_> = measurements
+        .iter()
+        .map(|measurement| measurement.total_elapsed_ms)
+        .collect();
+    for measurement in measurements {
+        scanners.insert(measurement.scanner);
+    }
+
+    Ok(ExportSummary {
+        runs: measurements.len(),
+        scanners: scanners.into_iter().collect::<Vec<_>>().join("+"),
+        fallback_runs: measurements
+            .iter()
+            .filter(|measurement| measurement.fallback)
+            .count(),
+        entries_min: *entries.iter().min().unwrap_or(&0),
+        entries_max: *entries.iter().max().unwrap_or(&0),
+        export_bytes_min: *export_bytes.iter().min().unwrap_or(&0),
+        export_bytes_max: *export_bytes.iter().max().unwrap_or(&0),
+        scan_elapsed_ms_median: median_u128(&mut scan_elapsed),
+        export_elapsed_ms_min: *export_elapsed.iter().min().unwrap_or(&0),
+        export_elapsed_ms_median: median_u128(&mut export_elapsed),
+        export_elapsed_ms_max: *export_elapsed.iter().max().unwrap_or(&0),
+        total_elapsed_ms_median: median_u128(&mut total_elapsed),
+        peak_working_set_bytes_max: measurements
+            .iter()
+            .map(|measurement| measurement.peak_working_set_bytes)
+            .max()
+            .unwrap_or(0),
+        peak_private_bytes_max: measurements
+            .iter()
+            .map(|measurement| measurement.peak_private_bytes)
+            .max()
+            .unwrap_or(0),
+        peak_private_bytes_per_million_entries_max: measurements
+            .iter()
+            .map(|measurement| measurement.peak_private_bytes_per_million_entries)
+            .max()
+            .unwrap_or(0),
+    })
+}
+
 fn median_u128(values: &mut [u128]) -> u128 {
     values.sort_unstable();
     let mid = values.len() / 2;
@@ -1051,36 +1347,162 @@ fn ratio_decimal(numerator: u128, denominator: u128) -> String {
 }
 
 fn write_public_comparison(writer: &mut impl Write, comparison: &PublicComparison) -> Result<()> {
+    write_public_comparisons(writer, std::slice::from_ref(comparison))
+}
+
+fn write_public_comparisons(
+    writer: &mut impl Write,
+    comparisons: &[PublicComparison],
+) -> Result<()> {
     writeln!(
         writer,
         "claim_id,claim_source_url,claim_context,claim_elapsed_ms,diskloom_runs,diskloom_scanners,diskloom_fallback_runs,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_peak_private_bytes_max,diskloom_vs_claim_ratio,validity"
     )?;
+    for comparison in comparisons {
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            comparison.claim_id,
+            comparison.claim_source_url,
+            comparison.claim_context,
+            comparison.claim_elapsed_ms,
+            comparison.diskloom_runs,
+            comparison.diskloom_scanners,
+            comparison.diskloom_fallback_runs,
+            comparison.diskloom_elapsed_ms_min,
+            comparison.diskloom_elapsed_ms_median,
+            comparison.diskloom_elapsed_ms_max,
+            comparison.diskloom_peak_private_bytes_max,
+            comparison.diskloom_vs_claim_ratio,
+            comparison.validity
+        )?;
+    }
+    Ok(())
+}
+
+fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Result<()> {
+    writeln!(writer, "# DiskLoom Benchmark Suite")?;
+    writeln!(writer)?;
+    writeln!(writer, "## Run")?;
+    writeln!(writer)?;
+    writeln!(writer, "- Path: `{}`", report.path.display())?;
     writeln!(
         writer,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{}",
-        comparison.claim_id,
-        comparison.claim_source_url,
-        comparison.claim_context,
-        comparison.claim_elapsed_ms,
-        comparison.diskloom_runs,
-        comparison.diskloom_scanners,
-        comparison.diskloom_fallback_runs,
-        comparison.diskloom_elapsed_ms_min,
-        comparison.diskloom_elapsed_ms_median,
-        comparison.diskloom_elapsed_ms_max,
-        comparison.diskloom_peak_private_bytes_max,
-        comparison.diskloom_vs_claim_ratio,
-        comparison.validity
+        "- Output directory: `{}`",
+        report.output_dir.display()
+    )?;
+    writeln!(writer, "- Scanner: `{}`", scanner_label(report.scanner))?;
+    writeln!(writer, "- Iterations: {}", report.iterations)?;
+    writeln!(writer, "- Sample interval: {} ms", report.sample_ms)?;
+    writeln!(
+        writer,
+        "- Progress interval: {} entries",
+        report.progress_every
+    )?;
+    writeln!(
+        writer,
+        "- Export includes directories: {}",
+        report.include_directories
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "## DiskLoom Scan")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| runs | scanners | fallback runs | entries | full scan median/range ms | first result median/range ms | peak private bytes | private bytes per million entries |"
+    )?;
+    writeln!(writer, "| --- | --- | --- | --- | --- | --- | --- | --- |")?;
+    writeln!(
+        writer,
+        "| {} | {} | {} | {}-{} | {} / {}-{} | {} / {}-{} | {} | {} |",
+        report.scan_summary.runs,
+        report.scan_summary.scanners,
+        report.scan_summary.fallback_runs,
+        report.scan_summary.entries_min,
+        report.scan_summary.entries_max,
+        report.scan_summary.elapsed_ms_median,
+        report.scan_summary.elapsed_ms_min,
+        report.scan_summary.elapsed_ms_max,
+        report.scan_summary.first_result_ms_median,
+        report.scan_summary.first_result_ms_min,
+        report.scan_summary.first_result_ms_max,
+        report.scan_summary.peak_private_bytes_max,
+        report
+            .scan_summary
+            .peak_private_bytes_per_million_entries_max
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "## DiskLoom CSV Export")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| runs | scanners | fallback runs | entries | export bytes | scan median ms | export median/range ms | total median ms | peak private bytes |"
+    )?;
+    writeln!(
+        writer,
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+    )?;
+    writeln!(
+        writer,
+        "| {} | {} | {} | {}-{} | {}-{} | {} | {} / {}-{} | {} | {} |",
+        report.export_summary.runs,
+        report.export_summary.scanners,
+        report.export_summary.fallback_runs,
+        report.export_summary.entries_min,
+        report.export_summary.entries_max,
+        report.export_summary.export_bytes_min,
+        report.export_summary.export_bytes_max,
+        report.export_summary.scan_elapsed_ms_median,
+        report.export_summary.export_elapsed_ms_median,
+        report.export_summary.export_elapsed_ms_min,
+        report.export_summary.export_elapsed_ms_max,
+        report.export_summary.total_elapsed_ms_median,
+        report.export_summary.peak_private_bytes_max
+    )?;
+    writeln!(writer)?;
+    writeln!(writer, "## Public WizTree Reference Claims")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "| claim | source | claim ms | DiskLoom median ms | ratio | validity |"
+    )?;
+    writeln!(writer, "| --- | --- | --- | --- | --- | --- |")?;
+    for comparison in report.comparisons {
+        writeln!(
+            writer,
+            "| {} | {} | {} | {} | {} | {} |",
+            comparison.claim_id,
+            comparison.claim_source_url,
+            comparison.claim_elapsed_ms,
+            comparison.diskloom_elapsed_ms_median,
+            comparison.diskloom_vs_claim_ratio,
+            comparison.validity
+        )?;
+    }
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Public claim rows are source-labeled historical reference points only. They are not same-machine competitor benchmarks and must not be used to claim DiskLoom is faster than WizTree."
     )?;
     Ok(())
+}
+
+fn scanner_label(scanner: ScannerMode) -> &'static str {
+    match scanner {
+        ScannerMode::Auto => "auto",
+        ScannerMode::Fallback => "fallback",
+        ScannerMode::Ntfs => "ntfs",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CountingWriter, ExportMeasurement, MeasurementSummary, PublicClaimId, ScanMeasurement,
-        compare_summary_to_claim, parse_measurements, per_million, public_claim, ratio_decimal,
-        summarize_rows, write_export_measurements, write_measurements, write_public_comparison,
+        CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary, PublicClaimId,
+        ScanMeasurement, SuiteReport, compare_summary_to_claim, parse_measurements, per_million,
+        public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims,
+        summarize_export_measurements, summarize_rows, write_export_measurements,
+        write_measurements, write_public_comparison, write_public_comparisons, write_suite_report,
         write_summary,
     };
 
@@ -1138,6 +1560,46 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("1,fallback,0,10,3,13,120,3,2,1,0,100,90,80,70,30000000,4"));
+    }
+
+    #[test]
+    fn summarize_export_measurements_should_compute_export_median() {
+        let measurements = [
+            export_measurement(1, 10, 3, 13),
+            export_measurement(2, 20, 7, 27),
+            export_measurement(3, 30, 5, 35),
+        ];
+
+        let summary = summarize_export_measurements(&measurements).unwrap();
+
+        assert_eq!(summary.export_elapsed_ms_median, 5);
+        assert_eq!(summary.export_elapsed_ms_min, 3);
+        assert_eq!(summary.export_elapsed_ms_max, 7);
+    }
+
+    #[test]
+    fn scan_measurements_to_rows_should_preserve_first_result() {
+        let measurements = [ScanMeasurement {
+            iteration: 1,
+            scanner: "fallback",
+            fallback: false,
+            elapsed_ms: 10,
+            first_result_ms: 2,
+            entries: 3,
+            files: 2,
+            directories: 1,
+            inaccessible: 0,
+            peak_working_set_bytes: 100,
+            peak_private_bytes: 90,
+            final_working_set_bytes: 80,
+            final_private_bytes: 70,
+            peak_private_bytes_per_million_entries: 30_000_000,
+            memory_samples: 4,
+        }];
+
+        let rows = scan_measurements_to_rows(&measurements);
+
+        assert_eq!(rows[0].first_result_ms, 2);
     }
 
     #[test]
@@ -1257,9 +1719,143 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
     }
 
     #[test]
+    fn write_public_comparisons_should_emit_multiple_rows() {
+        let summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 1_046,
+            elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let comparisons = [
+            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb)),
+            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeHdd25Gb)),
+        ];
+        let mut output = Vec::new();
+
+        write_public_comparisons(&mut output, &comparisons).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("wiztree-ssd-460gb"));
+        assert!(output.contains("wiztree-hdd-25gb"));
+    }
+
+    #[test]
+    fn selected_claims_should_default_to_all_public_claims() {
+        let claims = selected_claims(&[]);
+
+        assert_eq!(
+            claims,
+            vec![
+                PublicClaimId::WizTreeSsd460Gb,
+                PublicClaimId::WizTreeHdd25Gb
+            ]
+        );
+    }
+
+    #[test]
+    fn write_suite_report_should_mark_public_claims_reference_only() {
+        let scan_summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 1_046,
+            elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let export_summary = ExportSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            export_bytes_min: 100,
+            export_bytes_max: 120,
+            scan_elapsed_ms_median: 10,
+            export_elapsed_ms_min: 3,
+            export_elapsed_ms_median: 5,
+            export_elapsed_ms_max: 7,
+            total_elapsed_ms_median: 15,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let comparisons = [compare_summary_to_claim(
+            &scan_summary,
+            public_claim(PublicClaimId::WizTreeSsd460Gb),
+        )];
+        let mut output = Vec::new();
+
+        write_suite_report(
+            &mut output,
+            &SuiteReport {
+                path: std::path::Path::new("."),
+                output_dir: std::path::Path::new("target/bench-suite"),
+                scanner: super::ScannerMode::Fallback,
+                iterations: 3,
+                sample_ms: 10,
+                progress_every: 1024,
+                include_directories: true,
+                scan_summary: &scan_summary,
+                export_summary: &export_summary,
+                comparisons: &comparisons,
+            },
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+        assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
+    }
+
+    #[test]
     fn ratio_decimal_should_format_fixed_precision() {
         assert_eq!(ratio_decimal(1_046, 5_230), "0.200");
         assert_eq!(ratio_decimal(5_230, 5_230), "1.000");
         assert_eq!(ratio_decimal(5_230, 0), "n/a");
+    }
+
+    fn export_measurement(
+        iteration: usize,
+        scan_elapsed_ms: u128,
+        export_elapsed_ms: u128,
+        total_elapsed_ms: u128,
+    ) -> ExportMeasurement {
+        ExportMeasurement {
+            iteration,
+            scanner: "fallback",
+            fallback: false,
+            scan_elapsed_ms,
+            export_elapsed_ms,
+            total_elapsed_ms,
+            export_bytes: 120,
+            entries: 3,
+            files: 2,
+            directories: 1,
+            inaccessible: 0,
+            peak_working_set_bytes: 100,
+            peak_private_bytes: 90,
+            final_working_set_bytes: 80,
+            final_private_bytes: 70,
+            peak_private_bytes_per_million_entries: 30_000_000,
+            memory_samples: 4,
+        }
     }
 }
