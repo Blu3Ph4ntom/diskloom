@@ -81,7 +81,7 @@ enum Command {
     ComparePublic {
         csv: PathBuf,
         #[arg(long, value_enum)]
-        claim: PublicClaimId,
+        claim: Vec<PublicClaimId>,
     },
 }
 
@@ -364,7 +364,7 @@ fn main() -> Result<()> {
             bytes_per_file,
         } => create_dataset(root, dirs, files_per_dir, bytes_per_file),
         Command::Summarize { csv } => summarize_measurements(csv),
-        Command::ComparePublic { csv, claim } => compare_public_claim(csv, claim),
+        Command::ComparePublic { csv, claim } => compare_public_claims(csv, &claim),
     }
 }
 
@@ -1015,13 +1015,16 @@ fn summarize_measurements(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn compare_public_claim(path: PathBuf, claim_id: PublicClaimId) -> Result<()> {
+fn compare_public_claims(path: PathBuf, claims: &[PublicClaimId]) -> Result<()> {
     let input =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let rows = parse_measurements(&input)?;
     let summary = summarize_rows(&rows)?;
-    let comparison = compare_summary_to_claim(&summary, public_claim(claim_id));
-    write_public_comparison(&mut io::stdout().lock(), &comparison)?;
+    let comparisons: Vec<_> = selected_claims(claims)
+        .into_iter()
+        .map(|claim_id| compare_summary_to_claim(&summary, public_claim(claim_id)))
+        .collect();
+    write_public_comparisons(&mut io::stdout().lock(), &comparisons)?;
     Ok(())
 }
 
@@ -1402,10 +1405,6 @@ fn ratio_decimal(numerator: u128, denominator: u128) -> String {
     }
     let scaled = numerator.saturating_mul(1_000) / denominator;
     format!("{}.{:03}", scaled / 1_000, scaled % 1_000)
-}
-
-fn write_public_comparison(writer: &mut impl Write, comparison: &PublicComparison) -> Result<()> {
-    write_public_comparisons(writer, std::slice::from_ref(comparison))
 }
 
 fn write_public_comparisons(
@@ -2020,13 +2019,15 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        BenchmarkEnvironment, CountingWriter, ExportMeasurement, ExportSummary, MeasurementSummary,
-        PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport, SuiteRunContext,
-        compare_summary_to_claim, parse_measurements, per_million, public_claim, ratio_decimal,
-        scan_measurements_to_rows, selected_claims, shell_quote_arg, summarize_export_measurements,
-        summarize_rows, write_export_measurements, write_measurements, write_public_comparison,
-        write_public_comparisons, write_suite_metadata, write_suite_report, write_summary,
+        Args, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement, ExportSummary,
+        MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport,
+        SuiteRunContext, compare_summary_to_claim, parse_measurements, per_million, public_claim,
+        ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
+        summarize_export_measurements, summarize_rows, write_export_measurements,
+        write_measurements, write_public_comparisons, write_suite_metadata, write_suite_report,
+        write_summary,
     };
+    use clap::Parser;
 
     #[test]
     fn write_measurements_should_emit_csv_rows() {
@@ -2264,7 +2265,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
         let mut output = Vec::new();
 
-        write_public_comparison(&mut output, &comparison).unwrap();
+        write_public_comparisons(&mut output, &[comparison]).unwrap();
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("claim_elapsed_ms_min,claim_elapsed_ms_max"));
@@ -2319,6 +2320,42 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 PublicClaimId::WizTreeSsd500GbTypical,
                 PublicClaimId::WizTreeSsd460Gb,
                 PublicClaimId::WizTreeHdd25Gb
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_public_cli_should_default_to_all_claims() {
+        let args =
+            Args::try_parse_from(["diskloom-bench", "compare-public", "target/bench.csv"]).unwrap();
+
+        let Command::ComparePublic { claim, .. } = args.command else {
+            panic!("expected compare-public command");
+        };
+        assert!(claim.is_empty());
+    }
+
+    #[test]
+    fn compare_public_cli_should_accept_multiple_claims() {
+        let args = Args::try_parse_from([
+            "diskloom-bench",
+            "compare-public",
+            "target/bench.csv",
+            "--claim",
+            "wiztree-ssd-500gb-typical",
+            "--claim",
+            "wiztree-ssd-460gb",
+        ])
+        .unwrap();
+
+        let Command::ComparePublic { claim, .. } = args.command else {
+            panic!("expected compare-public command");
+        };
+        assert_eq!(
+            claim,
+            vec![
+                PublicClaimId::WizTreeSsd500GbTypical,
+                PublicClaimId::WizTreeSsd460Gb
             ]
         );
     }
