@@ -87,6 +87,12 @@ Filter by full path:
 cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --path AppData --limit 25
 ```
 
+Show duplicate candidates:
+
+```powershell
+cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --duplicates --limit 25
+```
+
 List Windows volumes:
 
 ```powershell
