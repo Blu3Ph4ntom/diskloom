@@ -476,7 +476,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "diskloom-core",
+ "diskloom-dupes",
  "diskloom-export",
+ "diskloom-query",
  "diskloom-scan",
  "diskloom-windows",
 ]

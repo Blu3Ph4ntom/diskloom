@@ -13,10 +13,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+diskloom-core.workspace = true
+diskloom-dupes.workspace = true
 diskloom-export.workspace = true
+diskloom-query.workspace = true
 diskloom-scan.workspace = true
 diskloom-windows.workspace = true
 
 [lints]
 workspace = true
-
