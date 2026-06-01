@@ -518,6 +518,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskloom-launcher"
+version = "0.1.0"
+
+[[package]]
 name = "diskloom-ntfs"
 version = "0.1.0"
 dependencies = [

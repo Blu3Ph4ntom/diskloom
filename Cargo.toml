@@ -1,3 +1,13 @@
+[package]
+name = "diskloom-launcher"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "diskloom-launcher"
+
 [workspace]
 members = [
     "crates/bench",
@@ -12,6 +22,7 @@ members = [
     "crates/windows",
 ]
 resolver = "2"
+default-members = ["."]
 
 [workspace.package]
 edition = "2024"

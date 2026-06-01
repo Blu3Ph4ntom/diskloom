@@ -111,8 +111,10 @@ cargo run -p diskloom-cli -- ntfs-probe C:
 Launch the GUI shell:
 
 ```powershell
-cargo run -p diskloom-ui
+cargo run
 ```
+
+The root launcher builds release binaries if needed and then starts the GUI. Use `cargo run -- cli scan . --scanner fallback --limit 25` for the CLI, or `cargo run -- bench --help` for the benchmark harness.
 
 Run the benchmark harness:
 
