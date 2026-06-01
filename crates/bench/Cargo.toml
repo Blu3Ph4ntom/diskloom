@@ -15,6 +15,12 @@ anyhow.workspace = true
 clap.workspace = true
 diskloom-scan.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
 [lints]
 workspace = true
-

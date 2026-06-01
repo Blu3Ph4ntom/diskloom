@@ -468,6 +468,7 @@ dependencies = [
  "anyhow",
  "clap",
  "diskloom-scan",
+ "windows",
 ]
 
 [[package]]

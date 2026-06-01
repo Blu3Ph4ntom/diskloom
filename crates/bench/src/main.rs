@@ -2,12 +2,14 @@ use std::{
     fs::{self, File},
     io::{self, Write},
     path::PathBuf,
-    time::Instant,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
-use diskloom_scan::{FallbackScanner, ScanOptions};
+use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 
 #[derive(Debug, Parser)]
 #[command(name = "diskloom-bench")]
@@ -23,6 +25,8 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 5)]
         iterations: usize,
+        #[arg(long, default_value_t = 10)]
+        sample_ms: u64,
     },
     Dataset {
         root: PathBuf,
@@ -43,13 +47,50 @@ struct ScanMeasurement {
     files: u64,
     directories: u64,
     inaccessible: u64,
+    peak_working_set_bytes: u64,
+    peak_private_bytes: u64,
+    final_working_set_bytes: u64,
+    final_private_bytes: u64,
+    peak_private_bytes_per_million_entries: u64,
+    memory_samples: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MemorySample {
+    working_set_bytes: u64,
+    private_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MemoryPeak {
+    peak_working_set_bytes: u64,
+    peak_private_bytes: u64,
+    final_working_set_bytes: u64,
+    final_private_bytes: u64,
+    samples: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScanRun {
+    elapsed_ms: u128,
+    summary: ScanSummary,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MeasuredScan {
+    run: ScanRun,
+    memory: MemoryPeak,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Scan { path, iterations } => run_scan(path, iterations),
+        Command::Scan {
+            path,
+            iterations,
+            sample_ms,
+        } => run_scan(path, iterations, sample_ms),
         Command::Dataset {
             root,
             dirs,
@@ -59,28 +100,131 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_scan(path: PathBuf, iterations: usize) -> Result<()> {
+fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64) -> Result<()> {
     let mut measurements = Vec::with_capacity(iterations);
+    let sample_interval = Duration::from_millis(sample_ms.max(1));
 
     for iteration in 1..=iterations {
-        let started = Instant::now();
-        let (_, summary) = FallbackScanner::scan(ScanOptions {
-            root: path.clone(),
-            follow_symlinks: false,
-        })
-        .with_context(|| format!("scan failed for {}", path.display()))?;
-        measurements.push(ScanMeasurement {
-            iteration,
-            elapsed_ms: started.elapsed().as_millis(),
-            entries: summary.entries,
-            files: summary.files,
-            directories: summary.directories,
-            inaccessible: summary.inaccessible,
-        });
+        let scan = run_measured_scan(path.clone(), sample_interval)
+            .with_context(|| format!("scan failed for {}", path.display()))?;
+        measurements.push(measurement_from_run(iteration, scan));
     }
 
     write_measurements(&mut io::stdout().lock(), &measurements)?;
     Ok(())
+}
+
+fn run_measured_scan(path: PathBuf, sample_interval: Duration) -> Result<MeasuredScan> {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = scan_once(path).map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+
+    let mut memory = MemoryPeak::default();
+    let run = loop {
+        memory.observe(current_process_memory()?);
+        match receiver.recv_timeout(sample_interval) {
+            Ok(result) => break result.map_err(|error| anyhow!(error))?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("scan worker stopped"));
+            }
+        }
+    };
+    handle.join().map_err(|_| anyhow!("scan worker panicked"))?;
+    memory.observe(current_process_memory()?);
+
+    Ok(MeasuredScan { run, memory })
+}
+
+fn scan_once(path: PathBuf) -> Result<ScanRun> {
+    let started = Instant::now();
+    let (_, summary) = FallbackScanner::scan(ScanOptions {
+        root: path,
+        follow_symlinks: false,
+    })?;
+
+    Ok(ScanRun {
+        elapsed_ms: started.elapsed().as_millis(),
+        summary,
+    })
+}
+
+fn measurement_from_run(iteration: usize, scan: MeasuredScan) -> ScanMeasurement {
+    let summary = scan.run.summary;
+    ScanMeasurement {
+        iteration,
+        elapsed_ms: scan.run.elapsed_ms,
+        entries: summary.entries,
+        files: summary.files,
+        directories: summary.directories,
+        inaccessible: summary.inaccessible,
+        peak_working_set_bytes: scan.memory.peak_working_set_bytes,
+        peak_private_bytes: scan.memory.peak_private_bytes,
+        final_working_set_bytes: scan.memory.final_working_set_bytes,
+        final_private_bytes: scan.memory.final_private_bytes,
+        peak_private_bytes_per_million_entries: per_million(
+            scan.memory.peak_private_bytes,
+            summary.entries,
+        ),
+        memory_samples: scan.memory.samples,
+    }
+}
+
+impl MemoryPeak {
+    fn observe(&mut self, sample: MemorySample) {
+        self.samples += 1;
+        self.final_working_set_bytes = sample.working_set_bytes;
+        self.final_private_bytes = sample.private_bytes;
+        self.peak_working_set_bytes = self.peak_working_set_bytes.max(sample.working_set_bytes);
+        self.peak_private_bytes = self.peak_private_bytes.max(sample.private_bytes);
+    }
+}
+
+fn per_million(value: u64, count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    ((u128::from(value) * 1_000_000) / u128::from(count)) as u64
+}
+
+#[cfg(windows)]
+fn current_process_memory() -> Result<MemorySample> {
+    use std::mem::size_of;
+
+    use windows::Win32::System::{
+        ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        },
+        Threading::GetCurrentProcess,
+    };
+
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..PROCESS_MEMORY_COUNTERS_EX::default()
+    };
+
+    // SAFETY: GetCurrentProcess returns the current process pseudo-handle. The counters buffer
+    // is initialized with its real size and is valid for the duration of the call.
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    }
+    .context("failed to read process memory counters")?;
+
+    Ok(MemorySample {
+        working_set_bytes: counters.WorkingSetSize as u64,
+        private_bytes: counters.PrivateUsage as u64,
+    })
+}
+
+#[cfg(not(windows))]
+fn current_process_memory() -> Result<MemorySample> {
+    Ok(MemorySample::default())
 }
 
 fn create_dataset(
@@ -116,18 +260,24 @@ fn create_dataset(
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
-        "iteration,elapsed_ms,entries,files,directories,inaccessible"
+        "iteration,elapsed_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
     )?;
     for measurement in measurements {
         writeln!(
             writer,
-            "{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{}",
             measurement.iteration,
             measurement.elapsed_ms,
             measurement.entries,
             measurement.files,
             measurement.directories,
-            measurement.inaccessible
+            measurement.inaccessible,
+            measurement.peak_working_set_bytes,
+            measurement.peak_private_bytes,
+            measurement.final_working_set_bytes,
+            measurement.final_private_bytes,
+            measurement.peak_private_bytes_per_million_entries,
+            measurement.memory_samples
         )?;
     }
     Ok(())
@@ -135,7 +285,7 @@ fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement])
 
 #[cfg(test)]
 mod tests {
-    use super::{ScanMeasurement, write_measurements};
+    use super::{ScanMeasurement, per_million, write_measurements};
 
     #[test]
     fn write_measurements_should_emit_csv_rows() {
@@ -146,12 +296,24 @@ mod tests {
             files: 2,
             directories: 1,
             inaccessible: 0,
+            peak_working_set_bytes: 100,
+            peak_private_bytes: 90,
+            final_working_set_bytes: 80,
+            final_private_bytes: 70,
+            peak_private_bytes_per_million_entries: 30_000_000,
+            memory_samples: 4,
         }];
         let mut output = Vec::new();
 
         write_measurements(&mut output, &measurements).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("1,10,3,2,1,0"));
+        assert!(output.contains("1,10,3,2,1,0,100,90,80,70,30000000,4"));
+    }
+
+    #[test]
+    fn per_million_should_scale_without_floating_point() {
+        assert_eq!(per_million(90, 3), 30_000_000);
+        assert_eq!(per_million(90, 0), 0);
     }
 }
