@@ -19,6 +19,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let launcher_dir = current_exe_dir().unwrap_or_else(|| repo_root.clone());
     let (binary, args) = match launch_target(env::args_os().skip(1)) {
         LaunchTarget::Help => {
             print_help();
@@ -26,7 +27,7 @@ fn run() -> Result<ExitCode, String> {
         }
         LaunchTarget::Run { binary, args } => (binary, args),
     };
-    let exe = ensure_release_binary(&repo_root, binary)?;
+    let exe = resolve_launch_binary(&repo_root, &launcher_dir, binary)?;
     let status = Command::new(&exe)
         .args(args)
         .status()
@@ -93,11 +94,27 @@ fn print_help() {
     );
 }
 
+fn current_exe_dir() -> Option<PathBuf> {
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn resolve_launch_binary(
+    repo_root: &Path,
+    launcher_dir: &Path,
+    binary: &str,
+) -> Result<PathBuf, String> {
+    let sibling = binary_path(launcher_dir, binary);
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    ensure_release_binary(repo_root, binary)
+}
+
 fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, String> {
-    let exe = repo_root
-        .join("target")
-        .join("release")
-        .join(format!("{binary}{}", env::consts::EXE_SUFFIX));
+    let exe = binary_path(&repo_root.join("target").join("release"), binary);
     if release_binary_is_current(repo_root, &exe)? {
         return Ok(exe);
     }
@@ -130,6 +147,10 @@ fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, Stri
     }
 
     Ok(exe)
+}
+
+fn binary_path(dir: &Path, binary: &str) -> PathBuf {
+    dir.join(format!("{binary}{}", env::consts::EXE_SUFFIX))
 }
 
 fn release_binary_is_current(repo_root: &Path, exe: &Path) -> Result<bool, String> {
@@ -204,7 +225,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{
-        LaunchTarget, exit_code_from_status, is_build_input, launch_target, should_skip_build_dir,
+        LaunchTarget, exit_code_from_status, is_build_input, launch_target, resolve_launch_binary,
+        should_skip_build_dir,
     };
 
     #[test]
@@ -286,5 +308,27 @@ mod tests {
         assert!(should_skip_build_dir(std::path::Path::new(".agent")));
         assert!(should_skip_build_dir(std::path::Path::new("dist")));
         assert!(!should_skip_build_dir(std::path::Path::new("crates")));
+    }
+
+    #[test]
+    fn resolve_launch_binary_should_prefer_portable_sibling_binary() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "diskloom-launcher-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let expected = temp_dir.join(format!("diskloom-ui{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&expected, b"").unwrap();
+
+        let resolved =
+            resolve_launch_binary(std::path::Path::new("missing"), &temp_dir, "diskloom-ui")
+                .unwrap();
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+
+        assert_eq!(resolved, expected);
     }
 }
