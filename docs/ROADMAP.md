@@ -27,6 +27,7 @@
 - File view sorted by size. Initial implementation done.
 - Treemap. Initial implementation done.
 - File type stats. Initial implementation done.
+- Duplicate candidate view. Initial size/name/date grouping tab done.
 - Background scan worker. Initial implementation with fallback progress counts done.
 - Scanner mode selection. Initial implementation done.
 - Search/filter UI. Initial name, regex, extension, path, size, allocated-size, and modified-date filters done.
