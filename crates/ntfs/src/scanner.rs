@@ -1,17 +1,19 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+use std::time::Duration;
+use std::{fmt, thread, time::Instant};
 
 use diskloom_core::{
     EntryFlags, EntryId, EntryMetadata, FileGraph, FileGraphBuilder, FileGraphError, FileKind,
 };
 use thiserror::Error;
 
-use crate::mft::{FileNameAttribute, MftParseError, ParsedFileRecord, parse_file_record};
+use crate::mft::{
+    MftParseError, ParsedFileRecord, ScannedFileRecord, parse_file_record,
+    parse_scanned_file_record_in_place,
+};
 
 const ROOT_RECORD_NUMBER: u64 = 5;
-const MFT_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MFT_READ_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+const NO_PARENT_RECORD: u64 = u64::MAX;
 
 #[derive(Debug, Default)]
 pub struct NtfsScanner;
@@ -49,6 +51,8 @@ pub enum NtfsScanError {
     MftScanIncomplete,
     #[error("direct NTFS scan was cancelled")]
     Cancelled,
+    #[error("direct NTFS scan worker panicked")]
+    WorkerPanic,
     #[error("MFT record 0 does not contain non-resident data runs")]
     MissingMftDataRuns,
     #[error("integer overflow while computing NTFS offsets")]
@@ -143,7 +147,6 @@ impl NtfsScanner {
 
 #[derive(Debug, Clone)]
 struct NtfsRawEntry {
-    record_number: u64,
     parent_record_number: Option<u64>,
     name: String,
     kind: FileKind,
@@ -151,6 +154,135 @@ struct NtfsRawEntry {
     allocated: u64,
     modified_unix: i64,
     hard_links: u16,
+}
+
+#[derive(Debug)]
+struct NtfsRawEntries {
+    present: Vec<u8>,
+    parent_record_numbers: Vec<u64>,
+    names: Vec<Option<String>>,
+    kinds: Vec<FileKind>,
+    sizes: Vec<u64>,
+    allocated: Vec<u64>,
+    modified_unix: Vec<i64>,
+    hard_links: Vec<u16>,
+}
+
+impl NtfsRawEntries {
+    fn with_len(len: usize) -> Self {
+        let mut names = Vec::with_capacity(len);
+        names.resize_with(len, || None);
+        Self {
+            present: vec![0; len],
+            parent_record_numbers: vec![NO_PARENT_RECORD; len],
+            names,
+            kinds: vec![FileKind::File; len],
+            sizes: vec![0; len],
+            allocated: vec![0; len],
+            modified_unix: vec![0; len],
+            hard_links: vec![0; len],
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.present.len()
+    }
+
+    fn is_present(&self, record_number: usize) -> bool {
+        self.present.get(record_number).copied() == Some(1)
+    }
+
+    #[cfg(test)]
+    fn insert(&mut self, record_number: usize, entry: NtfsRawEntry) {
+        if record_number >= self.len() {
+            return;
+        }
+        self.present[record_number] = 1;
+        self.parent_record_numbers[record_number] =
+            entry.parent_record_number.unwrap_or(NO_PARENT_RECORD);
+        self.names[record_number] = Some(entry.name);
+        self.kinds[record_number] = entry.kind;
+        self.sizes[record_number] = entry.size;
+        self.allocated[record_number] = entry.allocated;
+        self.modified_unix[record_number] = entry.modified_unix;
+        self.hard_links[record_number] = entry.hard_links;
+    }
+
+    fn parent_record_number(&self, record_number: usize) -> Option<u64> {
+        let parent = *self.parent_record_numbers.get(record_number)?;
+        (parent != NO_PARENT_RECORD).then_some(parent)
+    }
+
+    fn columns_mut(&mut self, start: usize, len: usize) -> NtfsRawEntryColumnsMut<'_> {
+        let end = start + len;
+        NtfsRawEntryColumnsMut {
+            present: &mut self.present[start..end],
+            parent_record_numbers: &mut self.parent_record_numbers[start..end],
+            names: &mut self.names[start..end],
+            kinds: &mut self.kinds[start..end],
+            sizes: &mut self.sizes[start..end],
+            allocated: &mut self.allocated[start..end],
+            modified_unix: &mut self.modified_unix[start..end],
+            hard_links: &mut self.hard_links[start..end],
+        }
+    }
+}
+
+struct NtfsRawEntryColumnsMut<'a> {
+    present: &'a mut [u8],
+    parent_record_numbers: &'a mut [u64],
+    names: &'a mut [Option<String>],
+    kinds: &'a mut [FileKind],
+    sizes: &'a mut [u64],
+    allocated: &'a mut [u64],
+    modified_unix: &'a mut [i64],
+    hard_links: &'a mut [u16],
+}
+
+impl<'a> NtfsRawEntryColumnsMut<'a> {
+    fn split_at_mut(self, mid: usize) -> (Self, Self) {
+        let (present_left, present_right) = self.present.split_at_mut(mid);
+        let (parent_left, parent_right) = self.parent_record_numbers.split_at_mut(mid);
+        let (name_left, name_right) = self.names.split_at_mut(mid);
+        let (kind_left, kind_right) = self.kinds.split_at_mut(mid);
+        let (size_left, size_right) = self.sizes.split_at_mut(mid);
+        let (allocated_left, allocated_right) = self.allocated.split_at_mut(mid);
+        let (modified_left, modified_right) = self.modified_unix.split_at_mut(mid);
+        let (hard_left, hard_right) = self.hard_links.split_at_mut(mid);
+        (
+            Self {
+                present: present_left,
+                parent_record_numbers: parent_left,
+                names: name_left,
+                kinds: kind_left,
+                sizes: size_left,
+                allocated: allocated_left,
+                modified_unix: modified_left,
+                hard_links: hard_left,
+            },
+            Self {
+                present: present_right,
+                parent_record_numbers: parent_right,
+                names: name_right,
+                kinds: kind_right,
+                sizes: size_right,
+                allocated: allocated_right,
+                modified_unix: modified_right,
+                hard_links: hard_right,
+            },
+        )
+    }
+
+    fn insert_at(&mut self, idx: usize, entry: NtfsRawEntry) {
+        self.present[idx] = 1;
+        self.parent_record_numbers[idx] = entry.parent_record_number.unwrap_or(NO_PARENT_RECORD);
+        self.names[idx] = Some(entry.name);
+        self.kinds[idx] = entry.kind;
+        self.sizes[idx] = entry.size;
+        self.allocated[idx] = entry.allocated;
+        self.modified_unix[idx] = entry.modified_unix;
+        self.hard_links[idx] = entry.hard_links;
+    }
 }
 
 impl fmt::Display for NtfsVolumeInfo {
@@ -312,13 +444,16 @@ fn scan_mft(
     progress_every: u64,
     on_progress: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
 ) -> Result<FileGraph, NtfsScanError> {
+    let total_started = Instant::now();
     let record_size = info.bytes_per_file_record as usize;
+    let record0_started = Instant::now();
     let record0_offset = lcn_to_offset(info.mft_start_lcn, info.bytes_per_cluster)?;
     let record0 = read_record_at(handle, record0_offset, record_size, device_path)?;
     let mft_record = parse_file_record(&record0, info.bytes_per_sector)?;
     if mft_record.data_runs.is_empty() {
         return Err(NtfsScanError::MissingMftDataRuns);
     }
+    trace_ntfs_phase("record0", record0_started.elapsed());
 
     let record_count = mft_record.data_size / u64::from(info.bytes_per_file_record);
     let read_plan = MftReadPlan {
@@ -329,9 +464,15 @@ fn scan_mft(
         record_size,
         progress_every,
     };
+    let read_started = Instant::now();
     let entries = read_mft_entries(handle, read_plan, on_progress)?;
+    trace_ntfs_phase("read_entries", read_started.elapsed());
 
-    build_graph_from_entries(entries, root_display_name(volume))
+    let build_started = Instant::now();
+    let graph = build_graph_from_entries(entries, root_display_name(volume))?;
+    trace_ntfs_phase("build_graph", build_started.elapsed());
+    trace_ntfs_phase("total", total_started.elapsed());
+    Ok(graph)
 }
 
 #[cfg(windows)]
@@ -349,13 +490,17 @@ fn read_mft_entries(
     handle: &VolumeHandle,
     plan: MftReadPlan<'_>,
     mut on_progress: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
-) -> Result<HashMap<u64, NtfsRawEntry>, NtfsScanError> {
-    let mut entries = HashMap::new();
+) -> Result<NtfsRawEntries, NtfsScanError> {
+    let entry_capacity =
+        usize::try_from(plan.record_count).map_err(|_| NtfsScanError::IntegerOverflow)?;
+    let mut entries = NtfsRawEntries::with_len(entry_capacity);
     let mut record_number = 0_u64;
     let mut progress = NtfsScanProgress::default();
     let mut last_progress_records = 0;
     let records_per_chunk = records_per_mft_chunk(plan.record_size) as u64;
     let mut buffer = vec![0_u8; records_per_chunk as usize * plan.record_size];
+    let mut read_elapsed = Duration::ZERO;
+    let mut parse_elapsed = Duration::ZERO;
 
     for run in &plan.mft_record.data_runs {
         let Some(lcn) = run.lcn else {
@@ -377,6 +522,8 @@ fn read_mft_entries(
 
         while run_record_idx < records_in_run {
             if record_number >= plan.record_count {
+                trace_ntfs_phase("read_raw", read_elapsed);
+                trace_ntfs_phase("parse_records", parse_elapsed);
                 emit_ntfs_progress(
                     progress,
                     plan.progress_every,
@@ -402,10 +549,14 @@ fn read_mft_entries(
                         .ok_or(NtfsScanError::IntegerOverflow)?,
                 )
                 .ok_or(NtfsScanError::IntegerOverflow)?;
+            let read_started = Instant::now();
             let bytes_read =
                 handle.read_at(offset, &mut buffer[..chunk_bytes], plan.device_path)?;
+            read_elapsed += read_started.elapsed();
             let records_read = bytes_read / plan.record_size;
             if records_read == 0 {
+                trace_ntfs_phase("read_raw", read_elapsed);
+                trace_ntfs_phase("parse_records", parse_elapsed);
                 emit_ntfs_progress(
                     progress,
                     plan.progress_every,
@@ -415,27 +566,30 @@ fn read_mft_entries(
                 return Ok(entries);
             }
 
-            for record_idx in 0..records_read {
-                let start = record_idx * plan.record_size;
-                let record = &buffer[start..start + plan.record_size];
-                if let Some(entry) = process_mft_record(
-                    record_number,
-                    record,
-                    plan.info.bytes_per_sector,
-                    &mut progress,
-                ) {
-                    entries.insert(record_number, entry);
-                }
-                maybe_emit_ntfs_progress(
-                    progress,
-                    plan.progress_every,
-                    &mut last_progress_records,
-                    &mut on_progress,
-                )?;
+            let parse_started = Instant::now();
+            let chunk = process_mft_record_chunk(
+                record_number,
+                records_read,
+                plan.record_size,
+                plan.info.bytes_per_sector,
+                &mut buffer[..records_read * plan.record_size],
+                &mut entries,
+            )?;
+            parse_elapsed += parse_started.elapsed();
+            progress.records_read = progress.records_read.saturating_add(chunk.records_read);
+            progress.entries = progress.entries.saturating_add(chunk.entries);
+            progress.files = progress.files.saturating_add(chunk.files);
+            progress.directories = progress.directories.saturating_add(chunk.directories);
+            progress.skipped = progress.skipped.saturating_add(chunk.skipped);
+            maybe_emit_ntfs_progress(
+                progress,
+                plan.progress_every,
+                &mut last_progress_records,
+                &mut on_progress,
+            )?;
 
-                record_number += 1;
-                run_record_idx += 1;
-            }
+            record_number += records_read as u64;
+            run_record_idx += records_read as u64;
         }
     }
 
@@ -445,6 +599,8 @@ fn read_mft_entries(
         &mut last_progress_records,
         &mut on_progress,
     )?;
+    trace_ntfs_phase("read_raw", read_elapsed);
+    trace_ntfs_phase("parse_records", parse_elapsed);
     Ok(entries)
 }
 
@@ -455,16 +611,143 @@ fn records_per_mft_chunk(record_size: usize) -> usize {
     (MFT_READ_CHUNK_BYTES / record_size).max(1)
 }
 
+#[derive(Debug, Default)]
+struct NtfsChunkResult {
+    records_read: u64,
+    entries: u64,
+    files: u64,
+    directories: u64,
+    skipped: u64,
+}
+
+impl NtfsChunkResult {
+    fn count_entry(&mut self, kind: FileKind) {
+        self.entries += 1;
+        if kind == FileKind::Directory {
+            self.directories += 1;
+        } else {
+            self.files += 1;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.records_read = self.records_read.saturating_add(other.records_read);
+        self.entries = self.entries.saturating_add(other.entries);
+        self.files = self.files.saturating_add(other.files);
+        self.directories = self.directories.saturating_add(other.directories);
+        self.skipped = self.skipped.saturating_add(other.skipped);
+    }
+}
+
+fn process_mft_record_chunk(
+    first_record_number: u64,
+    records_read: usize,
+    record_size: usize,
+    bytes_per_sector: u32,
+    buffer: &mut [u8],
+    entries: &mut NtfsRawEntries,
+) -> Result<NtfsChunkResult, NtfsScanError> {
+    let entry_start =
+        usize::try_from(first_record_number).map_err(|_| NtfsScanError::IntegerOverflow)?;
+    let columns = entries.columns_mut(entry_start, records_read);
+    let workers = ntfs_parse_workers(records_read);
+    if workers <= 1 {
+        return Ok(process_mft_record_range(
+            first_record_number,
+            records_read,
+            record_size,
+            bytes_per_sector,
+            buffer,
+            columns,
+        ));
+    }
+
+    thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        let records_per_worker = records_read.div_ceil(workers);
+        let mut remaining = buffer;
+        let mut remaining_columns = columns;
+        let mut next_record = first_record_number;
+        let mut remaining_records = records_read;
+
+        while remaining_records > 0 {
+            let worker_records = records_per_worker.min(remaining_records);
+            let worker_bytes = worker_records * record_size;
+            let (worker_buffer, rest) = remaining.split_at_mut(worker_bytes);
+            remaining = rest;
+            let (worker_columns, rest_columns) = remaining_columns.split_at_mut(worker_records);
+            remaining_columns = rest_columns;
+            let worker_first_record = next_record;
+            handles.push(scope.spawn(move || {
+                process_mft_record_range(
+                    worker_first_record,
+                    worker_records,
+                    record_size,
+                    bytes_per_sector,
+                    worker_buffer,
+                    worker_columns,
+                )
+            }));
+            next_record += worker_records as u64;
+            remaining_records -= worker_records;
+        }
+
+        let mut chunk = NtfsChunkResult::default();
+        for handle in handles {
+            let worker_chunk = handle.join().map_err(|_| NtfsScanError::WorkerPanic)?;
+            chunk.merge(worker_chunk);
+        }
+        Ok(chunk)
+    })
+}
+
+fn process_mft_record_range(
+    first_record_number: u64,
+    records_read: usize,
+    record_size: usize,
+    bytes_per_sector: u32,
+    buffer: &mut [u8],
+    mut columns: NtfsRawEntryColumnsMut<'_>,
+) -> NtfsChunkResult {
+    let mut chunk = NtfsChunkResult::default();
+
+    for record_idx in 0..records_read {
+        let start = record_idx * record_size;
+        let record = &mut buffer[start..start + record_size];
+        chunk.records_read += 1;
+        if let Some(entry) = parse_mft_record_entry(
+            first_record_number + record_idx as u64,
+            record,
+            bytes_per_sector,
+        ) {
+            let kind = entry.kind;
+            columns.insert_at(record_idx, entry);
+            chunk.count_entry(kind);
+        } else {
+            chunk.skipped += 1;
+        }
+    }
+
+    chunk
+}
+
+fn ntfs_parse_workers(records_read: usize) -> usize {
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(12)
+        .min(records_read.max(1))
+}
+
+#[cfg(test)]
 fn process_mft_record(
     record_number: u64,
-    record: &[u8],
+    record: &mut [u8],
     bytes_per_sector: u32,
     progress: &mut NtfsScanProgress,
 ) -> Option<NtfsRawEntry> {
     progress.records_read += 1;
-    if let Ok(parsed) = parse_file_record(record, bytes_per_sector)
-        && let Some(entry) = raw_entry_from_record(record_number, &parsed)
-    {
+    if let Some(entry) = parse_mft_record_entry(record_number, record, bytes_per_sector) {
         progress.entries += 1;
         if entry.kind == FileKind::Directory {
             progress.directories += 1;
@@ -476,6 +759,15 @@ fn process_mft_record(
         progress.skipped += 1;
         None
     }
+}
+
+fn parse_mft_record_entry(
+    record_number: u64,
+    record: &mut [u8],
+    bytes_per_sector: u32,
+) -> Option<NtfsRawEntry> {
+    let parsed = parse_scanned_file_record_in_place(record, bytes_per_sector).ok()?;
+    raw_entry_from_scanned_record(record_number, parsed)
 }
 
 #[cfg(windows)]
@@ -500,12 +792,15 @@ fn lcn_to_offset(lcn: i64, bytes_per_cluster: u32) -> Result<u64, NtfsScanError>
         .ok_or(NtfsScanError::IntegerOverflow)
 }
 
-fn raw_entry_from_record(record_number: u64, parsed: &ParsedFileRecord) -> Option<NtfsRawEntry> {
+fn raw_entry_from_scanned_record(
+    record_number: u64,
+    parsed: ScannedFileRecord,
+) -> Option<NtfsRawEntry> {
     if !parsed.header.is_in_use() || parsed.header.base_file_record != 0 {
         return None;
     }
 
-    let name = best_file_name(&parsed.file_names)?;
+    let name = parsed.file_name?;
     let is_directory = parsed.header.is_directory();
     let size = if is_directory {
         0
@@ -523,10 +818,9 @@ fn raw_entry_from_record(record_number: u64, parsed: &ParsedFileRecord) -> Optio
     };
 
     Some(NtfsRawEntry {
-        record_number,
         parent_record_number: (name.parent_record_number != record_number)
             .then_some(name.parent_record_number),
-        name: name.name.clone(),
+        name: name.name,
         kind: if is_directory {
             FileKind::Directory
         } else {
@@ -534,71 +828,69 @@ fn raw_entry_from_record(record_number: u64, parsed: &ParsedFileRecord) -> Optio
         },
         size,
         allocated,
-        modified_unix: parsed
-            .standard_information
-            .map_or(name.modified_unix, |info| info.modified_unix),
+        modified_unix: parsed.standard_modified_unix.unwrap_or(name.modified_unix),
         hard_links: parsed.header.hard_link_count,
     })
 }
 
-fn best_file_name(names: &[FileNameAttribute]) -> Option<&FileNameAttribute> {
-    names.iter().max_by_key(|name| match name.namespace {
-        1 | 3 => 3,
-        0 => 2,
-        2 => 1,
-        _ => 0,
-    })
-}
-
 fn build_graph_from_entries(
-    entries: HashMap<u64, NtfsRawEntry>,
+    mut entries: NtfsRawEntries,
     root_name: String,
 ) -> Result<FileGraph, NtfsScanError> {
-    let mut builder = FileGraphBuilder::new();
-    let mut ids = HashMap::with_capacity(entries.len());
-    let mut visiting = HashSet::new();
+    let mut builder = FileGraphBuilder::without_name_dedup();
+    let mut ids = vec![None; entries.len()];
+    let mut visiting = vec![false; entries.len()];
 
-    let mut records: Vec<_> = entries.keys().copied().collect();
-    records.sort_unstable();
-    for record_number in records {
+    let add_started = Instant::now();
+    for record_number in 0..entries.len() {
+        if !entries.is_present(record_number) {
+            continue;
+        }
         add_entry_recursive(
             record_number,
-            &entries,
+            &mut entries,
             &mut builder,
             &mut ids,
             &mut visiting,
             &root_name,
         )?;
     }
+    trace_ntfs_phase("graph_add", add_started.elapsed());
 
-    Ok(builder.finish())
+    let finish_started = Instant::now();
+    let graph = builder.finish();
+    trace_ntfs_phase("graph_finish", finish_started.elapsed());
+    Ok(graph)
 }
 
 fn add_entry_recursive(
-    record_number: u64,
-    entries: &HashMap<u64, NtfsRawEntry>,
+    record_number: usize,
+    entries: &mut NtfsRawEntries,
     builder: &mut FileGraphBuilder,
-    ids: &mut HashMap<u64, EntryId>,
-    visiting: &mut HashSet<u64>,
+    ids: &mut [Option<EntryId>],
+    visiting: &mut [bool],
     root_name: &str,
 ) -> Result<Option<EntryId>, NtfsScanError> {
-    if let Some(id) = ids.get(&record_number) {
-        return Ok(Some(*id));
+    if let Some(id) = ids[record_number] {
+        return Ok(Some(id));
     }
-    let Some(entry) = entries.get(&record_number) else {
-        return Ok(None);
-    };
-    if !visiting.insert(record_number) {
+    if !entries.is_present(record_number) {
         return Ok(None);
     }
+    if visiting[record_number] {
+        return Ok(None);
+    }
+    visiting[record_number] = true;
 
-    let parent = entry
-        .parent_record_number
+    let parent_record_number = entries.parent_record_number(record_number);
+    let parent = parent_record_number
         .and_then(|parent| {
-            if parent == record_number {
+            if parent == record_number as u64 {
                 None
             } else {
-                Some(parent)
+                usize::try_from(parent)
+                    .ok()
+                    .filter(|parent| *parent < entries.len())
             }
         })
         .map(|parent| add_entry_recursive(parent, entries, builder, ids, visiting, root_name))
@@ -606,27 +898,27 @@ fn add_entry_recursive(
         .flatten();
 
     let mut flags = EntryFlags::empty();
-    if entry.hard_links > 1 {
+    if entries.hard_links[record_number] > 1 {
         flags.insert(EntryFlags::HARD_LINK);
     }
-    let name = if entry.record_number == ROOT_RECORD_NUMBER {
-        root_name
+    let name = if record_number as u64 == ROOT_RECORD_NUMBER {
+        root_name.to_owned()
     } else {
-        &entry.name
+        entries.names[record_number].take().unwrap_or_default()
     };
-    let id = builder.add_entry_with_flags(
+    let id = builder.add_entry_with_flags_owned_name(
         parent,
         name,
         EntryMetadata {
-            kind: entry.kind,
-            size: entry.size,
-            allocated: entry.allocated,
-            modified_unix: entry.modified_unix,
+            kind: entries.kinds[record_number],
+            size: entries.sizes[record_number],
+            allocated: entries.allocated[record_number],
+            modified_unix: entries.modified_unix[record_number],
             extra_flags: flags,
         },
     )?;
-    ids.insert(record_number, id);
-    visiting.remove(&record_number);
+    ids[record_number] = Some(id);
+    visiting[record_number] = false;
 
     Ok(Some(id))
 }
@@ -641,6 +933,21 @@ fn root_display_name(volume: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+fn trace_ntfs_phase(label: &str, elapsed: std::time::Duration) {
+    let Ok(path) = std::env::var("DISKLOOM_NTFS_TRACE_FILE") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    use std::io::Write;
+    let _ = writeln!(file, "{label},{}", elapsed.as_millis());
 }
 
 fn maybe_emit_ntfs_progress(
@@ -702,16 +1009,12 @@ fn to_wide(value: &str) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::{
-        NtfsRawEntry, NtfsScanControl, NtfsScanError, NtfsScanProgress, ROOT_RECORD_NUMBER,
-        build_graph_from_entries, emit_ntfs_progress, maybe_emit_ntfs_progress, process_mft_record,
-        raw_entry_from_record, records_per_mft_chunk,
+        NtfsRawEntries, NtfsRawEntry, NtfsScanControl, NtfsScanError, NtfsScanProgress,
+        ROOT_RECORD_NUMBER, build_graph_from_entries, emit_ntfs_progress, maybe_emit_ntfs_progress,
+        process_mft_record, raw_entry_from_scanned_record, records_per_mft_chunk,
     };
-    use crate::mft::{
-        FileNameAttribute, FileRecordHeader, ParsedFileRecord, StandardInformationAttribute,
-    };
+    use crate::mft::{FileRecordHeader, ScannedFileNameAttribute, ScannedFileRecord};
     use diskloom_core::{EntryFlags, FileKind};
 
     #[cfg(windows)]
@@ -731,11 +1034,10 @@ mod tests {
 
     #[test]
     fn build_graph_from_entries_should_reconstruct_parent_chain() {
-        let mut entries = HashMap::new();
+        let mut entries = NtfsRawEntries::with_len(43);
         entries.insert(
-            ROOT_RECORD_NUMBER,
+            ROOT_RECORD_NUMBER as usize,
             NtfsRawEntry {
-                record_number: ROOT_RECORD_NUMBER,
                 parent_record_number: None,
                 name: ".".to_owned(),
                 kind: FileKind::Directory,
@@ -748,7 +1050,6 @@ mod tests {
         entries.insert(
             42,
             NtfsRawEntry {
-                record_number: 42,
                 parent_record_number: Some(ROOT_RECORD_NUMBER),
                 name: "data.bin".to_owned(),
                 kind: FileKind::File,
@@ -779,8 +1080,8 @@ mod tests {
     }
 
     #[test]
-    fn raw_entry_from_record_should_prefer_standard_information_modified_time() {
-        let parsed = ParsedFileRecord {
+    fn raw_entry_from_scanned_record_should_prefer_standard_information_modified_time() {
+        let parsed = ScannedFileRecord {
             header: FileRecordHeader {
                 sequence_number: 1,
                 hard_link_count: 1,
@@ -792,29 +1093,19 @@ mod tests {
                 next_attribute_id: 0,
                 record_number: 42,
             },
-            standard_information: Some(StandardInformationAttribute {
-                created_unix: 10,
-                modified_unix: 200,
-                mft_changed_unix: 300,
-                accessed_unix: 400,
-                file_attributes: 0x20,
-            }),
-            file_names: vec![FileNameAttribute {
-                parent_reference: ROOT_RECORD_NUMBER,
+            standard_modified_unix: Some(200),
+            file_name: Some(ScannedFileNameAttribute {
                 parent_record_number: ROOT_RECORD_NUMBER,
                 allocated_size: 16,
                 data_size: 10,
-                flags: 0,
                 modified_unix: 100,
-                namespace: 1,
                 name: "data.bin".to_owned(),
-            }],
+            }),
             data_size: 10,
             allocated_size: 16,
-            data_runs: Vec::new(),
         };
 
-        let entry = raw_entry_from_record(42, &parsed).unwrap();
+        let entry = raw_entry_from_scanned_record(42, parsed).unwrap();
 
         assert_eq!(entry.modified_unix, 200);
     }
@@ -908,16 +1199,17 @@ mod tests {
 
     #[test]
     fn records_per_mft_chunk_should_batch_records_with_floor_of_one() {
-        assert_eq!(records_per_mft_chunk(1024), 8192);
-        assert_eq!(records_per_mft_chunk(16 * 1024 * 1024), 1);
+        assert_eq!(records_per_mft_chunk(1024), 65_536);
+        assert_eq!(records_per_mft_chunk(16 * 1024 * 1024), 4);
         assert_eq!(records_per_mft_chunk(0), 1);
     }
 
     #[test]
     fn process_mft_record_should_count_parse_failures_as_skipped() {
         let mut progress = NtfsScanProgress::default();
+        let mut record = [0_u8; 64];
 
-        let entry = process_mft_record(42, &[0_u8; 64], 512, &mut progress);
+        let entry = process_mft_record(42, &mut record, 512, &mut progress);
 
         assert!(entry.is_none());
         assert_eq!(progress.records_read, 1);

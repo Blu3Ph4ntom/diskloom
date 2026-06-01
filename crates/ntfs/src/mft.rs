@@ -28,6 +28,15 @@ pub struct ParsedFileRecord {
     pub data_runs: Vec<DataRun>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedFileRecord {
+    pub header: FileRecordHeader,
+    pub standard_modified_unix: Option<i64>,
+    pub file_name: Option<ScannedFileNameAttribute>,
+    pub data_size: u64,
+    pub allocated_size: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StandardInformationAttribute {
     pub created_unix: i64,
@@ -46,6 +55,15 @@ pub struct FileNameAttribute {
     pub flags: u32,
     pub modified_unix: i64,
     pub namespace: u8,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannedFileNameAttribute {
+    pub parent_record_number: u64,
+    pub allocated_size: u64,
+    pub data_size: u64,
+    pub modified_unix: i64,
     pub name: String,
 }
 
@@ -98,6 +116,18 @@ impl FileRecordHeader {
     }
 }
 
+impl ScannedFileRecord {
+    fn with_header(header: FileRecordHeader) -> Self {
+        Self {
+            header,
+            standard_modified_unix: None,
+            file_name: None,
+            data_size: 0,
+            allocated_size: 0,
+        }
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MftParseError {
     #[error("MFT file record is too short: {actual} bytes")]
@@ -122,7 +152,65 @@ pub fn parse_file_record(
 ) -> Result<ParsedFileRecord, MftParseError> {
     let mut fixed = record.to_vec();
     apply_fixups(&mut fixed, bytes_per_sector as usize)?;
-    let header = FileRecordHeader::parse(&fixed)?;
+    parse_fixed_file_record(&fixed)
+}
+
+pub fn parse_file_record_reuse(
+    record: &[u8],
+    bytes_per_sector: u32,
+    scratch: &mut Vec<u8>,
+) -> Result<ParsedFileRecord, MftParseError> {
+    scratch.clear();
+    scratch.extend_from_slice(record);
+    apply_fixups(scratch, bytes_per_sector as usize)?;
+    parse_fixed_file_record(scratch)
+}
+
+pub fn parse_scanned_file_record(
+    record: &[u8],
+    bytes_per_sector: u32,
+) -> Result<ScannedFileRecord, MftParseError> {
+    let header = FileRecordHeader::parse(record)?;
+    if !header.is_in_use() || header.base_file_record != 0 {
+        return Ok(ScannedFileRecord::with_header(header));
+    }
+
+    let mut fixed = record.to_vec();
+    apply_fixups(&mut fixed, bytes_per_sector as usize)?;
+    parse_fixed_scanned_file_record_with_header(&fixed, header)
+}
+
+pub fn parse_scanned_file_record_reuse(
+    record: &[u8],
+    bytes_per_sector: u32,
+    scratch: &mut Vec<u8>,
+) -> Result<ScannedFileRecord, MftParseError> {
+    let header = FileRecordHeader::parse(record)?;
+    if !header.is_in_use() || header.base_file_record != 0 {
+        return Ok(ScannedFileRecord::with_header(header));
+    }
+
+    scratch.clear();
+    scratch.extend_from_slice(record);
+    apply_fixups(scratch, bytes_per_sector as usize)?;
+    parse_fixed_scanned_file_record_with_header(scratch, header)
+}
+
+pub fn parse_scanned_file_record_in_place(
+    record: &mut [u8],
+    bytes_per_sector: u32,
+) -> Result<ScannedFileRecord, MftParseError> {
+    let header = FileRecordHeader::parse(record)?;
+    if !header.is_in_use() || header.base_file_record != 0 {
+        return Ok(ScannedFileRecord::with_header(header));
+    }
+
+    apply_fixups(record, bytes_per_sector as usize)?;
+    parse_fixed_scanned_file_record_with_header(record, header)
+}
+
+fn parse_fixed_file_record(record: &[u8]) -> Result<ParsedFileRecord, MftParseError> {
+    let header = FileRecordHeader::parse(record)?;
     let mut parsed = ParsedFileRecord {
         header,
         standard_information: None,
@@ -132,7 +220,29 @@ pub fn parse_file_record(
         data_runs: Vec::new(),
     };
 
-    for attribute in iter_attributes(&fixed, header)? {
+    let mut offset = header.first_attribute_offset as usize;
+    let end = usize::min(header.bytes_in_use as usize, record.len());
+
+    while offset + 8 <= end {
+        let kind = read_u32(record, offset);
+        if kind == ATTR_END {
+            break;
+        }
+
+        let length = read_u32(record, offset + 4);
+        if length < 16 || offset + length as usize > end {
+            return Err(MftParseError::InvalidAttributeLength { offset, length });
+        }
+
+        let non_resident = record[offset + 8] != 0;
+        let attribute = Attribute {
+            header: AttributeHeader {
+                kind,
+                length,
+                non_resident,
+            },
+            body: &record[offset..offset + length as usize],
+        };
         match attribute.header.kind {
             ATTR_STANDARD_INFORMATION if !attribute.header.non_resident => {
                 parsed.standard_information = Some(parse_standard_information(attribute.body)?);
@@ -145,6 +255,72 @@ pub fn parse_file_record(
             }
             _ => {}
         }
+
+        offset += length as usize;
+    }
+
+    Ok(parsed)
+}
+
+fn parse_fixed_scanned_file_record_with_header(
+    record: &[u8],
+    header: FileRecordHeader,
+) -> Result<ScannedFileRecord, MftParseError> {
+    let mut parsed = ScannedFileRecord::with_header(header);
+    let mut best_name_priority = None;
+    let mut best_name_value = None;
+    let is_directory = header.is_directory();
+
+    let mut offset = header.first_attribute_offset as usize;
+    let end = usize::min(header.bytes_in_use as usize, record.len());
+
+    while offset + 8 <= end {
+        let kind = read_u32(record, offset);
+        if kind == ATTR_END {
+            break;
+        }
+
+        let length = read_u32(record, offset + 4);
+        if length < 16 || offset + length as usize > end {
+            return Err(MftParseError::InvalidAttributeLength { offset, length });
+        }
+
+        let non_resident = record[offset + 8] != 0;
+        let attribute = Attribute {
+            header: AttributeHeader {
+                kind,
+                length,
+                non_resident,
+            },
+            body: &record[offset..offset + length as usize],
+        };
+        match attribute.header.kind {
+            ATTR_STANDARD_INFORMATION if !attribute.header.non_resident => {
+                parsed.standard_modified_unix =
+                    Some(parse_standard_information_modified_unix(attribute.body)?);
+            }
+            ATTR_FILE_NAME if !attribute.header.non_resident => {
+                let value = file_name_value(attribute.body)?;
+                let priority = file_name_namespace_priority(value[65]);
+                if !matches!(best_name_priority, Some(current) if priority <= current) {
+                    best_name_value = Some(value);
+                    best_name_priority = Some(priority);
+                }
+            }
+            ATTR_DATA if !is_directory => {
+                parse_scanned_data_attribute(attribute, &mut parsed)?;
+            }
+            _ => {}
+        }
+
+        offset += length as usize;
+    }
+
+    if let Some(value) = best_name_value {
+        parsed.file_name = Some(decode_scanned_file_name(
+            value,
+            parsed.standard_modified_unix.is_none(),
+        )?);
     }
 
     Ok(parsed)
@@ -226,40 +402,6 @@ struct Attribute<'a> {
     body: &'a [u8],
 }
 
-fn iter_attributes(
-    record: &[u8],
-    header: FileRecordHeader,
-) -> Result<Vec<Attribute<'_>>, MftParseError> {
-    let mut attributes = Vec::new();
-    let mut offset = header.first_attribute_offset as usize;
-    let end = usize::min(header.bytes_in_use as usize, record.len());
-
-    while offset + 8 <= end {
-        let kind = read_u32(record, offset);
-        if kind == ATTR_END {
-            return Ok(attributes);
-        }
-
-        let length = read_u32(record, offset + 4);
-        if length < 16 || offset + length as usize > end {
-            return Err(MftParseError::InvalidAttributeLength { offset, length });
-        }
-
-        let non_resident = record[offset + 8] != 0;
-        attributes.push(Attribute {
-            header: AttributeHeader {
-                kind,
-                length,
-                non_resident,
-            },
-            body: &record[offset..offset + length as usize],
-        });
-        offset += length as usize;
-    }
-
-    Ok(attributes)
-}
-
 fn parse_data_attribute(
     attribute: Attribute<'_>,
     parsed: &mut ParsedFileRecord,
@@ -294,6 +436,34 @@ fn parse_data_attribute(
     Ok(())
 }
 
+fn parse_scanned_data_attribute(
+    attribute: Attribute<'_>,
+    parsed: &mut ScannedFileRecord,
+) -> Result<(), MftParseError> {
+    if attribute.header.non_resident {
+        if attribute.body.len() < 64 {
+            return Err(MftParseError::InvalidAttributeLength {
+                offset: 0,
+                length: attribute.header.length,
+            });
+        }
+
+        parsed.allocated_size = read_u64(attribute.body, 40);
+        parsed.data_size = read_u64(attribute.body, 48);
+    } else {
+        if attribute.body.len() < 24 {
+            return Err(MftParseError::InvalidAttributeLength {
+                offset: 0,
+                length: attribute.header.length,
+            });
+        }
+        parsed.data_size = read_u32(attribute.body, 16) as u64;
+        parsed.allocated_size = parsed.data_size;
+    }
+
+    Ok(())
+}
+
 fn parse_standard_information(input: &[u8]) -> Result<StandardInformationAttribute, MftParseError> {
     let value = resident_value(input)?;
     if value.len() < 32 {
@@ -313,7 +483,20 @@ fn parse_standard_information(input: &[u8]) -> Result<StandardInformationAttribu
     })
 }
 
+fn parse_standard_information_modified_unix(input: &[u8]) -> Result<i64, MftParseError> {
+    let value = resident_value(input)?;
+    if value.len() < 16 {
+        return Err(MftParseError::InvalidStandardInformation);
+    }
+
+    Ok(filetime_to_unix(read_u64(value, 8)))
+}
+
 fn parse_file_name(input: &[u8]) -> Result<FileNameAttribute, MftParseError> {
+    decode_file_name(file_name_value(input)?)
+}
+
+fn file_name_value(input: &[u8]) -> Result<&[u8], MftParseError> {
     if input.len() < 66 {
         return Err(MftParseError::InvalidFileName);
     }
@@ -323,6 +506,10 @@ fn parse_file_name(input: &[u8]) -> Result<FileNameAttribute, MftParseError> {
         return Err(MftParseError::InvalidFileName);
     }
 
+    Ok(value)
+}
+
+fn decode_file_name(value: &[u8]) -> Result<FileNameAttribute, MftParseError> {
     let name_len = value[64] as usize;
     let name_bytes = name_len
         .checked_mul(2)
@@ -332,10 +519,7 @@ fn parse_file_name(input: &[u8]) -> Result<FileNameAttribute, MftParseError> {
         return Err(MftParseError::InvalidFileName);
     }
 
-    let name_units = value[66..name_bytes]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect::<Vec<_>>();
+    let name = decode_file_name_string(&value[66..name_bytes], name_len);
     let parent_reference = read_u64(value, 0);
 
     Ok(FileNameAttribute {
@@ -346,8 +530,78 @@ fn parse_file_name(input: &[u8]) -> Result<FileNameAttribute, MftParseError> {
         flags: read_u32(value, 56),
         modified_unix: filetime_to_unix(read_u64(value, 16)),
         namespace: value[65],
-        name: String::from_utf16_lossy(&name_units),
+        name,
     })
+}
+
+fn decode_scanned_file_name(
+    value: &[u8],
+    include_modified_time: bool,
+) -> Result<ScannedFileNameAttribute, MftParseError> {
+    let name_len = value[64] as usize;
+    let name_bytes = name_len
+        .checked_mul(2)
+        .and_then(|bytes| 66_usize.checked_add(bytes))
+        .ok_or(MftParseError::InvalidFileName)?;
+    if name_bytes > value.len() {
+        return Err(MftParseError::InvalidFileName);
+    }
+
+    let name = decode_file_name_string(&value[66..name_bytes], name_len);
+    let parent_reference = read_u64(value, 0);
+
+    Ok(ScannedFileNameAttribute {
+        parent_record_number: parent_reference & 0x0000_FFFF_FFFF_FFFF,
+        allocated_size: read_u64(value, 40),
+        data_size: read_u64(value, 48),
+        modified_unix: if include_modified_time {
+            filetime_to_unix(read_u64(value, 16))
+        } else {
+            0
+        },
+        name,
+    })
+}
+
+fn decode_file_name_string(input: &[u8], name_len: usize) -> String {
+    let mut bytes: Vec<u8> = Vec::with_capacity(name_len);
+    let output = bytes.as_mut_ptr();
+    for (idx, chunk) in input.chunks_exact(2).enumerate() {
+        if chunk[1] != 0 || !chunk[0].is_ascii() {
+            return decode_file_name_string_fallback(input, name_len);
+        }
+        // SAFETY: `bytes` has capacity `name_len`, and the input was validated to contain
+        // exactly `name_len` UTF-16 code units before this function was called.
+        unsafe {
+            output.add(idx).write(chunk[0]);
+        }
+    }
+
+    // SAFETY: The branch above accepts only single-byte ASCII, which is valid UTF-8.
+    unsafe {
+        bytes.set_len(name_len);
+        String::from_utf8_unchecked(bytes)
+    }
+}
+
+fn decode_file_name_string_fallback(input: &[u8], name_len: usize) -> String {
+    let name_units = input
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    let mut name = String::with_capacity(name_len);
+    for ch in char::decode_utf16(name_units) {
+        name.push(ch.unwrap_or(char::REPLACEMENT_CHARACTER));
+    }
+    name
+}
+
+fn file_name_namespace_priority(namespace: u8) -> u8 {
+    match namespace {
+        1 | 3 => 3,
+        0 => 2,
+        2 => 1,
+        _ => 0,
+    }
 }
 
 fn resident_value(attribute: &[u8]) -> Result<&[u8], MftParseError> {
@@ -427,7 +681,8 @@ fn read_u64(input: &[u8], offset: usize) -> u64 {
 mod tests {
     use super::{
         ATTR_DATA, ATTR_END, ATTR_FILE_NAME, ATTR_STANDARD_INFORMATION, DataRun, FileRecordHeader,
-        MftParseError, apply_fixups, parse_file_record, parse_runlist,
+        MftParseError, apply_fixups, parse_file_record, parse_runlist, parse_scanned_file_record,
+        parse_scanned_file_record_in_place,
     };
 
     #[test]
@@ -550,6 +805,94 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_scanned_file_record_should_skip_data_run_decoding() {
+        let mut record = [0_u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&3_u16.to_le_bytes());
+        record[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        record[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        record[20..22].copy_from_slice(&56_u16.to_le_bytes());
+        record[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        record[24..28].copy_from_slice(&256_u32.to_le_bytes());
+        record[28..32].copy_from_slice(&1024_u32.to_le_bytes());
+        record[44..48].copy_from_slice(&42_u32.to_le_bytes());
+        record[48..50].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[50..52].copy_from_slice(&0_u16.to_le_bytes());
+        record[52..54].copy_from_slice(&0_u16.to_le_bytes());
+        record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+
+        let name_offset = 56_usize;
+        let name_attr_len = write_file_name_attribute(&mut record[name_offset..], "hello.txt");
+        let data_offset = name_offset + name_attr_len;
+        let data_attr_len = write_invalid_runlist_data_attribute(&mut record[data_offset..]);
+        let end = data_offset + data_attr_len;
+        record[end..end + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        record[24..28].copy_from_slice(&(end as u32 + 4).to_le_bytes());
+
+        let parsed = parse_scanned_file_record(&record, 512).unwrap();
+
+        assert_eq!(parsed.file_name.unwrap().name, "hello.txt");
+        assert_eq!(parsed.data_size, 16);
+        assert_eq!(parsed.allocated_size, 32);
+        assert!(parse_file_record(&record, 512).is_err());
+    }
+
+    #[test]
+    fn parse_scanned_file_record_in_place_should_apply_fixups() {
+        let mut record = [0_u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&3_u16.to_le_bytes());
+        record[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        record[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        record[20..22].copy_from_slice(&56_u16.to_le_bytes());
+        record[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        record[24..28].copy_from_slice(&64_u32.to_le_bytes());
+        record[28..32].copy_from_slice(&1024_u32.to_le_bytes());
+        record[44..48].copy_from_slice(&42_u32.to_le_bytes());
+        record[48..50].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[50..52].copy_from_slice(&0xBBBB_u16.to_le_bytes());
+        record[52..54].copy_from_slice(&0xCCCC_u16.to_le_bytes());
+        record[56..60].copy_from_slice(&ATTR_END.to_le_bytes());
+        record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+
+        parse_scanned_file_record_in_place(&mut record, 512).unwrap();
+
+        assert_eq!(&record[510..512], &0xBBBB_u16.to_le_bytes());
+        assert_eq!(&record[1022..1024], &0xCCCC_u16.to_le_bytes());
+    }
+
+    #[test]
+    fn parse_file_record_should_decode_ascii_file_name() {
+        let mut record = [0_u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&3_u16.to_le_bytes());
+        record[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        record[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        record[20..22].copy_from_slice(&56_u16.to_le_bytes());
+        record[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        record[28..32].copy_from_slice(&1024_u32.to_le_bytes());
+        record[48..50].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[50..52].copy_from_slice(&0_u16.to_le_bytes());
+        record[52..54].copy_from_slice(&0_u16.to_le_bytes());
+        record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+
+        let name_attr_len = write_file_name_attribute(&mut record[56..], "readme.md");
+        let end = 56 + name_attr_len;
+        record[end..end + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        record[24..28].copy_from_slice(&(end as u32 + 4).to_le_bytes());
+
+        let parsed = parse_scanned_file_record(&record, 512).unwrap();
+
+        assert_eq!(parsed.file_name.unwrap().name, "readme.md");
+    }
+
     fn write_standard_information_attribute(output: &mut [u8]) -> usize {
         let value_len = 36_usize;
         let attr_len = 24 + value_len;
@@ -599,6 +942,19 @@ mod tests {
         output[8] = 1;
         output[32..34].copy_from_slice(&64_u16.to_le_bytes());
         output[40..48].copy_from_slice(&16_u64.to_le_bytes());
+        output[48..56].copy_from_slice(&16_u64.to_le_bytes());
+        output[64..64 + runlist.len()].copy_from_slice(&runlist);
+        attr_len
+    }
+
+    fn write_invalid_runlist_data_attribute(output: &mut [u8]) -> usize {
+        let runlist = [0xFF, 0x00];
+        let attr_len = 64 + runlist.len();
+        output[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        output[4..8].copy_from_slice(&(attr_len as u32).to_le_bytes());
+        output[8] = 1;
+        output[32..34].copy_from_slice(&64_u16.to_le_bytes());
+        output[40..48].copy_from_slice(&32_u64.to_le_bytes());
         output[48..56].copy_from_slice(&16_u64.to_le_bytes());
         output[64..64 + runlist.len()].copy_from_slice(&runlist);
         attr_len

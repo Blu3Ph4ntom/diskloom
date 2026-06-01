@@ -3,10 +3,10 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StringId(pub u32);
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct StringInterner {
     values: Vec<String>,
-    index: HashMap<String, StringId>,
+    index: Option<HashMap<String, StringId>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -17,19 +17,53 @@ pub struct StringTable {
 impl StringInterner {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            values: Vec::new(),
+            index: Some(HashMap::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn without_lookup() -> Self {
+        Self {
+            values: Vec::new(),
+            index: None,
+        }
     }
 
     pub fn intern(&mut self, value: &str) -> StringId {
-        if let Some(id) = self.index.get(value) {
-            return *id;
-        }
+        if let Some(index) = &mut self.index {
+            if let Some(id) = index.get(value) {
+                return *id;
+            }
 
-        let id = StringId(self.values.len() as u32);
-        let owned = value.to_owned();
-        self.values.push(owned.clone());
-        self.index.insert(owned, id);
-        id
+            let id = StringId(self.values.len() as u32);
+            let owned = value.to_owned();
+            self.values.push(owned.clone());
+            index.insert(owned, id);
+            id
+        } else {
+            let id = StringId(self.values.len() as u32);
+            self.values.push(value.to_owned());
+            id
+        }
+    }
+
+    pub fn intern_owned(&mut self, value: String) -> StringId {
+        if let Some(index) = &mut self.index {
+            if let Some(id) = index.get(value.as_str()) {
+                return *id;
+            }
+
+            let id = StringId(self.values.len() as u32);
+            self.values.push(value.clone());
+            index.insert(value, id);
+            id
+        } else {
+            let id = StringId(self.values.len() as u32);
+            self.values.push(value);
+            id
+        }
     }
 
     #[must_use]
@@ -52,6 +86,12 @@ impl StringInterner {
         StringTable {
             values: self.values,
         }
+    }
+}
+
+impl Default for StringInterner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -84,6 +124,26 @@ mod tests {
         let second = interner.intern("readme.md");
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn without_lookup_should_append_duplicate_strings() {
+        let mut interner = StringInterner::without_lookup();
+
+        let first = interner.intern("readme.md");
+        let second = interner.intern("readme.md");
+
+        assert_ne!(first, second);
+        assert_eq!(interner.len(), 2);
+    }
+
+    #[test]
+    fn intern_owned_without_lookup_should_append_string() {
+        let mut interner = StringInterner::without_lookup();
+
+        let id = interner.intern_owned("readme.md".to_owned());
+
+        assert_eq!(interner.get(id), Some("readme.md"));
     }
 
     #[test]

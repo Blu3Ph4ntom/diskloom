@@ -182,6 +182,14 @@ impl FileGraphBuilder {
         Self::default()
     }
 
+    #[must_use]
+    pub fn without_name_dedup() -> Self {
+        Self {
+            names: StringInterner::without_lookup(),
+            ..Self::default()
+        }
+    }
+
     pub fn add_entry(
         &mut self,
         parent: Option<EntryId>,
@@ -230,6 +238,42 @@ impl FileGraphBuilder {
         flags.insert(metadata.extra_flags);
 
         let name_id = self.names.intern(name);
+        self.parents.push(parent);
+        self.name_ids.push(name_id);
+        self.flags.push(flags);
+        self.modified_unix.push(metadata.modified_unix);
+        self.own_size.push(metadata.size);
+        self.own_allocated.push(metadata.allocated);
+
+        Ok(id)
+    }
+
+    pub fn add_entry_with_flags_owned_name(
+        &mut self,
+        parent: Option<EntryId>,
+        name: String,
+        metadata: EntryMetadata,
+    ) -> Result<EntryId, FileGraphError> {
+        let id = EntryId(self.parents.len() as u32);
+        if parent == Some(id) {
+            return Err(FileGraphError::SelfParent { child: id });
+        }
+
+        if let Some(parent_id) = parent {
+            self.parents
+                .get(parent_id.0 as usize)
+                .ok_or(FileGraphError::InvalidEntry(parent_id.0))?;
+        }
+
+        let mut flags = EntryFlags::empty();
+        match metadata.kind {
+            FileKind::Directory => flags.insert(EntryFlags::DIRECTORY),
+            FileKind::Symlink => flags.insert(EntryFlags::SYMLINK),
+            FileKind::File | FileKind::Other => {}
+        }
+        flags.insert(metadata.extra_flags);
+
+        let name_id = self.names.intern_owned(name);
         self.parents.push(parent);
         self.name_ids.push(name_id);
         self.flags.push(flags);
