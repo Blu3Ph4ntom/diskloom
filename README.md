@@ -44,7 +44,7 @@ Early development. Implemented pieces include:
 - CSV export.
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
-- egui desktop shell with background scans, scanner mode selection, files, types, and treemap tabs.
+- egui desktop shell with background scans, scanner mode selection, query-backed file filters, files, types, and treemap tabs.
 - Benchmark harness for repeated scan timing and synthetic dataset creation.
 
 The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.

@@ -29,7 +29,7 @@
 - File type stats. Initial implementation done.
 - Background scan worker. Initial implementation done.
 - Scanner mode selection. Initial implementation done.
-- Search/filter UI.
+- Search/filter UI. Initial name, regex, extension, path, size, and allocated-size filters done.
 - Shell actions.
 - Dark mode. Initial implementation done.
 - High-DPI polish.
