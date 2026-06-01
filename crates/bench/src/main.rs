@@ -336,6 +336,7 @@ struct SameMachineComparison {
     cache_state: String,
     scanner_scope: String,
     context_match: &'static str,
+    scanner_scope_match: &'static str,
     competitor_runs: usize,
     diskloom_runs: usize,
     competitor_elapsed_ms_min: u128,
@@ -1798,7 +1799,9 @@ fn compare_summary_to_competitor(
     cache_state: &str,
 ) -> SameMachineComparison {
     let context_match = competitor_context_match(competitor_summary, dataset_label, cache_state);
-    let validity = same_machine_validity(context_match);
+    let scanner_scope_match =
+        competitor_scanner_scope_match(diskloom_summary, &competitor_summary.key.scanner_scope);
+    let validity = same_machine_validity(context_match, scanner_scope_match);
     let diskloom_private_bytes_delta = competitor_summary
         .peak_private_bytes_max
         .map(|value| i128::from(diskloom_summary.peak_private_bytes_max) - i128::from(value));
@@ -1810,6 +1813,7 @@ fn compare_summary_to_competitor(
         cache_state: competitor_summary.key.cache_state.clone(),
         scanner_scope: competitor_summary.key.scanner_scope.clone(),
         context_match,
+        scanner_scope_match,
         competitor_runs: competitor_summary.runs,
         diskloom_runs: diskloom_summary.runs,
         competitor_elapsed_ms_min: competitor_summary.elapsed_ms_min,
@@ -1829,6 +1833,41 @@ fn compare_summary_to_competitor(
     }
 }
 
+fn competitor_scanner_scope_match(
+    diskloom_summary: &MeasurementSummary,
+    competitor_scope: &str,
+) -> &'static str {
+    match competitor_scope.trim().to_ascii_lowercase().as_str() {
+        "ntfs_mft" => {
+            if diskloom_summary.fallback_runs == 0 && diskloom_summary.scanners == "ntfs" {
+                "aligned_ntfs_mft"
+            } else if diskloom_summary
+                .scanners
+                .split('+')
+                .any(|scanner| scanner == "ntfs")
+            {
+                "mixed_or_fallback_not_aligned"
+            } else {
+                "not_aligned_requires_ntfs_mft"
+            }
+        }
+        "traversal" | "fallback" => {
+            if diskloom_summary.scanners == "fallback" {
+                "aligned_traversal"
+            } else if diskloom_summary
+                .scanners
+                .split('+')
+                .any(|scanner| scanner == "fallback")
+            {
+                "mixed_or_ntfs_not_aligned"
+            } else {
+                "not_aligned_requires_traversal"
+            }
+        }
+        _ => "unknown_competitor_scope",
+    }
+}
+
 fn competitor_context_match(
     competitor_summary: &CompetitorSummary,
     dataset_label: &str,
@@ -1845,10 +1884,14 @@ fn competitor_context_match(
     }
 }
 
-fn same_machine_validity(context_match: &str) -> &'static str {
+fn same_machine_validity(context_match: &str, scanner_scope_match: &str) -> &'static str {
     match context_match {
-        "matched" => "same_machine_user_supplied",
         "missing_diskloom_context" => "missing_diskloom_context",
+        "matched" => match scanner_scope_match {
+            "aligned_ntfs_mft" | "aligned_traversal" => "same_machine_user_supplied",
+            "unknown_competitor_scope" => "scanner_scope_unknown",
+            _ => "scanner_scope_mismatch",
+        },
         _ => "context_mismatch",
     }
 }
@@ -1867,7 +1910,7 @@ fn write_same_machine_comparisons(
 ) -> Result<()> {
     writeln!(
         writer,
-        "tool,version,dataset_label,cache_state,scanner_scope,context_match,competitor_runs,diskloom_runs,competitor_elapsed_ms_min,competitor_elapsed_ms_median,competitor_elapsed_ms_max,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_vs_competitor_median_ratio,competitor_peak_private_bytes_max,diskloom_peak_private_bytes_max,diskloom_private_bytes_delta,validity"
+        "tool,version,dataset_label,cache_state,scanner_scope,context_match,scanner_scope_match,competitor_runs,diskloom_runs,competitor_elapsed_ms_min,competitor_elapsed_ms_median,competitor_elapsed_ms_max,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_vs_competitor_median_ratio,competitor_peak_private_bytes_max,diskloom_peak_private_bytes_max,diskloom_private_bytes_delta,validity"
     )?;
     for comparison in comparisons {
         write_csv_cell(writer, &comparison.tool)?;
@@ -1881,8 +1924,9 @@ fn write_same_machine_comparisons(
         write_csv_cell(writer, &comparison.scanner_scope)?;
         write!(
             writer,
-            ",{},{},{},{},{},{},{},{},{},{},{},{},{},",
+            ",{},{},{},{},{},{},{},{},{},{},{},{},{},{},",
             comparison.context_match,
+            comparison.scanner_scope_match,
             comparison.competitor_runs,
             comparison.diskloom_runs,
             comparison.competitor_elapsed_ms_min,
@@ -2245,20 +2289,21 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     writeln!(writer)?;
     writeln!(
         writer,
-        "| tool | version | context | scope | competitor median/range ms | DiskLoom median/range ms | ratio | competitor peak private bytes | DiskLoom peak private bytes | validity |"
+        "| tool | version | context | scope | scope match | competitor median/range ms | DiskLoom median/range ms | ratio | competitor peak private bytes | DiskLoom peak private bytes | validity |"
     )?;
     writeln!(
         writer,
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
     )?;
     for comparison in report.same_machine_comparisons {
         writeln!(
             writer,
-            "| {} | {} | {} | {} | {} / {}-{} | {} / {}-{} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} / {}-{} | {} / {}-{} | {} | {} | {} | {} |",
             comparison.tool,
             comparison.version,
             comparison.context_match,
             comparison.scanner_scope,
+            comparison.scanner_scope_match,
             comparison.competitor_elapsed_ms_median,
             comparison.competitor_elapsed_ms_min,
             comparison.competitor_elapsed_ms_max,
@@ -2682,6 +2727,11 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
             writer,
             "      \"context_match\": {},",
             json_string(comparison.context_match)
+        )?;
+        writeln!(
+            writer,
+            "      \"scanner_scope_match\": {},",
+            json_string(comparison.scanner_scope_match)
         )?;
         writeln!(
             writer,
@@ -3656,6 +3706,7 @@ TreeSize,9.0,other,warm,traversal,2000,
         assert_eq!(comparisons[1].competitor_elapsed_ms_median, 600);
         assert_eq!(comparisons[1].diskloom_vs_competitor_median_ratio, "1.666");
         assert_eq!(comparisons[1].context_match, "matched");
+        assert_eq!(comparisons[1].scanner_scope_match, "aligned_ntfs_mft");
         assert_eq!(comparisons[1].validity, "same_machine_user_supplied");
         assert_eq!(comparisons[1].diskloom_private_bytes_delta, Some(45));
     }
@@ -3669,7 +3720,7 @@ TreeSize,9.0,other,warm,traversal,2000,
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("tool,version,dataset_label,cache_state"));
-        assert!(output.contains("WizTree,4.25,repo-smoke,warm,ntfs_mft,matched"));
+        assert!(output.contains("WizTree,4.25,repo-smoke,warm,ntfs_mft,matched,aligned_ntfs_mft"));
         assert!(output.contains("same_machine_user_supplied"));
     }
 
@@ -3709,8 +3760,8 @@ TreeSize,9.0,other,warm,traversal,2000,
             &competitor_csv,
             "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
-WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
-WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
+WizTree,4.25,repo-smoke,warm,traversal,500,40
+WizTree,4.25,repo-smoke,warm,traversal,700,50
 ",
         )
         .unwrap();
@@ -3732,7 +3783,29 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
             suite_same_machine_comparisons(&options, &sample_measurement_summary()).unwrap();
         std::fs::remove_file(competitor_csv).unwrap();
 
+        assert_eq!(comparisons[0].scanner_scope_match, "aligned_traversal");
         assert_eq!(comparisons[0].validity, "same_machine_user_supplied");
+    }
+
+    #[test]
+    fn compare_summary_to_competitors_should_reject_scope_mismatches() {
+        let rows = parse_competitor_measurements(
+            "\
+tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
+WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
+",
+        )
+        .unwrap();
+
+        let comparisons = compare_summary_to_competitors(
+            &sample_measurement_summary(),
+            &rows,
+            "repo-smoke",
+            "warm",
+        )
+        .unwrap();
+
+        assert_eq!(comparisons[0].validity, "scanner_scope_mismatch");
     }
 
     #[test]
@@ -3891,7 +3964,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
         .unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("| WizTree | 4.25 | matched | ntfs_mft |"));
+        assert!(output.contains("| WizTree | 4.25 | matched | ntfs_mft | aligned_ntfs_mft |"));
     }
 
     #[test]
@@ -4103,6 +4176,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
         assert!(output.contains("\"same-machine-comparison.csv\""));
         assert!(output.contains("\"same_machine_comparisons\""));
         assert!(output.contains("\"tool\": \"WizTree\""));
+        assert!(output.contains("\"scanner_scope_match\": \"aligned_ntfs_mft\""));
     }
 
     #[test]
@@ -4214,6 +4288,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,700,50
             cache_state: "warm".to_owned(),
             scanner_scope: "ntfs_mft".to_owned(),
             context_match: "matched",
+            scanner_scope_match: "aligned_ntfs_mft",
             competitor_runs: 2,
             diskloom_runs: 3,
             competitor_elapsed_ms_min: 500,
