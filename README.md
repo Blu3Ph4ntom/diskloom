@@ -119,6 +119,7 @@ cargo run -p diskloom-bench -- export . --iterations 5 --sample-ms 10 --scanner 
 cargo run -p diskloom-bench -- summarize target\bench.csv
 cargo run -p diskloom-bench -- compare-public target\bench.csv --claim wiztree-ssd-460gb
 cargo run -p diskloom-bench -- suite . target\bench-suite --iterations 5 --sample-ms 10 --scanner fallback
+.\scripts\run-bench-suite.ps1 -Path . -Scanner fallback -Iterations 5
 ```
 
 See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.
