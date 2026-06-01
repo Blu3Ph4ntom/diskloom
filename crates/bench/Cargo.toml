@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+diskloom-core.workspace = true
+diskloom-ntfs.workspace = true
 diskloom-scan.workspace = true
 
 [target.'cfg(windows)'.dependencies]

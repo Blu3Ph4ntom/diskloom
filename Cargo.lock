@@ -467,6 +467,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "diskloom-core",
+ "diskloom-ntfs",
  "diskloom-scan",
  "windows",
 ]

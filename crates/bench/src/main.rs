@@ -1,14 +1,16 @@
 use std::{
     fs::{self, File},
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use diskloom_core::{EntryFlags, FileGraph};
+use diskloom_ntfs::NtfsScanner;
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 
 #[derive(Debug, Parser)]
@@ -27,6 +29,8 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 10)]
         sample_ms: u64,
+        #[arg(long, value_enum, default_value = "fallback")]
+        scanner: ScannerMode,
     },
     Dataset {
         root: PathBuf,
@@ -39,9 +43,18 @@ enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ScannerMode {
+    Auto,
+    Fallback,
+    Ntfs,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ScanMeasurement {
     iteration: usize,
+    scanner: &'static str,
+    fallback: bool,
     elapsed_ms: u128,
     entries: u64,
     files: u64,
@@ -73,6 +86,8 @@ struct MemoryPeak {
 #[derive(Debug, Clone, Copy)]
 struct ScanRun {
     elapsed_ms: u128,
+    scanner: &'static str,
+    fallback: bool,
     summary: ScanSummary,
 }
 
@@ -90,7 +105,8 @@ fn main() -> Result<()> {
             path,
             iterations,
             sample_ms,
-        } => run_scan(path, iterations, sample_ms),
+            scanner,
+        } => run_scan(path, iterations, sample_ms, scanner),
         Command::Dataset {
             root,
             dirs,
@@ -100,12 +116,12 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64) -> Result<()> {
+fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64, scanner: ScannerMode) -> Result<()> {
     let mut measurements = Vec::with_capacity(iterations);
     let sample_interval = Duration::from_millis(sample_ms.max(1));
 
     for iteration in 1..=iterations {
-        let scan = run_measured_scan(path.clone(), sample_interval)
+        let scan = run_measured_scan(path.clone(), sample_interval, scanner)
             .with_context(|| format!("scan failed for {}", path.display()))?;
         measurements.push(measurement_from_run(iteration, scan));
     }
@@ -114,10 +130,14 @@ fn run_scan(path: PathBuf, iterations: usize, sample_ms: u64) -> Result<()> {
     Ok(())
 }
 
-fn run_measured_scan(path: PathBuf, sample_interval: Duration) -> Result<MeasuredScan> {
+fn run_measured_scan(
+    path: PathBuf,
+    sample_interval: Duration,
+    scanner: ScannerMode,
+) -> Result<MeasuredScan> {
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let result = scan_once(path).map_err(|error| error.to_string());
+        let result = scan_once(path, scanner).map_err(|error| error.to_string());
         let _ = sender.send(result);
     });
 
@@ -138,23 +158,101 @@ fn run_measured_scan(path: PathBuf, sample_interval: Duration) -> Result<Measure
     Ok(MeasuredScan { run, memory })
 }
 
-fn scan_once(path: PathBuf) -> Result<ScanRun> {
+fn scan_once(path: PathBuf, scanner: ScannerMode) -> Result<ScanRun> {
     let started = Instant::now();
+    let outcome = scan_path(path, scanner)?;
+
+    Ok(ScanRun {
+        elapsed_ms: started.elapsed().as_millis(),
+        scanner: outcome.scanner,
+        fallback: outcome.fallback,
+        summary: outcome.summary,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScanOutcome {
+    scanner: &'static str,
+    fallback: bool,
+    summary: ScanSummary,
+}
+
+fn scan_path(path: PathBuf, scanner: ScannerMode) -> Result<ScanOutcome> {
+    match scanner {
+        ScannerMode::Fallback => scan_fallback(path, false),
+        ScannerMode::Ntfs => scan_ntfs(&path),
+        ScannerMode::Auto => {
+            if drive_volume(&path).is_some() {
+                match scan_ntfs(&path) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(_) => scan_fallback(path, true),
+                }
+            } else {
+                scan_fallback(path, false)
+            }
+        }
+    }
+}
+
+fn scan_fallback(path: PathBuf, fallback: bool) -> Result<ScanOutcome> {
     let (_, summary) = FallbackScanner::scan(ScanOptions {
         root: path,
         follow_symlinks: false,
     })?;
 
-    Ok(ScanRun {
-        elapsed_ms: started.elapsed().as_millis(),
+    Ok(ScanOutcome {
+        scanner: "fallback",
+        fallback,
         summary,
     })
+}
+
+fn scan_ntfs(path: &Path) -> Result<ScanOutcome> {
+    let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let graph = NtfsScanner::scan_volume(&volume)?;
+    Ok(ScanOutcome {
+        scanner: "ntfs",
+        fallback: false,
+        summary: summary_from_graph(&graph),
+    })
+}
+
+fn summary_from_graph(graph: &FileGraph) -> ScanSummary {
+    let mut summary = ScanSummary {
+        entries: graph.len() as u64,
+        ..ScanSummary::default()
+    };
+    for id in graph.ids() {
+        let Some(entry) = graph.entry(id) else {
+            continue;
+        };
+        if entry.flags.contains(EntryFlags::DIRECTORY) {
+            summary.directories += 1;
+        } else {
+            summary.files += 1;
+        }
+    }
+    summary
+}
+
+fn drive_volume(path: &Path) -> Option<String> {
+    let value = path.to_string_lossy();
+    let trimmed = value.trim_end_matches(['\\', '/']);
+    let mut chars = trimmed.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' || chars.next().is_some() {
+        return None;
+    }
+
+    Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
 fn measurement_from_run(iteration: usize, scan: MeasuredScan) -> ScanMeasurement {
     let summary = scan.run.summary;
     ScanMeasurement {
         iteration,
+        scanner: scan.run.scanner,
+        fallback: scan.run.fallback,
         elapsed_ms: scan.run.elapsed_ms,
         entries: summary.entries,
         files: summary.files,
@@ -260,13 +358,15 @@ fn create_dataset(
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
-        "iteration,elapsed_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
+        "iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,peak_working_set_bytes,peak_private_bytes,final_working_set_bytes,final_private_bytes,peak_private_bytes_per_million_entries,memory_samples"
     )?;
     for measurement in measurements {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             measurement.iteration,
+            measurement.scanner,
+            u8::from(measurement.fallback),
             measurement.elapsed_ms,
             measurement.entries,
             measurement.files,
@@ -291,6 +391,8 @@ mod tests {
     fn write_measurements_should_emit_csv_rows() {
         let measurements = [ScanMeasurement {
             iteration: 1,
+            scanner: "fallback",
+            fallback: false,
             elapsed_ms: 10,
             entries: 3,
             files: 2,
@@ -308,7 +410,7 @@ mod tests {
         write_measurements(&mut output, &measurements).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("1,10,3,2,1,0,100,90,80,70,30000000,4"));
+        assert!(output.contains("1,fallback,0,10,3,2,1,0,100,90,80,70,30000000,4"));
     }
 
     #[test]
