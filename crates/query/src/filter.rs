@@ -91,7 +91,7 @@ impl NameMatcher {
                 if *case_sensitive {
                     value.contains(needle)
                 } else {
-                    value.to_lowercase().contains(&needle.to_lowercase())
+                    contains_ignore_case(value, needle)
                 }
             }
             Self::Regex(regex) => regex.is_match(value),
@@ -310,6 +310,34 @@ fn extension_matches(name: &str, expected: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn contains_ignore_case(value: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    if value.is_ascii() && needle.is_ascii() {
+        return contains_ignore_ascii_case(value.as_bytes(), needle.as_bytes());
+    }
+
+    value.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn contains_ignore_ascii_case(value: &[u8], needle: &[u8]) -> bool {
+    value
+        .windows(needle.len())
+        .any(|window| ascii_eq_ignore_case(window, needle))
+}
+
+fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| ascii_byte_eq_ignore_case(*left, *right))
+}
+
+fn ascii_byte_eq_ignore_case(left: u8, right: u8) -> bool {
+    left.eq_ignore_ascii_case(&right)
+}
+
 #[cfg(test)]
 mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
@@ -348,6 +376,27 @@ mod tests {
         let matches: Vec<_> = filter.matching_ids(&graph).collect();
 
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn name_matcher_should_match_ascii_without_case_sensitivity() {
+        let matcher = NameMatcher::contains("REPORT");
+
+        assert!(matcher.matches("quarterly-report.csv"));
+    }
+
+    #[test]
+    fn name_matcher_should_keep_unicode_case_folding_fallback() {
+        let matcher = NameMatcher::contains("CAFÉ");
+
+        assert!(matcher.matches("café-notes.txt"));
+    }
+
+    #[test]
+    fn name_matcher_should_honor_case_sensitive_contains() {
+        let matcher = NameMatcher::contains_case_sensitive("Report");
+
+        assert!(!matcher.matches("report.csv"));
     }
 
     #[test]
