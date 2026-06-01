@@ -6,7 +6,7 @@ Accessed: 2026-06-01.
 
 ## Sources
 
-- [WizTree home page](https://diskanalyzer.com/) positions WizTree as "The FASTEST Disk Space Analyzer", links to a 46x WinDirStat comparison, says similar applications can take minutes where WizTree takes seconds, and describes direct NTFS MFT reading.
+- [WizTree home page](https://diskanalyzer.com/) positions WizTree as "The FASTEST Disk Space Analyzer", links to a 46x WinDirStat comparison, says similar applications can take minutes where WizTree takes seconds, describes direct NTFS MFT reading, and states that a typical 500 GB NTFS SSD scan completes in 3 to 8 seconds.
 - [WizTree vs WinDirStat](https://diskanalyzer.com/wiztree-vs-windirstat) publishes two historical cold-start comparisons: 4.34 seconds vs 3 min 20 sec on a 25 GB HDD, and 5.23 seconds vs 1 min 55 sec on a 460 GB SSD.
 - [WizTree about page](https://diskanalyzer.com/about) explains that its NTFS fast path reads the MFT directly and can also scan non-NTFS drives, network drives, USB drives, and individual directories.
 - [WizTree FAQ](https://diskanalyzer.com/faq) states that high-speed NTFS scanning needs admin rights and explains allocated-size behavior.
@@ -17,6 +17,7 @@ Accessed: 2026-06-01.
 | Public claim or capability | DiskLoom benchmark implication | Current DiskLoom status |
 | --- | --- | --- |
 | Full NTFS drive scans complete in seconds. | Run `diskloom-bench scan C:\ --scanner ntfs --iterations 5 --sample-ms 10` from an elevated shell and publish raw CSV plus median/range. | Harness supports this; direct NTFS scanner is still early and needs correctness hardening before public claims. |
+| A typical 500 GB NTFS SSD scan completes in 3 to 8 seconds. | Track this as `wiztree-ssd-500gb-typical`, a current public range, and compare DiskLoom medians against both the low and high end. | `compare-public` and `suite` include ranged public-claim comparisons. |
 | WizTree publishes 46x and 22x faster results versus WinDirStat on older systems. | Treat those as historical reference points, not current proof. DiskLoom must publish same-machine comparisons against current WizTree, TreeSize, WinDirStat, and Explorer traversal. | Methodology exists; competitor automation is not implemented yet. |
 | Direct MFT reading is the core speed advantage on NTFS. | DiskLoom's `ntfs` scanner must be measured separately from `fallback` so failures and fallback behavior are visible. | `diskloom-bench` records `scanner` and `fallback` columns. |
 | High-speed NTFS scanning requires admin rights. | Runs must record whether the shell was elevated, and `auto` mode must show if it fell back. | CLI, GUI, and benchmark auto modes report fallback behavior. |
@@ -40,6 +41,7 @@ Capture and summarize a run before comparing it with the claim matrix:
 ```powershell
 target\release\diskloom-bench.exe scan C:\ --scanner ntfs --iterations 5 --sample-ms 10 > target\bench-ntfs.csv
 target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-500gb-typical
 target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
 ```
 
