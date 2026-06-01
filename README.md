@@ -129,10 +129,10 @@ Create a synthetic dataset:
 cargo run -p diskloom-bench -- dataset target/bench-tree --dirs 100 --files-per-dir 100 --bytes-per-file 0
 ```
 
-Build portable binaries:
+Build a portable Windows zip:
 
 ```powershell
-cargo build --release -p diskloom-cli -p diskloom-ui
+.\scripts\package-portable.ps1
 ```
 
 ## License

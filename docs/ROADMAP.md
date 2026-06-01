@@ -36,7 +36,7 @@
 
 ## Milestone 4: Packaging and Benchmarks
 
-- Portable release build.
+- Portable release build. Initial package script and CI check done.
 - Installer support.
 - Reproducible public benchmark suite. Initial DiskLoom harness and WizTree public-claims baseline done.
 - Screenshots and release notes.
