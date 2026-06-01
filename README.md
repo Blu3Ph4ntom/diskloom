@@ -102,7 +102,7 @@ cargo run -p diskloom-ui
 Run the benchmark harness:
 
 ```powershell
-cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10
+cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback
 ```
 
 Create a synthetic dataset:

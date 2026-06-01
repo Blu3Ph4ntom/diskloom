@@ -36,15 +36,15 @@ Compare against:
 Repeated fallback scan timing:
 
 ```powershell
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --scanner fallback
 ```
 
-CLI scanner modes:
+Benchmark scanner modes:
 
 ```powershell
-cargo run --release -p diskloom-cli -- scan C:\ --scanner auto --limit 25
-cargo run --release -p diskloom-cli -- scan C:\ --scanner ntfs --limit 25
-cargo run --release -p diskloom-cli -- scan C:\ --scanner fallback --limit 25
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --scanner auto
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --scanner ntfs
+cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --scanner fallback
 ```
 
 Synthetic dataset generation:
@@ -53,4 +53,4 @@ Synthetic dataset generation:
 cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
 ```
 
-The harness emits CSV rows for elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness, direct scanner timing, and competitor automation still need dedicated collectors before public claims are made.
+The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. UI responsiveness and competitor automation still need dedicated collectors before public claims are made.
