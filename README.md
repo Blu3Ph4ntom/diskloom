@@ -81,6 +81,12 @@ Show file type statistics:
 cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --file-types
 ```
 
+Filter by full path:
+
+```powershell
+cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --path AppData --limit 25
+```
+
 List Windows volumes:
 
 ```powershell
