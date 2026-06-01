@@ -2,4 +2,6 @@
 
 pub mod filter;
 
-pub use filter::{CompiledFilter, FilterError, NameMatcher, QueryFilter, SortKey, SortOrder};
+pub use filter::{
+    CompiledFilter, FilterError, NameMatcher, QueryFilter, SortKey, SortOrder, sort_entries,
+};
