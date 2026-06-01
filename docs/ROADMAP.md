@@ -38,7 +38,7 @@
 
 - Portable release build.
 - Installer support.
-- Reproducible public benchmark suite.
+- Reproducible public benchmark suite. Initial DiskLoom harness and WizTree public-claims baseline done.
 - Screenshots and release notes.
 
 ## Later

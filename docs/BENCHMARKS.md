@@ -22,6 +22,8 @@ Compare against:
 - WinDirStat.
 - Windows Explorer search or traversal behavior where relevant.
 
+Use [WizTree Public Claims Baseline](benchmarks/wiztree-public-claims.md) to map vendor-published WizTree claims to DiskLoom benchmark runs.
+
 ## Rules
 
 - Run release builds.

@@ -105,6 +105,8 @@ Run the benchmark harness:
 cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback
 ```
 
+See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.
+
 Create a synthetic dataset:
 
 ```powershell
