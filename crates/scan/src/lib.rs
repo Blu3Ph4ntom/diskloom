@@ -2,4 +2,4 @@
 
 pub mod fallback;
 
-pub use fallback::{FallbackScanner, ScanError, ScanOptions, ScanSummary};
+pub use fallback::{FallbackScanner, ScanControl, ScanError, ScanOptions, ScanSummary};

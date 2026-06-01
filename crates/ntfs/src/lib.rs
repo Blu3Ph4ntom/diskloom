@@ -4,4 +4,4 @@ pub mod mft;
 pub mod scanner;
 
 pub use mft::{FileRecordHeader, MftParseError};
-pub use scanner::{NtfsScanError, NtfsScanProgress, NtfsScanner, NtfsVolumeInfo};
+pub use scanner::{NtfsScanControl, NtfsScanError, NtfsScanProgress, NtfsScanner, NtfsVolumeInfo};

@@ -31,6 +31,12 @@ pub struct ScanSummary {
     pub files: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanControl {
+    Continue,
+    Cancel,
+}
+
 #[derive(Debug)]
 pub struct FallbackScanner;
 
@@ -38,6 +44,8 @@ pub struct FallbackScanner;
 pub enum ScanError {
     #[error("failed to read `{path}`: {source}")]
     Io { path: PathBuf, source: io::Error },
+    #[error("scan was cancelled")]
+    Cancelled,
     #[error(transparent)]
     Graph(#[from] FileGraphError),
 }
@@ -51,6 +59,17 @@ impl FallbackScanner {
         options: ScanOptions,
         progress_every: u64,
         mut on_progress: impl FnMut(ScanSummary),
+    ) -> Result<(FileGraph, ScanSummary), ScanError> {
+        Self::scan_with_control(options, progress_every, |summary| {
+            on_progress(summary);
+            ScanControl::Continue
+        })
+    }
+
+    pub fn scan_with_control(
+        options: ScanOptions,
+        progress_every: u64,
+        mut on_progress: impl FnMut(ScanSummary) -> ScanControl,
     ) -> Result<(FileGraph, ScanSummary), ScanError> {
         let root_metadata = metadata_for(&options.root, options.follow_symlinks)?;
         let root_kind = kind_for(&root_metadata);
@@ -77,7 +96,7 @@ impl FallbackScanner {
             progress_every,
             &mut last_progress_entries,
             &mut on_progress,
-        );
+        )?;
 
         let mut pending = Vec::new();
         if root_kind == FileKind::Directory {
@@ -121,7 +140,7 @@ impl FallbackScanner {
                     progress_every,
                     &mut last_progress_entries,
                     &mut on_progress,
-                );
+                )?;
 
                 if kind == FileKind::Directory {
                     pending.push((path, id));
@@ -133,7 +152,7 @@ impl FallbackScanner {
             progress_every,
             &mut last_progress_entries,
             &mut on_progress,
-        );
+        )?;
 
         Ok((builder.finish(), summary))
     }
@@ -227,27 +246,31 @@ fn maybe_emit_progress(
     summary: ScanSummary,
     progress_every: u64,
     last_entries: &mut u64,
-    on_progress: &mut impl FnMut(ScanSummary),
-) {
+    on_progress: &mut impl FnMut(ScanSummary) -> ScanControl,
+) -> Result<(), ScanError> {
     if progress_every == 0 {
-        return;
+        return Ok(());
     }
     if summary.entries == 1 || summary.entries.is_multiple_of(progress_every) {
-        emit_progress(summary, progress_every, last_entries, on_progress);
+        emit_progress(summary, progress_every, last_entries, on_progress)?;
     }
+    Ok(())
 }
 
 fn emit_progress(
     summary: ScanSummary,
     progress_every: u64,
     last_entries: &mut u64,
-    on_progress: &mut impl FnMut(ScanSummary),
-) {
+    on_progress: &mut impl FnMut(ScanSummary) -> ScanControl,
+) -> Result<(), ScanError> {
     if progress_every == 0 || summary.entries == *last_entries {
-        return;
+        return Ok(());
     }
     *last_entries = summary.entries;
-    on_progress(summary);
+    match on_progress(summary) {
+        ScanControl::Continue => Ok(()),
+        ScanControl::Cancel => Err(ScanError::Cancelled),
+    }
 }
 
 #[cfg(test)]
@@ -256,7 +279,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{FallbackScanner, ScanOptions};
+    use super::{FallbackScanner, ScanControl, ScanError, ScanOptions};
 
     #[test]
     fn scan_should_build_graph_for_directory_tree() {
@@ -301,5 +324,24 @@ mod tests {
 
         assert_eq!(summary.entries, 4);
         assert_eq!(snapshots, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn scan_with_control_should_stop_when_cancelled() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("a.bin"), [0_u8; 8]).unwrap();
+        fs::write(temp.path().join("b.bin"), [0_u8; 4]).unwrap();
+
+        let error =
+            FallbackScanner::scan_with_control(ScanOptions::new(temp.path()), 1, |progress| {
+                if progress.entries >= 2 {
+                    ScanControl::Cancel
+                } else {
+                    ScanControl::Continue
+                }
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, ScanError::Cancelled));
     }
 }

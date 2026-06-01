@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
     },
     thread,
@@ -12,12 +13,12 @@ use std::{
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::{DuplicateCandidate, find_duplicate_candidates};
 use diskloom_export::{CsvExportOptions, export_csv};
-use diskloom_ntfs::{NtfsScanProgress, NtfsScanner};
+use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_query::{
     FileTypeStat, NameMatcher, QueryFilter, TreemapBounds, TreemapItem, TreemapRect,
     file_type_stats, layout_treemap, top_entries_by_own_size, top_entries_by_total_size,
 };
-use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
+use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
     is_process_elevated, open_in_explorer, recycle_delete, relaunch_current_process_elevated,
     rename_path, show_properties,
@@ -43,6 +44,7 @@ pub struct DiskLoomApp {
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
+    scan_cancel: Option<Arc<AtomicBool>>,
     start_on_launch: bool,
 }
 
@@ -228,6 +230,7 @@ impl Default for DiskLoomApp {
             active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
+            scan_cancel: None,
             start_on_launch: false,
         }
     }
@@ -320,6 +323,8 @@ impl eframe::App for DiskLoomApp {
             });
 
             ui.add_space(8.0);
+            self.scan_controls(ui);
+            ui.add_space(8.0);
             self.filter_controls(ui);
 
             ui.add_space(8.0);
@@ -344,6 +349,7 @@ impl DiskLoomApp {
         let trimmed = self.path.trim();
         let path = PathBuf::from(if trimmed.is_empty() { "." } else { trimmed });
         let scanner_mode = self.scanner_mode;
+        let cancel = Arc::new(AtomicBool::new(false));
         match maybe_relaunch_ui_scan_elevated(&path, scanner_mode) {
             Ok(true) => {
                 self.action_status = Some(ActionStatus {
@@ -364,6 +370,7 @@ impl DiskLoomApp {
 
         let (sender, receiver) = mpsc::channel();
         self.receiver = Some(receiver);
+        self.scan_cancel = Some(Arc::clone(&cancel));
         self.state = UiState::Scanning(None);
         self.view_cache = None;
         self.selected_path = None;
@@ -379,7 +386,7 @@ impl DiskLoomApp {
                     elapsed_ms: started.elapsed().as_millis(),
                 }));
             };
-            let result = scan_path(path, scanner_mode, &mut on_progress).map(|outcome| {
+            let result = scan_path(path, scanner_mode, &cancel, &mut on_progress).map(|outcome| {
                 let graph = Arc::new(outcome.graph);
                 let tree_rows = tree_rows_from_graph(&graph, TREE_ROW_LIMIT);
                 let file_types = file_type_stats(&graph, 50);
@@ -423,6 +430,7 @@ impl DiskLoomApp {
                 }
                 Ok(ScanMessage::Complete(result)) => {
                     self.state = UiState::Complete(result);
+                    self.scan_cancel = None;
                     self.view_cache = None;
                     self.selected_path = None;
                     self.rename_target.clear();
@@ -431,6 +439,7 @@ impl DiskLoomApp {
                 }
                 Ok(ScanMessage::Error(error)) => {
                     self.state = UiState::Error(error);
+                    self.scan_cancel = None;
                     self.view_cache = None;
                     self.selected_path = None;
                     self.rename_target.clear();
@@ -442,6 +451,7 @@ impl DiskLoomApp {
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.state = UiState::Error("scan worker stopped".to_owned());
+                    self.scan_cancel = None;
                     self.view_cache = None;
                     self.selected_path = None;
                     self.rename_target.clear();
@@ -559,6 +569,24 @@ impl DiskLoomApp {
         if changed {
             self.view_cache = None;
         }
+    }
+
+    fn scan_controls(&mut self, ui: &mut egui::Ui) {
+        if !matches!(self.state, UiState::Scanning(_)) {
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            if ui.button("Cancel scan").clicked() {
+                if let Some(cancel) = &self.scan_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                self.action_status = Some(ActionStatus {
+                    message: "cancelling scan".to_owned(),
+                    is_error: false,
+                });
+            }
+        });
     }
 
     fn action_controls(&mut self, ui: &mut egui::Ui) {
@@ -1042,19 +1070,20 @@ struct UiScanOutcome {
 fn scan_path(
     path: PathBuf,
     mode: UiScannerMode,
+    cancel: &AtomicBool,
     on_progress: &mut impl FnMut(ScanSummary),
 ) -> Result<UiScanOutcome, String> {
     match mode {
-        UiScannerMode::Fallback => scan_fallback(path, None, on_progress),
-        UiScannerMode::Ntfs => scan_ntfs(&path, on_progress),
+        UiScannerMode::Fallback => scan_fallback(path, None, cancel, on_progress),
+        UiScannerMode::Ntfs => scan_ntfs(&path, cancel, on_progress),
         UiScannerMode::Auto => {
             if drive_volume(&path).is_some() {
-                match scan_ntfs(&path, on_progress) {
+                match scan_ntfs(&path, cancel, on_progress) {
                     Ok(outcome) => Ok(outcome),
-                    Err(error) => scan_fallback(path, Some(error), on_progress),
+                    Err(error) => scan_fallback(path, Some(error), cancel, on_progress),
                 }
             } else {
-                scan_fallback(path, None, on_progress)
+                scan_fallback(path, None, cancel, on_progress)
             }
         }
     }
@@ -1063,15 +1092,23 @@ fn scan_path(
 fn scan_fallback(
     path: PathBuf,
     fallback_reason: Option<String>,
+    cancel: &AtomicBool,
     on_progress: &mut impl FnMut(ScanSummary),
 ) -> Result<UiScanOutcome, String> {
-    let (graph, summary) = FallbackScanner::scan_with_progress(
+    let (graph, summary) = FallbackScanner::scan_with_control(
         ScanOptions {
             root: path,
             follow_symlinks: false,
         },
         UI_PROGRESS_EVERY,
-        on_progress,
+        |summary| {
+            on_progress(summary);
+            if cancel.load(Ordering::Relaxed) {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        },
     )
     .map_err(|error| error.to_string())?;
 
@@ -1085,11 +1122,17 @@ fn scan_fallback(
 
 fn scan_ntfs(
     path: &Path,
+    cancel: &AtomicBool,
     on_progress: &mut impl FnMut(ScanSummary),
 ) -> Result<UiScanOutcome, String> {
     let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let graph = NtfsScanner::scan_volume_with_progress(&volume, UI_PROGRESS_EVERY, |progress| {
+    let graph = NtfsScanner::scan_volume_with_control(&volume, UI_PROGRESS_EVERY, |progress| {
         on_progress(scan_summary_from_ntfs_progress(progress));
+        if cancel.load(Ordering::Relaxed) {
+            NtfsScanControl::Cancel
+        } else {
+            NtfsScanControl::Continue
+        }
     })
     .map_err(|error| error.to_string())?;
     let summary = summary_from_graph(&graph);

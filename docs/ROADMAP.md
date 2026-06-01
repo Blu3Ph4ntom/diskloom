@@ -33,6 +33,7 @@
 - Scanner mode selection. Initial implementation done.
 - Search/filter UI. Initial name, regex, extension, path, size, allocated-size, and modified-date filters done.
 - GUI CSV export. Initial non-blocking export done.
+- Scan cancellation. Initial GUI cancel control with fallback and NTFS progress checkpoints done.
 - Shell actions. Initial Explorer, properties, recycle delete, and rename controls done.
 - Dark mode. Initial implementation done.
 - High-DPI polish.

@@ -26,6 +26,12 @@ pub struct NtfsScanProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NtfsScanControl {
+    Continue,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NtfsVolumeInfo {
     pub volume_serial_number: i64,
     pub bytes_per_sector: u32,
@@ -41,6 +47,8 @@ pub enum NtfsScanError {
     UnsupportedPlatform,
     #[error("direct NTFS MFT scan path is not complete yet")]
     MftScanIncomplete,
+    #[error("direct NTFS scan was cancelled")]
+    Cancelled,
     #[error("MFT record 0 does not contain non-resident data runs")]
     MissingMftDataRuns,
     #[error("integer overflow while computing NTFS offsets")]
@@ -75,7 +83,19 @@ impl NtfsScanner {
     pub fn scan_volume_with_progress(
         volume: &str,
         progress_every: u64,
-        on_progress: impl FnMut(NtfsScanProgress),
+        mut on_progress: impl FnMut(NtfsScanProgress),
+    ) -> Result<FileGraph, NtfsScanError> {
+        Self::scan_volume_with_control(volume, progress_every, |progress| {
+            on_progress(progress);
+            NtfsScanControl::Continue
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn scan_volume_with_control(
+        volume: &str,
+        progress_every: u64,
+        on_progress: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
     ) -> Result<FileGraph, NtfsScanError> {
         let device_path = volume_device_path(volume)?;
         let handle = VolumeHandle::open(&device_path)?;
@@ -95,6 +115,15 @@ impl NtfsScanner {
         _: &str,
         _: u64,
         _: impl FnMut(NtfsScanProgress),
+    ) -> Result<FileGraph, NtfsScanError> {
+        Err(NtfsScanError::UnsupportedPlatform)
+    }
+
+    #[cfg(not(windows))]
+    pub fn scan_volume_with_control(
+        _: &str,
+        _: u64,
+        _: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
     ) -> Result<FileGraph, NtfsScanError> {
         Err(NtfsScanError::UnsupportedPlatform)
     }
@@ -281,7 +310,7 @@ fn scan_mft(
     volume: &str,
     device_path: &str,
     progress_every: u64,
-    on_progress: impl FnMut(NtfsScanProgress),
+    on_progress: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
 ) -> Result<FileGraph, NtfsScanError> {
     let record_size = info.bytes_per_file_record as usize;
     let record0_offset = lcn_to_offset(info.mft_start_lcn, info.bytes_per_cluster)?;
@@ -319,7 +348,7 @@ struct MftReadPlan<'a> {
 fn read_mft_entries(
     handle: &VolumeHandle,
     plan: MftReadPlan<'_>,
-    mut on_progress: impl FnMut(NtfsScanProgress),
+    mut on_progress: impl FnMut(NtfsScanProgress) -> NtfsScanControl,
 ) -> Result<HashMap<u64, NtfsRawEntry>, NtfsScanError> {
     let mut entries = HashMap::new();
     let mut record_number = 0_u64;
@@ -353,7 +382,7 @@ fn read_mft_entries(
                     plan.progress_every,
                     &mut last_progress_records,
                     &mut on_progress,
-                );
+                )?;
                 return Ok(entries);
             }
 
@@ -382,7 +411,7 @@ fn read_mft_entries(
                     plan.progress_every,
                     &mut last_progress_records,
                     &mut on_progress,
-                );
+                )?;
                 return Ok(entries);
             }
 
@@ -402,7 +431,7 @@ fn read_mft_entries(
                     plan.progress_every,
                     &mut last_progress_records,
                     &mut on_progress,
-                );
+                )?;
 
                 record_number += 1;
                 run_record_idx += 1;
@@ -415,7 +444,7 @@ fn read_mft_entries(
         plan.progress_every,
         &mut last_progress_records,
         &mut on_progress,
-    );
+    )?;
     Ok(entries)
 }
 
@@ -618,27 +647,31 @@ fn maybe_emit_ntfs_progress(
     progress: NtfsScanProgress,
     progress_every: u64,
     last_records: &mut u64,
-    on_progress: &mut impl FnMut(NtfsScanProgress),
-) {
+    on_progress: &mut impl FnMut(NtfsScanProgress) -> NtfsScanControl,
+) -> Result<(), NtfsScanError> {
     if progress_every == 0 {
-        return;
+        return Ok(());
     }
     if progress.records_read == 1 || progress.records_read.is_multiple_of(progress_every) {
-        emit_ntfs_progress(progress, progress_every, last_records, on_progress);
+        emit_ntfs_progress(progress, progress_every, last_records, on_progress)?;
     }
+    Ok(())
 }
 
 fn emit_ntfs_progress(
     progress: NtfsScanProgress,
     progress_every: u64,
     last_records: &mut u64,
-    on_progress: &mut impl FnMut(NtfsScanProgress),
-) {
+    on_progress: &mut impl FnMut(NtfsScanProgress) -> NtfsScanControl,
+) -> Result<(), NtfsScanError> {
     if progress_every == 0 || progress.records_read == *last_records {
-        return;
+        return Ok(());
     }
     *last_records = progress.records_read;
-    on_progress(progress);
+    match on_progress(progress) {
+        NtfsScanControl::Continue => Ok(()),
+        NtfsScanControl::Cancel => Err(NtfsScanError::Cancelled),
+    }
 }
 
 #[cfg(windows)]
@@ -672,9 +705,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        NtfsRawEntry, NtfsScanProgress, ROOT_RECORD_NUMBER, build_graph_from_entries,
-        emit_ntfs_progress, maybe_emit_ntfs_progress, process_mft_record, raw_entry_from_record,
-        records_per_mft_chunk,
+        NtfsRawEntry, NtfsScanControl, NtfsScanError, NtfsScanProgress, ROOT_RECORD_NUMBER,
+        build_graph_from_entries, emit_ntfs_progress, maybe_emit_ntfs_progress, process_mft_record,
+        raw_entry_from_record, records_per_mft_chunk,
     };
     use crate::mft::{
         FileNameAttribute, FileRecordHeader, ParsedFileRecord, StandardInformationAttribute,
@@ -790,7 +823,10 @@ mod tests {
     fn ntfs_progress_should_emit_first_interval_and_final_snapshots() {
         let mut last_records = 0;
         let mut snapshots = Vec::new();
-        let mut collect = |progress: NtfsScanProgress| snapshots.push(progress.records_read);
+        let mut collect = |progress: NtfsScanProgress| {
+            snapshots.push(progress.records_read);
+            NtfsScanControl::Continue
+        };
 
         maybe_emit_ntfs_progress(
             NtfsScanProgress {
@@ -803,7 +839,8 @@ mod tests {
             4,
             &mut last_records,
             &mut collect,
-        );
+        )
+        .unwrap();
         maybe_emit_ntfs_progress(
             NtfsScanProgress {
                 records_read: 3,
@@ -815,7 +852,8 @@ mod tests {
             4,
             &mut last_records,
             &mut collect,
-        );
+        )
+        .unwrap();
         maybe_emit_ntfs_progress(
             NtfsScanProgress {
                 records_read: 4,
@@ -827,7 +865,8 @@ mod tests {
             4,
             &mut last_records,
             &mut collect,
-        );
+        )
+        .unwrap();
         emit_ntfs_progress(
             NtfsScanProgress {
                 records_read: 5,
@@ -839,9 +878,32 @@ mod tests {
             4,
             &mut last_records,
             &mut collect,
-        );
+        )
+        .unwrap();
 
         assert_eq!(snapshots, vec![1, 4, 5]);
+    }
+
+    #[test]
+    fn ntfs_progress_should_return_cancelled_when_callback_cancels() {
+        let mut last_records = 0;
+        let mut cancel = |_| NtfsScanControl::Cancel;
+
+        let error = emit_ntfs_progress(
+            NtfsScanProgress {
+                records_read: 1,
+                entries: 1,
+                files: 1,
+                directories: 0,
+                skipped: 0,
+            },
+            1,
+            &mut last_records,
+            &mut cancel,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, NtfsScanError::Cancelled));
     }
 
     #[test]
