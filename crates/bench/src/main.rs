@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    fmt::Write as _,
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -514,6 +515,19 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
         &selected_claim_ids,
     )?;
 
+    let manifest_json = options.output_dir.join("manifest.json");
+    let mut manifest_file = File::create(&manifest_json)
+        .with_context(|| format!("failed to create {}", manifest_json.display()))?;
+    write_suite_manifest(
+        &mut manifest_file,
+        &options,
+        &run_context,
+        &environment,
+        &scan_summary,
+        &export_summary,
+        &comparisons,
+    )?;
+
     let report_md = options.output_dir.join("report.md");
     let mut report_file = File::create(&report_md)
         .with_context(|| format!("failed to create {}", report_md.display()))?;
@@ -548,6 +562,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     writeln!(stdout, "export: {}", export_csv.display())?;
     writeln!(stdout, "public comparison: {}", comparison_csv.display())?;
     writeln!(stdout, "metadata: {}", metadata_txt.display())?;
+    writeln!(stdout, "manifest: {}", manifest_json.display())?;
     writeln!(stdout, "report: {}", report_md.display())?;
 
     Ok(())
@@ -1742,6 +1757,286 @@ fn write_suite_metadata(
     Ok(())
 }
 
+fn write_suite_manifest(
+    writer: &mut impl Write,
+    options: &SuiteOptions,
+    run_context: &SuiteRunContext,
+    environment: &BenchmarkEnvironment,
+    scan_summary: &MeasurementSummary,
+    export_summary: &ExportSummary,
+    comparisons: &[PublicComparison],
+) -> Result<()> {
+    writeln!(writer, "{{")?;
+    writeln!(
+        writer,
+        "  \"schema\": {},",
+        json_string("diskloom.benchmark-suite.v1")
+    )?;
+    writeln!(
+        writer,
+        "  \"diskloom_bench_version\": {},",
+        json_string(env!("CARGO_PKG_VERSION"))
+    )?;
+    writeln!(
+        writer,
+        "  \"generated_unix_seconds\": {},",
+        unix_now_seconds()
+    )?;
+    writeln!(
+        writer,
+        "  \"target_os\": {},",
+        json_string(std::env::consts::OS)
+    )?;
+    writeln!(
+        writer,
+        "  \"target_arch\": {},",
+        json_string(std::env::consts::ARCH)
+    )?;
+    writeln!(writer, "  \"run\": {{")?;
+    writeln!(
+        writer,
+        "    \"path\": {},",
+        json_string(&options.path.display().to_string())
+    )?;
+    writeln!(
+        writer,
+        "    \"output_dir\": {},",
+        json_string(&options.output_dir.display().to_string())
+    )?;
+    writeln!(
+        writer,
+        "    \"dataset_label\": {},",
+        json_string(&options.dataset_label)
+    )?;
+    writeln!(
+        writer,
+        "    \"cache_state\": {},",
+        json_string(&options.cache_state)
+    )?;
+    writeln!(
+        writer,
+        "    \"scanner\": {},",
+        json_string(scanner_label(options.scanner))
+    )?;
+    writeln!(writer, "    \"iterations\": {},", options.iterations)?;
+    writeln!(writer, "    \"sample_ms\": {},", options.sample_ms)?;
+    writeln!(
+        writer,
+        "    \"progress_every\": {},",
+        options.progress_every
+    )?;
+    writeln!(
+        writer,
+        "    \"include_directories\": {}",
+        options.include_directories
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"git\": {{")?;
+    writeln!(
+        writer,
+        "    \"revision\": {},",
+        json_string(&run_context.git_revision)
+    )?;
+    writeln!(
+        writer,
+        "    \"dirty\": {}",
+        json_string(&run_context.git_dirty)
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(
+        writer,
+        "  \"command_line\": {},",
+        json_string(&run_context.command_line)
+    )?;
+    writeln!(writer, "  \"environment\": {{")?;
+    writeln!(
+        writer,
+        "    \"volume_root\": {},",
+        json_string(&environment.volume_root)
+    )?;
+    writeln!(
+        writer,
+        "    \"file_system\": {},",
+        json_string(&environment.file_system)
+    )?;
+    writeln!(
+        writer,
+        "    \"drive_type\": {},",
+        json_string(&environment.drive_type)
+    )?;
+    writeln!(
+        writer,
+        "    \"shell_elevated\": {},",
+        json_string(&environment.shell_elevated)
+    )?;
+    writeln!(
+        writer,
+        "    \"windows_version\": {},",
+        json_string(&environment.windows_version)
+    )?;
+    writeln!(
+        writer,
+        "    \"logical_cpus\": {},",
+        json_string(&environment.logical_cpus)
+    )?;
+    writeln!(
+        writer,
+        "    \"physical_memory_bytes\": {}",
+        json_string(&environment.physical_memory_bytes)
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"artifacts\": [")?;
+    writeln!(writer, "    {},", json_string("scan.csv"))?;
+    writeln!(writer, "    {},", json_string("scan-summary.csv"))?;
+    writeln!(writer, "    {},", json_string("export.csv"))?;
+    writeln!(writer, "    {},", json_string("public-comparison.csv"))?;
+    writeln!(writer, "    {},", json_string("metadata.txt"))?;
+    writeln!(writer, "    {},", json_string("manifest.json"))?;
+    writeln!(writer, "    {}", json_string("report.md"))?;
+    writeln!(writer, "  ],")?;
+    writeln!(writer, "  \"scan_summary\": {{")?;
+    writeln!(writer, "    \"runs\": {},", scan_summary.runs)?;
+    writeln!(
+        writer,
+        "    \"scanners\": {},",
+        json_string(&scan_summary.scanners)
+    )?;
+    writeln!(
+        writer,
+        "    \"fallback_runs\": {},",
+        scan_summary.fallback_runs
+    )?;
+    writeln!(writer, "    \"entries_min\": {},", scan_summary.entries_min)?;
+    writeln!(writer, "    \"entries_max\": {},", scan_summary.entries_max)?;
+    writeln!(
+        writer,
+        "    \"elapsed_ms_min\": {},",
+        scan_summary.elapsed_ms_min
+    )?;
+    writeln!(
+        writer,
+        "    \"elapsed_ms_median\": {},",
+        scan_summary.elapsed_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"elapsed_ms_max\": {},",
+        scan_summary.elapsed_ms_max
+    )?;
+    writeln!(
+        writer,
+        "    \"first_result_ms_median\": {},",
+        scan_summary.first_result_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"peak_private_bytes_max\": {},",
+        scan_summary.peak_private_bytes_max
+    )?;
+    writeln!(
+        writer,
+        "    \"peak_private_bytes_per_million_entries_max\": {}",
+        scan_summary.peak_private_bytes_per_million_entries_max
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"export_summary\": {{")?;
+    writeln!(writer, "    \"runs\": {},", export_summary.runs)?;
+    writeln!(
+        writer,
+        "    \"scanners\": {},",
+        json_string(&export_summary.scanners)
+    )?;
+    writeln!(
+        writer,
+        "    \"fallback_runs\": {},",
+        export_summary.fallback_runs
+    )?;
+    writeln!(
+        writer,
+        "    \"export_elapsed_ms_median\": {},",
+        export_summary.export_elapsed_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"total_elapsed_ms_median\": {},",
+        export_summary.total_elapsed_ms_median
+    )?;
+    writeln!(
+        writer,
+        "    \"export_bytes_min\": {},",
+        export_summary.export_bytes_min
+    )?;
+    writeln!(
+        writer,
+        "    \"export_bytes_max\": {},",
+        export_summary.export_bytes_max
+    )?;
+    writeln!(
+        writer,
+        "    \"peak_private_bytes_max\": {}",
+        export_summary.peak_private_bytes_max
+    )?;
+    writeln!(writer, "  }},")?;
+    writeln!(writer, "  \"public_claims\": [")?;
+    for (idx, comparison) in comparisons.iter().enumerate() {
+        let suffix = if idx + 1 == comparisons.len() {
+            ""
+        } else {
+            ","
+        };
+        writeln!(writer, "    {{")?;
+        writeln!(
+            writer,
+            "      \"claim_id\": {},",
+            json_string(comparison.claim_id)
+        )?;
+        writeln!(
+            writer,
+            "      \"claim_source_url\": {},",
+            json_string(comparison.claim_source_url)
+        )?;
+        writeln!(
+            writer,
+            "      \"claim_scan_scope\": {},",
+            json_string(comparison.claim_scan_scope)
+        )?;
+        writeln!(
+            writer,
+            "      \"comparison_applicability\": {},",
+            json_string(comparison.comparison_applicability)
+        )?;
+        writeln!(
+            writer,
+            "      \"claim_elapsed_ms_min\": {},",
+            comparison.claim_elapsed_ms_min
+        )?;
+        writeln!(
+            writer,
+            "      \"claim_elapsed_ms_max\": {},",
+            comparison.claim_elapsed_ms_max
+        )?;
+        writeln!(
+            writer,
+            "      \"diskloom_elapsed_ms_median\": {},",
+            comparison.diskloom_elapsed_ms_median
+        )?;
+        writeln!(
+            writer,
+            "      \"diskloom_median_position\": {},",
+            json_string(comparison.diskloom_median_position)
+        )?;
+        writeln!(
+            writer,
+            "      \"validity\": {}",
+            json_string(comparison.validity)
+        )?;
+        writeln!(writer, "    }}{suffix}")?;
+    }
+    writeln!(writer, "  ]")?;
+    writeln!(writer, "}}")?;
+    Ok(())
+}
+
 fn unix_now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1771,6 +2066,26 @@ fn single_line_value(value: &str, fallback: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+fn json_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(output, "\\u{:04x}", ch as u32);
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+    output
 }
 
 fn shell_quote_arg(arg: &str) -> String {
@@ -2114,11 +2429,11 @@ mod tests {
     use super::{
         Args, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement, ExportSummary,
         MeasurementSummary, PublicClaimId, ScanMeasurement, SuiteOptions, SuiteReport,
-        SuiteRunContext, compare_summary_to_claim, parse_measurements, per_million, public_claim,
-        ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
+        SuiteRunContext, compare_summary_to_claim, json_string, parse_measurements, per_million,
+        public_claim, ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
         single_line_value, summarize_export_measurements, summarize_rows,
         write_export_measurements, write_measurements, write_public_comparisons,
-        write_suite_metadata, write_suite_report, write_summary,
+        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -2665,6 +2980,80 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
     }
 
     #[test]
+    fn write_suite_manifest_should_emit_json_bundle_summary() {
+        let options = SuiteOptions {
+            path: std::path::PathBuf::from("."),
+            output_dir: std::path::PathBuf::from("target/bench-suite"),
+            dataset_label: "repo-smoke".to_owned(),
+            cache_state: "warm".to_owned(),
+            iterations: 3,
+            sample_ms: 10,
+            progress_every: 1024,
+            scanner: super::ScannerMode::Fallback,
+            include_directories: true,
+            claims: Vec::new(),
+        };
+        let scan_summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 1_046,
+            elapsed_ms_max: 1_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let export_summary = ExportSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            export_bytes_min: 100,
+            export_bytes_max: 120,
+            scan_elapsed_ms_median: 10,
+            export_elapsed_ms_min: 3,
+            export_elapsed_ms_median: 5,
+            export_elapsed_ms_max: 7,
+            total_elapsed_ms_median: 15,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let comparisons = [compare_summary_to_claim(
+            &scan_summary,
+            public_claim(PublicClaimId::WizTreeSsd460Gb),
+        )];
+        let run_context = sample_run_context();
+        let environment = sample_environment();
+        let mut output = Vec::new();
+
+        write_suite_manifest(
+            &mut output,
+            &options,
+            &run_context,
+            &environment,
+            &scan_summary,
+            &export_summary,
+            &comparisons,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("\"schema\": \"diskloom.benchmark-suite.v1\""));
+        assert!(output.contains("\"dataset_label\": \"repo-smoke\""));
+        assert!(output.contains("\"cache_state\": \"warm\""));
+        assert!(output.contains("\"manifest.json\""));
+        assert!(output.contains("\"claim_id\": \"wiztree-ssd-460gb\""));
+    }
+
+    #[test]
     fn shell_quote_arg_should_quote_spaces_and_quotes() {
         assert_eq!(shell_quote_arg("simple"), "simple");
         assert_eq!(shell_quote_arg("two words"), "\"two words\"");
@@ -2678,6 +3067,11 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             "warm  second run"
         );
         assert_eq!(single_line_value("\n\t", "unknown"), "unknown");
+    }
+
+    #[test]
+    fn json_string_should_escape_control_characters() {
+        assert_eq!(json_string("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
     }
 
     #[cfg(windows)]
