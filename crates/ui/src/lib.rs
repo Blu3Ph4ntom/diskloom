@@ -20,8 +20,8 @@ use diskloom_query::{
 };
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    is_process_elevated, open_in_explorer, recycle_delete, relaunch_current_process_elevated,
-    rename_path, show_properties,
+    VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
+    relaunch_current_process_elevated, rename_path, show_properties,
 };
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
@@ -32,6 +32,7 @@ const DUPLICATE_PATH_LIMIT: usize = 20;
 #[derive(Debug)]
 pub struct DiskLoomApp {
     path: String,
+    volumes: Vec<VolumeShortcut>,
     scanner_mode: UiScannerMode,
     filters: FilterInputs,
     view_cache: Option<ViewCache>,
@@ -46,6 +47,13 @@ pub struct DiskLoomApp {
     receiver: Option<Receiver<ScanMessage>>,
     scan_cancel: Option<Arc<AtomicBool>>,
     start_on_launch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VolumeShortcut {
+    root: String,
+    label: String,
+    is_ntfs: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,8 +223,11 @@ struct ActionStatus {
 
 impl Default for DiskLoomApp {
     fn default() -> Self {
+        let volumes = discover_volume_shortcuts();
+        let system_drive = std::env::var("SystemDrive").ok();
         Self {
-            path: ".".to_owned(),
+            path: default_scan_path_from(system_drive.as_deref(), &volumes),
+            volumes,
             scanner_mode: UiScannerMode::Auto,
             filters: FilterInputs {
                 include_directories: true,
@@ -602,6 +613,25 @@ impl DiskLoomApp {
                 UiScannerMode::Fallback.label(),
             );
         });
+
+        if !self.volumes.is_empty() {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Drives");
+                for volume in &self.volumes {
+                    if ui
+                        .button(&volume.label)
+                        .on_hover_text(&volume.root)
+                        .clicked()
+                    {
+                        self.path = volume.root.clone();
+                    }
+                }
+                if ui.button("Refresh").clicked() {
+                    self.volumes = discover_volume_shortcuts();
+                }
+            });
+        }
 
         ui.add_space(8.0);
         let scanning = matches!(self.state, UiState::Scanning(_));
@@ -1187,6 +1217,57 @@ fn format_count(value: u64) -> String {
         output.push(ch);
     }
     output.chars().rev().collect()
+}
+
+fn discover_volume_shortcuts() -> Vec<VolumeShortcut> {
+    discover_volumes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|volume| {
+            let is_ntfs = volume.kind == VolumeKind::Ntfs;
+            let drive = volume.root.trim_end_matches('\\');
+            let label = match volume.kind {
+                VolumeKind::Ntfs => format!("{drive} NTFS"),
+                VolumeKind::Other(name) if !name.is_empty() => format!("{drive} {name}"),
+                VolumeKind::Other(_) | VolumeKind::Unknown => drive.to_owned(),
+            };
+            VolumeShortcut {
+                root: volume.root,
+                label,
+                is_ntfs,
+            }
+        })
+        .collect()
+}
+
+fn default_scan_path_from(system_drive: Option<&str>, volumes: &[VolumeShortcut]) -> String {
+    if let Some(root) = system_drive.and_then(normalize_drive_root) {
+        return volumes
+            .iter()
+            .find(|volume| volume.root.eq_ignore_ascii_case(&root))
+            .map(|volume| volume.root.clone())
+            .unwrap_or(root);
+    }
+
+    if let Some(volume) = volumes.iter().find(|volume| volume.is_ntfs) {
+        return volume.root.clone();
+    }
+
+    volumes
+        .first()
+        .map(|volume| volume.root.clone())
+        .unwrap_or_else(|| ".".to_owned())
+}
+
+fn normalize_drive_root(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches(['\\', '/']);
+    let mut chars = trimmed.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next() != Some(':') || chars.next().is_some() {
+        return None;
+    }
+
+    Some(format!("{}:\\", letter.to_ascii_uppercase()))
 }
 
 #[derive(Debug)]
@@ -1805,8 +1886,9 @@ mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
     use super::{
-        FilterInputs, duplicate_groups_from_graph, export_graph_to_csv, filtered_rows_from_graph,
-        format_bytes, format_count, parse_optional_u64, parse_optional_unix_seconds,
+        FilterInputs, VolumeShortcut, default_scan_path_from, duplicate_groups_from_graph,
+        export_graph_to_csv, filtered_rows_from_graph, format_bytes, format_count,
+        normalize_drive_root, parse_optional_u64, parse_optional_unix_seconds,
         tree_rows_from_graph, ui_scan_needs_elevation,
     };
 
@@ -1888,6 +1970,32 @@ mod tests {
     #[test]
     fn format_count_should_group_thousands() {
         assert_eq!(format_count(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn normalize_drive_root_should_accept_drive_roots() {
+        assert_eq!(normalize_drive_root("c:").as_deref(), Some("C:\\"));
+        assert_eq!(normalize_drive_root("d:\\").as_deref(), Some("D:\\"));
+        assert_eq!(normalize_drive_root("e:/").as_deref(), Some("E:\\"));
+        assert_eq!(normalize_drive_root("c:\\Users"), None);
+    }
+
+    #[test]
+    fn default_scan_path_should_prefer_system_drive() {
+        let volumes = [
+            volume("D:\\", false),
+            volume("C:\\", true),
+            volume("E:\\", true),
+        ];
+
+        assert_eq!(default_scan_path_from(Some("c:"), &volumes), "C:\\");
+    }
+
+    #[test]
+    fn default_scan_path_should_fallback_to_first_ntfs_volume() {
+        let volumes = [volume("D:\\", false), volume("E:\\", true)];
+
+        assert_eq!(default_scan_path_from(None, &volumes), "E:\\");
     }
 
     #[test]
@@ -2020,5 +2128,13 @@ mod tests {
         let rows = tree_rows_from_graph(&graph, 2);
 
         assert_eq!(rows.len(), 2);
+    }
+
+    fn volume(root: &str, is_ntfs: bool) -> VolumeShortcut {
+        VolumeShortcut {
+            root: root.to_owned(),
+            label: root.to_owned(),
+            is_ntfs,
+        }
     }
 }
