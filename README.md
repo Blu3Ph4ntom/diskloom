@@ -115,7 +115,7 @@ Launch the GUI shell:
 cargo run
 ```
 
-The root launcher builds release binaries if needed and then starts the GUI. Use `cargo run -- cli scan . --scanner fallback --limit 25` for the CLI, or `cargo run -- bench --help` for the benchmark harness.
+The root launcher builds release binaries if needed and then starts the GUI. Use `cargo run -- scan . --scanner fallback --limit 25` for the CLI, `cargo run -- cli scan . --scanner fallback --limit 25` for explicit CLI routing, or `cargo run -- bench --help` for the benchmark harness.
 
 Run the benchmark harness:
 
@@ -147,7 +147,7 @@ Build a portable Windows zip:
 
 The portable package includes:
 
-- `diskloom.exe`: product launcher. Double-click starts the GUI; `diskloom.exe cli ...` runs CLI commands.
+- `diskloom.exe`: product launcher. Double-click starts the GUI; `diskloom.exe scan ...` or `diskloom.exe cli ...` runs CLI commands.
 - `diskloom-cli.exe`: direct CLI entry for scripts.
 - `diskloom-ui.exe`: direct GUI entry.
 - `diskloom-bench.exe`: benchmark harness.

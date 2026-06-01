@@ -17,7 +17,13 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let (binary, args) = launch_target(env::args_os().skip(1));
+    let (binary, args) = match launch_target(env::args_os().skip(1)) {
+        LaunchTarget::Help => {
+            print_help();
+            return Ok(ExitCode::SUCCESS);
+        }
+        LaunchTarget::Run { binary, args } => (binary, args),
+    };
     let exe = ensure_release_binary(&repo_root, binary)?;
     let status = Command::new(&exe)
         .args(args)
@@ -27,27 +33,62 @@ fn run() -> Result<ExitCode, String> {
     Ok(exit_code_from_status(status.code()))
 }
 
-fn launch_target(args: impl IntoIterator<Item = OsString>) -> (&'static str, Vec<OsString>) {
+#[derive(Debug, PartialEq, Eq)]
+enum LaunchTarget {
+    Run {
+        binary: &'static str,
+        args: Vec<OsString>,
+    },
+    Help,
+}
+
+fn launch_target(args: impl IntoIterator<Item = OsString>) -> LaunchTarget {
     let mut args = args.into_iter().collect::<Vec<_>>();
     let Some(first) = args.first().and_then(|arg| arg.to_str()) else {
-        return ("diskloom-ui", args);
+        return LaunchTarget::Run {
+            binary: "diskloom-ui",
+            args,
+        };
     };
 
     match first {
+        "-h" | "--help" | "help" => LaunchTarget::Help,
         "ui" | "--ui" => {
             args.remove(0);
-            ("diskloom-ui", args)
+            LaunchTarget::Run {
+                binary: "diskloom-ui",
+                args,
+            }
         }
         "cli" | "--cli" => {
             args.remove(0);
-            ("diskloom-cli", args)
+            LaunchTarget::Run {
+                binary: "diskloom-cli",
+                args,
+            }
         }
         "bench" | "--bench" => {
             args.remove(0);
-            ("diskloom-bench", args)
+            LaunchTarget::Run {
+                binary: "diskloom-bench",
+                args,
+            }
         }
-        _ => ("diskloom-ui", args),
+        "scan" | "volumes" | "ntfs-probe" => LaunchTarget::Run {
+            binary: "diskloom-cli",
+            args,
+        },
+        _ => LaunchTarget::Run {
+            binary: "diskloom-ui",
+            args,
+        },
     }
+}
+
+fn print_help() {
+    println!(
+        "DiskLoom\n\nUsage:\n  diskloom.exe                 Launch GUI\n  diskloom.exe ui [args]       Launch GUI\n  diskloom.exe scan <path> ... Run CLI scan\n  diskloom.exe volumes         List Windows volumes\n  diskloom.exe ntfs-probe <v>  Probe NTFS volume\n  diskloom.exe cli <command>   Run CLI command\n  diskloom.exe bench <command> Run benchmark command"
+    );
 }
 
 fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, String> {
@@ -101,30 +142,58 @@ fn exit_code_from_status(code: Option<i32>) -> ExitCode {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{exit_code_from_status, launch_target};
+    use super::{LaunchTarget, exit_code_from_status, launch_target};
 
     #[test]
     fn launch_target_should_default_to_gui() {
-        let (binary, args) = launch_target(Vec::<OsString>::new());
-
-        assert_eq!(binary, "diskloom-ui");
-        assert!(args.is_empty());
+        assert_eq!(
+            launch_target(Vec::<OsString>::new()),
+            LaunchTarget::Run {
+                binary: "diskloom-ui",
+                args: Vec::new()
+            }
+        );
     }
 
     #[test]
     fn launch_target_should_route_cli_prefix() {
-        let (binary, args) = launch_target([OsString::from("cli"), OsString::from("scan")]);
+        assert_eq!(
+            launch_target([OsString::from("cli"), OsString::from("scan")]),
+            LaunchTarget::Run {
+                binary: "diskloom-cli",
+                args: vec![OsString::from("scan")]
+            }
+        );
+    }
 
-        assert_eq!(binary, "diskloom-cli");
-        assert_eq!(args, [OsString::from("scan")]);
+    #[test]
+    fn launch_target_should_route_cli_subcommands() {
+        assert_eq!(
+            launch_target([OsString::from("scan"), OsString::from(".")]),
+            LaunchTarget::Run {
+                binary: "diskloom-cli",
+                args: vec![OsString::from("scan"), OsString::from(".")]
+            }
+        );
     }
 
     #[test]
     fn launch_target_should_pass_unknown_args_to_gui() {
-        let (binary, args) = launch_target([OsString::from("--path"), OsString::from("C:\\")]);
+        assert_eq!(
+            launch_target([OsString::from("--path"), OsString::from("C:\\")]),
+            LaunchTarget::Run {
+                binary: "diskloom-ui",
+                args: vec![OsString::from("--path"), OsString::from("C:\\")]
+            }
+        );
+    }
 
-        assert_eq!(binary, "diskloom-ui");
-        assert_eq!(args, [OsString::from("--path"), OsString::from("C:\\")]);
+    #[test]
+    fn launch_target_should_handle_help_without_gui() {
+        assert_eq!(
+            launch_target([OsString::from("--help")]),
+            LaunchTarget::Help
+        );
     }
 
     #[test]
