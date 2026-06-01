@@ -267,6 +267,8 @@ struct BenchmarkEnvironment {
     drive_type: String,
     shell_elevated: String,
     windows_version: String,
+    logical_cpus: String,
+    physical_memory_bytes: String,
 }
 
 #[derive(Debug)]
@@ -1455,6 +1457,16 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         "- Windows version: `{}`",
         report.environment.windows_version
     )?;
+    writeln!(
+        writer,
+        "- Logical CPUs: `{}`",
+        report.environment.logical_cpus
+    )?;
+    writeln!(
+        writer,
+        "- Physical memory bytes: `{}`",
+        report.environment.physical_memory_bytes
+    )?;
     writeln!(writer)?;
     writeln!(writer, "## DiskLoom Scan")?;
     writeln!(writer)?;
@@ -1565,6 +1577,12 @@ fn write_suite_metadata(
         "detected_windows_version={}",
         environment.windows_version
     )?;
+    writeln!(writer, "detected_logical_cpus={}", environment.logical_cpus)?;
+    writeln!(
+        writer,
+        "detected_physical_memory_bytes={}",
+        environment.physical_memory_bytes
+    )?;
     writeln!(writer, "path={}", options.path.display())?;
     writeln!(writer, "output_dir={}", options.output_dir.display())?;
     writeln!(writer, "scanner={}", scanner_label(options.scanner))?;
@@ -1604,6 +1622,12 @@ fn unix_now_seconds() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+fn logical_cpus() -> String {
+    thread::available_parallelism()
+        .map(|cpus| cpus.get().to_string())
+        .unwrap_or_else(|error| format!("unknown({error})"))
+}
+
 #[cfg(windows)]
 fn detect_benchmark_environment(path: &Path) -> BenchmarkEnvironment {
     let volume_root = windows_volume_root(path).unwrap_or_else(|| "unknown".to_owned());
@@ -1612,6 +1636,8 @@ fn detect_benchmark_environment(path: &Path) -> BenchmarkEnvironment {
         drive_type: windows_drive_type(&volume_root),
         shell_elevated: windows_shell_elevated(),
         windows_version: windows_version(),
+        logical_cpus: logical_cpus(),
+        physical_memory_bytes: windows_physical_memory_bytes(),
         volume_root,
     }
 }
@@ -1624,6 +1650,8 @@ fn detect_benchmark_environment(_: &Path) -> BenchmarkEnvironment {
         drive_type: "unsupported".to_owned(),
         shell_elevated: "unsupported".to_owned(),
         windows_version: "unsupported".to_owned(),
+        logical_cpus: logical_cpus(),
+        physical_memory_bytes: "unsupported".to_owned(),
     }
 }
 
@@ -1744,6 +1772,24 @@ fn windows_shell_elevated() -> String {
 
     match result {
         Ok(()) => bool_label(elevation.TokenIsElevated != 0).to_owned(),
+        Err(error) => format!("unknown({error})"),
+    }
+}
+
+#[cfg(windows)]
+fn windows_physical_memory_bytes() -> String {
+    use std::mem::size_of;
+
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    let mut status = MEMORYSTATUSEX {
+        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+        ..MEMORYSTATUSEX::default()
+    };
+
+    // SAFETY: `status` is initialized with its documented size and points to writable memory.
+    match unsafe { GlobalMemoryStatusEx(&mut status) } {
+        Ok(()) => status.ullTotalPhys.to_string(),
         Err(error) => format!("unknown({error})"),
     }
 }
@@ -2229,6 +2275,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         assert!(output.contains("publication_checklist:"));
         assert!(output.contains("detected_filesystem=NTFS"));
+        assert!(output.contains("detected_logical_cpus=8"));
+        assert!(output.contains("detected_physical_memory_bytes=17179869184"));
         assert!(output.contains("same_machine_competitor_runs="));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
     }
@@ -2281,6 +2329,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             drive_type: "fixed".to_owned(),
             shell_elevated: "false".to_owned(),
             windows_version: "10.0.0".to_owned(),
+            logical_cpus: "8".to_owned(),
+            physical_memory_bytes: "17179869184".to_owned(),
         }
     }
 }
