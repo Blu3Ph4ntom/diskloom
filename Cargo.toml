@@ -6,7 +6,11 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-default-run = "diskloom-launcher"
+default-run = "diskloom"
+
+[[bin]]
+name = "diskloom"
+path = "src/main.rs"
 
 [workspace]
 members = [

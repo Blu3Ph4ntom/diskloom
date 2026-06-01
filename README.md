@@ -35,6 +35,7 @@ The project is Windows-first for v1. Future macOS and Linux support may arrive t
 Early development. Implemented pieces include:
 
 - Rust workspace with separate core, scan, query, duplicate, export, Windows, NTFS, CLI, UI, and benchmark crates.
+- Root launcher so `diskloom.exe` opens the GUI by default and routes `diskloom.exe cli ...` to the CLI.
 - Compact graph with string interning, integer IDs, parent IDs, aggregation, and lazy path reconstruction.
 - Non-admin fallback scanner with Windows allocated-size reporting.
 - CLI scan/export mode.
@@ -143,6 +144,13 @@ Build a portable Windows zip:
 ```powershell
 .\scripts\package-portable.ps1
 ```
+
+The portable package includes:
+
+- `diskloom.exe`: product launcher. Double-click starts the GUI; `diskloom.exe cli ...` runs CLI commands.
+- `diskloom-cli.exe`: direct CLI entry for scripts.
+- `diskloom-ui.exe`: direct GUI entry.
+- `diskloom-bench.exe`: benchmark harness.
 
 ## License
 

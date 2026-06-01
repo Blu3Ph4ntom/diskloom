@@ -31,7 +31,7 @@ Assert-UnderPath -Child $packageDir -Parent $outputRootPath
 Push-Location $repoRoot
 try {
     if (-not $SkipBuild) {
-        cargo build --release --locked -p diskloom-cli -p diskloom-ui -p diskloom-bench
+        cargo build --release --locked -p diskloom-launcher -p diskloom-cli -p diskloom-ui -p diskloom-bench
     }
 
     if (Test-Path -LiteralPath $packageDir) {
@@ -40,6 +40,7 @@ try {
     New-Item -ItemType Directory -Path $packageDir | Out-Null
 
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom.exe") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom-cli.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom-ui.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom-bench.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir

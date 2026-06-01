@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "diskloom"
+name = "diskloom-cli"
 path = "src/main.rs"
 
 [dependencies]

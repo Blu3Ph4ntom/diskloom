@@ -40,7 +40,7 @@ fn launch_target(args: impl IntoIterator<Item = OsString>) -> (&'static str, Vec
         }
         "cli" | "--cli" => {
             args.remove(0);
-            ("diskloom", args)
+            ("diskloom-cli", args)
         }
         "bench" | "--bench" => {
             args.remove(0);
@@ -67,6 +67,8 @@ fn ensure_release_binary(repo_root: &Path, binary: &str) -> Result<PathBuf, Stri
             "build",
             "--release",
             "--locked",
+            "-p",
+            "diskloom-launcher",
             "-p",
             "diskloom-cli",
             "-p",
@@ -113,7 +115,7 @@ mod tests {
     fn launch_target_should_route_cli_prefix() {
         let (binary, args) = launch_target([OsString::from("cli"), OsString::from("scan")]);
 
-        assert_eq!(binary, "diskloom");
+        assert_eq!(binary, "diskloom-cli");
         assert_eq!(args, [OsString::from("scan")]);
     }
 
