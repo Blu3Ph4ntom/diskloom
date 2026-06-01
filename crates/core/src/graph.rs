@@ -106,12 +106,10 @@ impl FileGraph {
         })
     }
 
-    #[must_use]
     pub fn ids(&self) -> impl Iterator<Item = EntryId> + '_ {
         (0..self.len()).map(|idx| EntryId(idx as u32))
     }
 
-    #[must_use]
     pub fn children_of(&self, parent: EntryId) -> impl Iterator<Item = EntryId> + '_ {
         self.parents
             .iter()

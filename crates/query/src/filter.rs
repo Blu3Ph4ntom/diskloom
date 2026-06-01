@@ -154,10 +154,10 @@ impl CompiledFilter {
             return false;
         };
 
-        if let Some(matcher) = &self.filter.name {
-            if !matcher.matches(name) {
-                return false;
-            }
+        if let Some(matcher) = &self.filter.name
+            && !matcher.matches(name)
+        {
+            return false;
         }
 
         if let Some(extension) = &self.filter.extension
@@ -178,7 +178,6 @@ impl CompiledFilter {
         true
     }
 
-    #[must_use]
     pub fn matching_ids<'a>(&'a self, graph: &'a FileGraph) -> impl Iterator<Item = EntryId> + 'a {
         graph.ids().filter(|id| self.matches(graph, *id))
     }

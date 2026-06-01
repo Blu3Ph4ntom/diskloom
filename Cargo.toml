@@ -44,7 +44,7 @@ diskloom-ui = { path = "crates/ui" }
 diskloom-windows = { path = "crates/windows" }
 
 [workspace.lints.rust]
-future_incompatible = "warn"
+future_incompatible = { level = "warn", priority = -1 }
 nonstandard_style = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 
