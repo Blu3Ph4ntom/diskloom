@@ -102,7 +102,7 @@ cargo run -p diskloom-ui
 Run the benchmark harness:
 
 ```powershell
-cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback > target/bench.csv
+cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --progress-every 1024 --scanner fallback > target/bench.csv
 cargo run -p diskloom-bench -- export . --iterations 5 --sample-ms 10 --scanner fallback > target/export-bench.csv
 cargo run -p diskloom-bench -- summarize target\bench.csv
 cargo run -p diskloom-bench -- compare-public target\bench.csv --claim wiztree-ssd-460gb
