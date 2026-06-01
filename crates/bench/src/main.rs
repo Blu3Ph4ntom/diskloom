@@ -94,6 +94,8 @@ enum ScannerMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PublicClaimId {
+    #[value(name = "wiztree-ssd-500gb-typical")]
+    WizTreeSsd500GbTypical,
     #[value(name = "wiztree-hdd-25gb")]
     WizTreeHdd25Gb,
     #[value(name = "wiztree-ssd-460gb")]
@@ -241,7 +243,8 @@ struct PublicClaim {
     id: &'static str,
     source_url: &'static str,
     context: &'static str,
-    elapsed_ms: u128,
+    elapsed_ms_min: u128,
+    elapsed_ms_max: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,7 +252,8 @@ struct PublicComparison {
     claim_id: &'static str,
     claim_source_url: &'static str,
     claim_context: &'static str,
-    claim_elapsed_ms: u128,
+    claim_elapsed_ms_min: u128,
+    claim_elapsed_ms_max: u128,
     diskloom_runs: usize,
     diskloom_scanners: String,
     diskloom_fallback_runs: usize,
@@ -257,7 +261,8 @@ struct PublicComparison {
     diskloom_elapsed_ms_median: u128,
     diskloom_elapsed_ms_max: u128,
     diskloom_peak_private_bytes_max: u64,
-    diskloom_vs_claim_ratio: String,
+    diskloom_vs_claim_min_ratio: String,
+    diskloom_vs_claim_max_ratio: String,
     validity: &'static str,
 }
 
@@ -1028,8 +1033,9 @@ fn selected_claims(claims: &[PublicClaimId]) -> Vec<PublicClaimId> {
     }
 }
 
-fn all_public_claims() -> [PublicClaimId; 2] {
+fn all_public_claims() -> [PublicClaimId; 3] {
     [
+        PublicClaimId::WizTreeSsd500GbTypical,
         PublicClaimId::WizTreeSsd460Gb,
         PublicClaimId::WizTreeHdd25Gb,
     ]
@@ -1346,17 +1352,26 @@ fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Resul
 
 fn public_claim(id: PublicClaimId) -> PublicClaim {
     match id {
+        PublicClaimId::WizTreeSsd500GbTypical => PublicClaim {
+            id: "wiztree-ssd-500gb-typical",
+            source_url: "https://diskanalyzer.com/",
+            context: "500GB_NTFS_SSD_typical_current_public_homepage_claim",
+            elapsed_ms_min: 3_000,
+            elapsed_ms_max: 8_000,
+        },
         PublicClaimId::WizTreeHdd25Gb => PublicClaim {
             id: "wiztree-hdd-25gb",
             source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
             context: "25GB_NTFS_HDD_Acer_laptop_Windows_XP_vendor_test",
-            elapsed_ms: 4_340,
+            elapsed_ms_min: 4_340,
+            elapsed_ms_max: 4_340,
         },
         PublicClaimId::WizTreeSsd460Gb => PublicClaim {
             id: "wiztree-ssd-460gb",
             source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
             context: "460GB_NTFS_SSD_ASUS_laptop_Windows_10_vendor_test",
-            elapsed_ms: 5_230,
+            elapsed_ms_min: 5_230,
+            elapsed_ms_max: 5_230,
         },
     }
 }
@@ -1366,7 +1381,8 @@ fn compare_summary_to_claim(summary: &MeasurementSummary, claim: PublicClaim) ->
         claim_id: claim.id,
         claim_source_url: claim.source_url,
         claim_context: claim.context,
-        claim_elapsed_ms: claim.elapsed_ms,
+        claim_elapsed_ms_min: claim.elapsed_ms_min,
+        claim_elapsed_ms_max: claim.elapsed_ms_max,
         diskloom_runs: summary.runs,
         diskloom_scanners: summary.scanners.clone(),
         diskloom_fallback_runs: summary.fallback_runs,
@@ -1374,7 +1390,8 @@ fn compare_summary_to_claim(summary: &MeasurementSummary, claim: PublicClaim) ->
         diskloom_elapsed_ms_median: summary.elapsed_ms_median,
         diskloom_elapsed_ms_max: summary.elapsed_ms_max,
         diskloom_peak_private_bytes_max: summary.peak_private_bytes_max,
-        diskloom_vs_claim_ratio: ratio_decimal(summary.elapsed_ms_median, claim.elapsed_ms),
+        diskloom_vs_claim_min_ratio: ratio_decimal(summary.elapsed_ms_median, claim.elapsed_ms_min),
+        diskloom_vs_claim_max_ratio: ratio_decimal(summary.elapsed_ms_median, claim.elapsed_ms_max),
         validity: "reference_only_vendor_claim_not_same_machine",
     }
 }
@@ -1397,16 +1414,17 @@ fn write_public_comparisons(
 ) -> Result<()> {
     writeln!(
         writer,
-        "claim_id,claim_source_url,claim_context,claim_elapsed_ms,diskloom_runs,diskloom_scanners,diskloom_fallback_runs,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_peak_private_bytes_max,diskloom_vs_claim_ratio,validity"
+        "claim_id,claim_source_url,claim_context,claim_elapsed_ms_min,claim_elapsed_ms_max,diskloom_runs,diskloom_scanners,diskloom_fallback_runs,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_peak_private_bytes_max,diskloom_vs_claim_min_ratio,diskloom_vs_claim_max_ratio,validity"
     )?;
     for comparison in comparisons {
         writeln!(
             writer,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             comparison.claim_id,
             comparison.claim_source_url,
             comparison.claim_context,
-            comparison.claim_elapsed_ms,
+            comparison.claim_elapsed_ms_min,
+            comparison.claim_elapsed_ms_max,
             comparison.diskloom_runs,
             comparison.diskloom_scanners,
             comparison.diskloom_fallback_runs,
@@ -1414,7 +1432,8 @@ fn write_public_comparisons(
             comparison.diskloom_elapsed_ms_median,
             comparison.diskloom_elapsed_ms_max,
             comparison.diskloom_peak_private_bytes_max,
-            comparison.diskloom_vs_claim_ratio,
+            comparison.diskloom_vs_claim_min_ratio,
+            comparison.diskloom_vs_claim_max_ratio,
             comparison.validity
         )?;
     }
@@ -1546,18 +1565,20 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     writeln!(writer)?;
     writeln!(
         writer,
-        "| claim | source | claim ms | DiskLoom median ms | ratio | validity |"
+        "| claim | source | claim ms range | DiskLoom median ms | ratio vs min | ratio vs max | validity |"
     )?;
-    writeln!(writer, "| --- | --- | --- | --- | --- | --- |")?;
+    writeln!(writer, "| --- | --- | --- | --- | --- | --- | --- |")?;
     for comparison in report.comparisons {
         writeln!(
             writer,
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {}-{} | {} | {} | {} | {} |",
             comparison.claim_id,
             comparison.claim_source_url,
-            comparison.claim_elapsed_ms,
+            comparison.claim_elapsed_ms_min,
+            comparison.claim_elapsed_ms_max,
             comparison.diskloom_elapsed_ms_median,
-            comparison.diskloom_vs_claim_ratio,
+            comparison.diskloom_vs_claim_min_ratio,
+            comparison.diskloom_vs_claim_max_ratio,
             comparison.validity
         )?;
     }
@@ -2183,11 +2204,42 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let comparison =
             compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
 
-        assert_eq!(comparison.diskloom_vs_claim_ratio, "0.200");
+        assert_eq!(comparison.diskloom_vs_claim_min_ratio, "0.200");
+        assert_eq!(comparison.diskloom_vs_claim_max_ratio, "0.200");
         assert_eq!(
             comparison.validity,
             "reference_only_vendor_claim_not_same_machine"
         );
+    }
+
+    #[test]
+    fn compare_summary_to_claim_should_support_public_ranges() {
+        let summary = MeasurementSummary {
+            runs: 3,
+            scanners: "ntfs".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 5_900,
+            elapsed_ms_median: 6_000,
+            elapsed_ms_max: 6_100,
+            first_result_ms_min: 10,
+            first_result_ms_median: 20,
+            first_result_ms_max: 30,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+
+        let comparison = compare_summary_to_claim(
+            &summary,
+            public_claim(PublicClaimId::WizTreeSsd500GbTypical),
+        );
+
+        assert_eq!(comparison.claim_elapsed_ms_min, 3_000);
+        assert_eq!(comparison.claim_elapsed_ms_max, 8_000);
+        assert_eq!(comparison.diskloom_vs_claim_min_ratio, "2.000");
+        assert_eq!(comparison.diskloom_vs_claim_max_ratio, "0.750");
     }
 
     #[test]
@@ -2215,6 +2267,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         write_public_comparison(&mut output, &comparison).unwrap();
         let output = String::from_utf8(output).unwrap();
 
+        assert!(output.contains("claim_elapsed_ms_min,claim_elapsed_ms_max"));
+        assert!(output.contains("diskloom_vs_claim_min_ratio,diskloom_vs_claim_max_ratio"));
         assert!(output.contains("wiztree-ssd-460gb"));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
     }
@@ -2238,6 +2292,10 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             peak_private_bytes_per_million_entries_max: 31_666_666,
         };
         let comparisons = [
+            compare_summary_to_claim(
+                &summary,
+                public_claim(PublicClaimId::WizTreeSsd500GbTypical),
+            ),
             compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb)),
             compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeHdd25Gb)),
         ];
@@ -2248,6 +2306,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         assert!(output.contains("wiztree-ssd-460gb"));
         assert!(output.contains("wiztree-hdd-25gb"));
+        assert!(output.contains("wiztree-ssd-500gb-typical"));
     }
 
     #[test]
@@ -2257,6 +2316,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert_eq!(
             claims,
             vec![
+                PublicClaimId::WizTreeSsd500GbTypical,
                 PublicClaimId::WizTreeSsd460Gb,
                 PublicClaimId::WizTreeHdd25Gb
             ]
@@ -2328,6 +2388,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
         assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
+        assert!(output.contains("ratio vs min"));
+        assert!(output.contains("ratio vs max"));
         assert!(output.contains("## Environment"));
         assert!(output.contains("Git revision"));
     }
@@ -2353,7 +2415,11 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             &options,
             &run_context,
             &environment,
-            &["wiztree-ssd-460gb", "wiztree-hdd-25gb"],
+            &[
+                "wiztree-ssd-500gb-typical",
+                "wiztree-ssd-460gb",
+                "wiztree-hdd-25gb",
+            ],
         )
         .unwrap();
         let output = String::from_utf8(output).unwrap();
@@ -2365,6 +2431,9 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("detected_filesystem=NTFS"));
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
+        assert!(output.contains(
+            "public_claims=wiztree-ssd-500gb-typical,wiztree-ssd-460gb,wiztree-hdd-25gb"
+        ));
         assert!(output.contains("same_machine_competitor_runs="));
         assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
     }
