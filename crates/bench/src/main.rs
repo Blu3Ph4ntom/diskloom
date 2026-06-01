@@ -45,6 +45,11 @@ enum Command {
     Summarize {
         csv: PathBuf,
     },
+    ComparePublic {
+        csv: PathBuf,
+        #[arg(long, value_enum)]
+        claim: PublicClaimId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -52,6 +57,14 @@ enum ScannerMode {
     Auto,
     Fallback,
     Ntfs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PublicClaimId {
+    #[value(name = "wiztree-hdd-25gb")]
+    WizTreeHdd25Gb,
+    #[value(name = "wiztree-ssd-460gb")]
+    WizTreeSsd460Gb,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +140,31 @@ struct MeasurementSummary {
     peak_private_bytes_per_million_entries_max: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PublicClaim {
+    id: &'static str,
+    source_url: &'static str,
+    context: &'static str,
+    elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublicComparison {
+    claim_id: &'static str,
+    claim_source_url: &'static str,
+    claim_context: &'static str,
+    claim_elapsed_ms: u128,
+    diskloom_runs: usize,
+    diskloom_scanners: String,
+    diskloom_fallback_runs: usize,
+    diskloom_elapsed_ms_min: u128,
+    diskloom_elapsed_ms_median: u128,
+    diskloom_elapsed_ms_max: u128,
+    diskloom_peak_private_bytes_max: u64,
+    diskloom_vs_claim_ratio: String,
+    validity: &'static str,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -144,6 +182,7 @@ fn main() -> Result<()> {
             bytes_per_file,
         } => create_dataset(root, dirs, files_per_dir, bytes_per_file),
         Command::Summarize { csv } => summarize_measurements(csv),
+        Command::ComparePublic { csv, claim } => compare_public_claim(csv, claim),
     }
 }
 
@@ -395,6 +434,16 @@ fn summarize_measurements(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn compare_public_claim(path: PathBuf, claim_id: PublicClaimId) -> Result<()> {
+    let input =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let rows = parse_measurements(&input)?;
+    let summary = summarize_rows(&rows)?;
+    let comparison = compare_summary_to_claim(&summary, public_claim(claim_id));
+    write_public_comparison(&mut io::stdout().lock(), &comparison)?;
+    Ok(())
+}
+
 fn write_measurements(writer: &mut impl Write, measurements: &[ScanMeasurement]) -> Result<()> {
     writeln!(
         writer,
@@ -568,11 +617,80 @@ fn write_summary(writer: &mut impl Write, summary: &MeasurementSummary) -> Resul
     Ok(())
 }
 
+fn public_claim(id: PublicClaimId) -> PublicClaim {
+    match id {
+        PublicClaimId::WizTreeHdd25Gb => PublicClaim {
+            id: "wiztree-hdd-25gb",
+            source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
+            context: "25GB_NTFS_HDD_Acer_laptop_Windows_XP_vendor_test",
+            elapsed_ms: 4_340,
+        },
+        PublicClaimId::WizTreeSsd460Gb => PublicClaim {
+            id: "wiztree-ssd-460gb",
+            source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
+            context: "460GB_NTFS_SSD_ASUS_laptop_Windows_10_vendor_test",
+            elapsed_ms: 5_230,
+        },
+    }
+}
+
+fn compare_summary_to_claim(summary: &MeasurementSummary, claim: PublicClaim) -> PublicComparison {
+    PublicComparison {
+        claim_id: claim.id,
+        claim_source_url: claim.source_url,
+        claim_context: claim.context,
+        claim_elapsed_ms: claim.elapsed_ms,
+        diskloom_runs: summary.runs,
+        diskloom_scanners: summary.scanners.clone(),
+        diskloom_fallback_runs: summary.fallback_runs,
+        diskloom_elapsed_ms_min: summary.elapsed_ms_min,
+        diskloom_elapsed_ms_median: summary.elapsed_ms_median,
+        diskloom_elapsed_ms_max: summary.elapsed_ms_max,
+        diskloom_peak_private_bytes_max: summary.peak_private_bytes_max,
+        diskloom_vs_claim_ratio: ratio_decimal(summary.elapsed_ms_median, claim.elapsed_ms),
+        validity: "reference_only_vendor_claim_not_same_machine",
+    }
+}
+
+fn ratio_decimal(numerator: u128, denominator: u128) -> String {
+    if denominator == 0 {
+        return "n/a".to_owned();
+    }
+    let scaled = numerator.saturating_mul(1_000) / denominator;
+    format!("{}.{:03}", scaled / 1_000, scaled % 1_000)
+}
+
+fn write_public_comparison(writer: &mut impl Write, comparison: &PublicComparison) -> Result<()> {
+    writeln!(
+        writer,
+        "claim_id,claim_source_url,claim_context,claim_elapsed_ms,diskloom_runs,diskloom_scanners,diskloom_fallback_runs,diskloom_elapsed_ms_min,diskloom_elapsed_ms_median,diskloom_elapsed_ms_max,diskloom_peak_private_bytes_max,diskloom_vs_claim_ratio,validity"
+    )?;
+    writeln!(
+        writer,
+        "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        comparison.claim_id,
+        comparison.claim_source_url,
+        comparison.claim_context,
+        comparison.claim_elapsed_ms,
+        comparison.diskloom_runs,
+        comparison.diskloom_scanners,
+        comparison.diskloom_fallback_runs,
+        comparison.diskloom_elapsed_ms_min,
+        comparison.diskloom_elapsed_ms_median,
+        comparison.diskloom_elapsed_ms_max,
+        comparison.diskloom_peak_private_bytes_max,
+        comparison.diskloom_vs_claim_ratio,
+        comparison.validity
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MeasurementSummary, ScanMeasurement, parse_measurements, per_million, summarize_rows,
-        write_measurements, write_summary,
+        MeasurementSummary, PublicClaimId, ScanMeasurement, compare_summary_to_claim,
+        parse_measurements, per_million, public_claim, ratio_decimal, summarize_rows,
+        write_measurements, write_public_comparison, write_summary,
     };
 
     #[test]
@@ -644,5 +762,64 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("3,fallback,0,3,3,10,20,30,110,95,31666666"));
+    }
+
+    #[test]
+    fn compare_summary_to_claim_should_mark_reference_only() {
+        let summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 1_046,
+            elapsed_ms_max: 1_100,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+
+        let comparison =
+            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
+
+        assert_eq!(comparison.diskloom_vs_claim_ratio, "0.200");
+        assert_eq!(
+            comparison.validity,
+            "reference_only_vendor_claim_not_same_machine"
+        );
+    }
+
+    #[test]
+    fn write_public_comparison_should_emit_csv_row() {
+        let summary = MeasurementSummary {
+            runs: 3,
+            scanners: "fallback".to_owned(),
+            fallback_runs: 0,
+            entries_min: 3,
+            entries_max: 3,
+            elapsed_ms_min: 500,
+            elapsed_ms_median: 1_046,
+            elapsed_ms_max: 1_100,
+            peak_working_set_bytes_max: 100,
+            peak_private_bytes_max: 95,
+            peak_private_bytes_per_million_entries_max: 31_666_666,
+        };
+        let comparison =
+            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
+        let mut output = Vec::new();
+
+        write_public_comparison(&mut output, &comparison).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("wiztree-ssd-460gb"));
+        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+    }
+
+    #[test]
+    fn ratio_decimal_should_format_fixed_precision() {
+        assert_eq!(ratio_decimal(1_046, 5_230), "0.200");
+        assert_eq!(ratio_decimal(5_230, 5_230), "1.000");
+        assert_eq!(ratio_decimal(5_230, 0), "n/a");
     }
 }
