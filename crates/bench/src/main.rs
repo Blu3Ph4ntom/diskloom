@@ -1373,11 +1373,7 @@ fn write_export_measurements(
 }
 
 fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
-    let mut lines = input.lines().filter(|line| !line.trim().is_empty());
-    let header = lines
-        .next()
-        .ok_or_else(|| anyhow!("measurement CSV is empty"))?;
-    let headers: Vec<_> = header.split(',').collect();
+    let (headers, records) = csv_records(input, "measurement CSV is empty")?;
 
     let scanner_idx = field_index(&headers, "scanner")?;
     let fallback_idx = field_index(&headers, "fallback")?;
@@ -1388,33 +1384,34 @@ fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
     let peak_private_idx = field_index(&headers, "peak_private_bytes")?;
     let per_million_idx = field_index(&headers, "peak_private_bytes_per_million_entries")?;
 
-    lines
+    records
+        .iter()
         .enumerate()
         .map(|(idx, line)| {
-            let fields: Vec<_> = line.split(',').collect();
-            let elapsed_ms = parse_field(field(&fields, elapsed_idx, idx)?, "elapsed_ms")?;
+            let fields = line.as_slice();
+            let elapsed_ms = parse_field(field(fields, elapsed_idx, idx)?, "elapsed_ms")?;
             let first_result_ms = match first_result_idx {
                 Some(first_result_idx) => {
-                    parse_field(field(&fields, first_result_idx, idx)?, "first_result_ms")?
+                    parse_field(field(fields, first_result_idx, idx)?, "first_result_ms")?
                 }
                 None => elapsed_ms,
             };
             Ok(ParsedMeasurement {
-                scanner: field(&fields, scanner_idx, idx)?.to_owned(),
-                fallback: parse_bool_field(field(&fields, fallback_idx, idx)?)?,
+                scanner: field(fields, scanner_idx, idx)?.to_owned(),
+                fallback: parse_bool_field(field(fields, fallback_idx, idx)?)?,
                 elapsed_ms,
                 first_result_ms,
-                entries: parse_field(field(&fields, entries_idx, idx)?, "entries")?,
+                entries: parse_field(field(fields, entries_idx, idx)?, "entries")?,
                 peak_working_set_bytes: parse_field(
-                    field(&fields, peak_ws_idx, idx)?,
+                    field(fields, peak_ws_idx, idx)?,
                     "peak_working_set_bytes",
                 )?,
                 peak_private_bytes: parse_field(
-                    field(&fields, peak_private_idx, idx)?,
+                    field(fields, peak_private_idx, idx)?,
                     "peak_private_bytes",
                 )?,
                 peak_private_bytes_per_million_entries: parse_field(
-                    field(&fields, per_million_idx, idx)?,
+                    field(fields, per_million_idx, idx)?,
                     "peak_private_bytes_per_million_entries",
                 )?,
             })
@@ -1423,11 +1420,7 @@ fn parse_measurements(input: &str) -> Result<Vec<ParsedMeasurement>> {
 }
 
 fn parse_competitor_measurements(input: &str) -> Result<Vec<CompetitorMeasurement>> {
-    let mut lines = input.lines().filter(|line| !line.trim().is_empty());
-    let header = lines
-        .next()
-        .ok_or_else(|| anyhow!("competitor CSV is empty"))?;
-    let headers: Vec<_> = header.split(',').collect();
+    let (headers, records) = csv_records(input, "competitor CSV is empty")?;
 
     let tool_idx = field_index(&headers, "tool")?;
     let version_idx = field_index(&headers, "version")?;
@@ -1437,20 +1430,21 @@ fn parse_competitor_measurements(input: &str) -> Result<Vec<CompetitorMeasuremen
     let elapsed_ms_idx = field_index(&headers, "elapsed_ms")?;
     let peak_private_bytes_idx = optional_field_index(&headers, "peak_private_bytes");
 
-    lines
+    records
+        .iter()
         .enumerate()
         .map(|(idx, line)| {
-            let fields: Vec<_> = line.split(',').collect();
+            let fields = line.as_slice();
             Ok(CompetitorMeasurement {
-                tool: field(&fields, tool_idx, idx)?.trim().to_owned(),
-                version: field(&fields, version_idx, idx)?.trim().to_owned(),
-                dataset_label: field(&fields, dataset_label_idx, idx)?.trim().to_owned(),
-                cache_state: field(&fields, cache_state_idx, idx)?.trim().to_owned(),
-                scanner_scope: field(&fields, scanner_scope_idx, idx)?.trim().to_owned(),
-                elapsed_ms: parse_field(field(&fields, elapsed_ms_idx, idx)?.trim(), "elapsed_ms")?,
+                tool: field(fields, tool_idx, idx)?.trim().to_owned(),
+                version: field(fields, version_idx, idx)?.trim().to_owned(),
+                dataset_label: field(fields, dataset_label_idx, idx)?.trim().to_owned(),
+                cache_state: field(fields, cache_state_idx, idx)?.trim().to_owned(),
+                scanner_scope: field(fields, scanner_scope_idx, idx)?.trim().to_owned(),
+                elapsed_ms: parse_field(field(fields, elapsed_ms_idx, idx)?.trim(), "elapsed_ms")?,
                 peak_private_bytes: match peak_private_bytes_idx {
                     Some(peak_private_bytes_idx) => parse_optional_u64_field(
-                        field(&fields, peak_private_bytes_idx, idx)?.trim(),
+                        field(fields, peak_private_bytes_idx, idx)?.trim(),
                         "peak_private_bytes",
                     )?,
                     None => None,
@@ -1460,21 +1454,46 @@ fn parse_competitor_measurements(input: &str) -> Result<Vec<CompetitorMeasuremen
         .collect()
 }
 
-fn field_index(headers: &[&str], name: &str) -> Result<usize> {
+fn csv_records(input: &str, empty_message: &str) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+    if input.trim().is_empty() {
+        return Err(anyhow!("{empty_message}"));
+    }
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(input.as_bytes());
+    let headers = reader
+        .headers()
+        .with_context(|| empty_message.to_owned())?
+        .iter()
+        .map(str::to_owned)
+        .collect();
+    let mut records = Vec::new();
+    for (idx, record) in reader.records().enumerate() {
+        let record = record.with_context(|| format!("invalid CSV row {}", idx + 2))?;
+        if record.iter().all(|field| field.trim().is_empty()) {
+            continue;
+        }
+        records.push(record.iter().map(str::to_owned).collect());
+    }
+    Ok((headers, records))
+}
+
+fn field_index(headers: &[String], name: &str) -> Result<usize> {
     headers
         .iter()
-        .position(|candidate| *candidate == name)
+        .position(|candidate| candidate == name)
         .ok_or_else(|| anyhow!("missing CSV field `{name}`"))
 }
 
-fn optional_field_index(headers: &[&str], name: &str) -> Option<usize> {
+fn optional_field_index(headers: &[String], name: &str) -> Option<usize> {
     headers.iter().position(|candidate| *candidate == name)
 }
 
-fn field<'a>(fields: &'a [&str], idx: usize, row_idx: usize) -> Result<&'a str> {
+fn field(fields: &[String], idx: usize, row_idx: usize) -> Result<&str> {
     fields
         .get(idx)
-        .copied()
+        .map(String::as_str)
         .ok_or_else(|| anyhow!("row {} is missing field {}", row_idx + 1, idx))
 }
 
@@ -3703,6 +3722,19 @@ WizTree,4.25,workstation-c,warm,ntfs_mft,700,,
         assert_eq!(rows[0].tool, "WizTree");
         assert_eq!(rows[0].peak_private_bytes, Some(1000));
         assert_eq!(rows[1].peak_private_bytes, None);
+    }
+
+    #[test]
+    fn parse_competitor_measurements_should_handle_quoted_fields() {
+        let input = "\
+tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes
+\"Tool, Inc.\",\"4,25\",workstation-c,warm,ntfs_mft,600,1000,\"manual, timed run\"
+";
+
+        let rows = parse_competitor_measurements(input).unwrap();
+
+        assert_eq!(rows[0].tool, "Tool, Inc.");
+        assert_eq!(rows[0].version, "4,25");
     }
 
     #[test]
