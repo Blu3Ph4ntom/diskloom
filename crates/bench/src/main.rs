@@ -98,6 +98,10 @@ enum Command {
         #[arg(long, default_value = "unknown")]
         cache_state: String,
     },
+    CompetitorTemplate {
+        #[arg(long)]
+        examples: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -521,6 +525,9 @@ fn main() -> Result<()> {
             single_line_value(&dataset_label, "unspecified"),
             single_line_value(&cache_state, "unknown"),
         ),
+        Command::CompetitorTemplate { examples } => {
+            write_competitor_template(&mut io::stdout().lock(), examples)
+        }
     }
 }
 
@@ -1247,6 +1254,24 @@ fn compare_competitor_measurements(
         &cache_state,
     )?;
     write_same_machine_comparisons(&mut io::stdout().lock(), &comparisons)?;
+    Ok(())
+}
+
+fn write_competitor_template(writer: &mut impl Write, examples: bool) -> Result<()> {
+    writeln!(
+        writer,
+        "tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes"
+    )?;
+    if examples {
+        writeln!(
+            writer,
+            "WizTree,example,example-dataset,warm,ntfs_mft,5230,,manual timing"
+        )?;
+        writeln!(
+            writer,
+            "TreeSize,example,example-dataset,warm,traversal,18000,,manual timing"
+        )?;
+    }
     Ok(())
 }
 
@@ -3223,9 +3248,9 @@ mod tests {
         parse_measurements, per_million, public_claim, ratio_decimal, scan_measurements_to_rows,
         selected_claims, shell_quote_arg, single_line_value, suite_audit_rows, suite_audit_status,
         suite_same_machine_comparisons, summarize_export_measurements, summarize_rows,
-        write_export_measurements, write_measurements, write_public_comparisons,
-        write_same_machine_comparisons, write_suite_audit, write_suite_manifest,
-        write_suite_metadata, write_suite_report, write_summary,
+        write_competitor_template, write_export_measurements, write_measurements,
+        write_public_comparisons, write_same_machine_comparisons, write_suite_audit,
+        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -3654,6 +3679,17 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
     }
 
     #[test]
+    fn competitor_template_cli_should_accept_examples_flag() {
+        let args =
+            Args::try_parse_from(["diskloom-bench", "competitor-template", "--examples"]).unwrap();
+
+        let Command::CompetitorTemplate { examples } = args.command else {
+            panic!("expected competitor-template command");
+        };
+        assert!(examples);
+    }
+
+    #[test]
     fn parse_competitor_measurements_should_parse_optional_memory() {
         let input = "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes
@@ -3722,6 +3758,30 @@ TreeSize,9.0,other,warm,traversal,2000,
         assert!(output.contains("tool,version,dataset_label,cache_state"));
         assert!(output.contains("WizTree,4.25,repo-smoke,warm,ntfs_mft,matched,aligned_ntfs_mft"));
         assert!(output.contains("same_machine_user_supplied"));
+    }
+
+    #[test]
+    fn write_competitor_template_should_emit_header_only_by_default() {
+        let mut output = Vec::new();
+
+        write_competitor_template(&mut output, false).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert_eq!(
+            output,
+            "tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes\n"
+        );
+    }
+
+    #[test]
+    fn write_competitor_template_should_emit_example_scope_rows() {
+        let mut output = Vec::new();
+
+        write_competitor_template(&mut output, true).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        assert!(output.contains("WizTree,example,example-dataset,warm,ntfs_mft"));
+        assert!(output.contains("TreeSize,example,example-dataset,warm,traversal"));
     }
 
     #[test]
