@@ -314,15 +314,24 @@ fn write_duplicate_candidates(
 ) -> Result<()> {
     let candidates = find_duplicate_candidates(graph);
     writeln!(writer, "Duplicate candidates by size/name/date:")?;
+    writeln!(writer, "size\tentries\tmodified\tname")?;
 
     for candidate in candidates.iter().take(limit) {
         writeln!(
             writer,
-            "{} bytes\t{} entries\t{}",
+            "{}\t{}\t{}\t{}",
             candidate.size,
             candidate.entries.len(),
+            candidate.modified_unix,
             candidate.name
         )?;
+        for id in &candidate.entries {
+            let path = graph
+                .reconstruct_path(*id)
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            writeln!(writer, "\t{path}")?;
+        }
     }
 
     Ok(())
@@ -368,11 +377,11 @@ fn run_ntfs_probe(volume: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
     use diskloom_core::{FileGraphBuilder, FileKind};
 
-    use super::{ScanCommand, ScannerMode, drive_volume, query_filter};
+    use super::{ScanCommand, ScannerMode, drive_volume, query_filter, write_duplicate_candidates};
 
     #[test]
     fn drive_volume_should_accept_drive_root() {
@@ -406,6 +415,36 @@ mod tests {
         let matches: Vec<_> = filter.matching_ids(&graph).collect();
 
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_output_should_include_candidate_paths() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "root", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let left = builder
+            .add_entry(Some(root), "left", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let right = builder
+            .add_entry(Some(root), "right", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        builder
+            .add_entry(Some(left), "copy.bin", FileKind::File, 10, 10, 100)
+            .unwrap();
+        builder
+            .add_entry(Some(right), "COPY.bin", FileKind::File, 10, 10, 100)
+            .unwrap();
+        let graph = builder.finish();
+        let mut output = Vec::new();
+
+        write_duplicate_candidates(&mut output, &graph, 10).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let left_path = format!("root{MAIN_SEPARATOR}left{MAIN_SEPARATOR}copy.bin");
+        let right_path = format!("root{MAIN_SEPARATOR}right{MAIN_SEPARATOR}COPY.bin");
+
+        assert!(output.contains(&left_path));
+        assert!(output.contains(&right_path));
     }
 
     fn scan_command_with_path_filter(path_filter: &str) -> ScanCommand {
