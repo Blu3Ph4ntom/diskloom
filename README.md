@@ -121,6 +121,7 @@ Run the benchmark harness:
 
 ```powershell
 cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --progress-every 1024 --scanner fallback > target/bench.csv
+cargo run -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner ntfs --output target\bench-ntfs.csv
 cargo run -p diskloom-bench -- export . --iterations 5 --sample-ms 10 --scanner fallback > target/export-bench.csv
 cargo run -p diskloom-bench -- responsiveness . --iterations 5 --tick-ms 16 --progress-every 1024 --scanner fallback > target/responsiveness-bench.csv
 cargo run -p diskloom-bench -- summarize target\bench.csv
@@ -132,6 +133,8 @@ cargo run -p diskloom-bench -- suite . target\bench-suite --dataset-label repo-s
 ```
 
 See [benchmark methodology](docs/BENCHMARKS.md) and [WizTree public claims baseline](docs/benchmarks/wiztree-public-claims.md) before making performance claims.
+
+For direct NTFS drive benchmarks from a non-elevated shell, prefer `--output` over shell redirection. DiskLoom requests UAC, waits for the elevated process, and writes the CSV from that elevated process.
 
 Create a synthetic dataset:
 

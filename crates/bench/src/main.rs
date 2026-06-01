@@ -16,7 +16,9 @@ use diskloom_core::{EntryFlags, FileGraph};
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
-use diskloom_windows::{is_process_elevated, relaunch_current_process_elevated};
+use diskloom_windows::{
+    is_process_elevated, relaunch_current_process_elevated, run_current_process_elevated_and_wait,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "diskloom-bench")]
@@ -38,6 +40,8 @@ enum Command {
         progress_every: u64,
         #[arg(long, value_enum, default_value = "fallback")]
         scanner: ScannerMode,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     Export {
         path: PathBuf,
@@ -543,11 +547,12 @@ fn main() -> Result<()> {
             sample_ms,
             progress_every,
             scanner,
+            output,
         } => {
-            if maybe_relaunch_bench_elevated(&path, scanner)? {
+            if maybe_relaunch_bench_elevated(&path, scanner, output.is_some())? {
                 return Ok(());
             }
-            run_scan(path, iterations, sample_ms, progress_every, scanner)
+            run_scan(path, iterations, sample_ms, progress_every, scanner, output)
         }
         Command::Export {
             path,
@@ -557,7 +562,7 @@ fn main() -> Result<()> {
             include_directories,
             output_dir,
         } => {
-            if maybe_relaunch_bench_elevated(&path, scanner)? {
+            if maybe_relaunch_bench_elevated(&path, scanner, false)? {
                 return Ok(());
             }
             run_export(
@@ -576,7 +581,7 @@ fn main() -> Result<()> {
             progress_every,
             scanner,
         } => {
-            if maybe_relaunch_bench_elevated(&path, scanner)? {
+            if maybe_relaunch_bench_elevated(&path, scanner, false)? {
                 return Ok(());
             }
             run_responsiveness(path, iterations, tick_ms, progress_every, scanner)
@@ -597,7 +602,7 @@ fn main() -> Result<()> {
             claim,
             competitor_csv,
         } => {
-            if maybe_relaunch_bench_elevated(&path, scanner)? {
+            if maybe_relaunch_bench_elevated(&path, scanner, false)? {
                 return Ok(());
             }
             run_suite(SuiteOptions {
@@ -642,14 +647,28 @@ fn main() -> Result<()> {
     }
 }
 
-fn maybe_relaunch_bench_elevated(path: &Path, scanner: ScannerMode) -> Result<bool> {
+fn maybe_relaunch_bench_elevated(
+    path: &Path,
+    scanner: ScannerMode,
+    wait_for_completion: bool,
+) -> Result<bool> {
     if !bench_scan_needs_elevation(path, scanner) || !should_request_elevation()? {
         return Ok(false);
     }
 
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    relaunch_current_process_elevated(&args)
-        .context("failed to request administrator access for benchmark scan")?;
+    if wait_for_completion {
+        let exit_code = run_current_process_elevated_and_wait(&args)
+            .context("failed to request administrator access for benchmark scan")?;
+        if exit_code != 0 {
+            return Err(anyhow!(
+                "elevated benchmark scan failed with exit code {exit_code}"
+            ));
+        }
+    } else {
+        relaunch_current_process_elevated(&args)
+            .context("failed to request administrator access for benchmark scan")?;
+    }
     eprintln!("DiskLoom requested administrator access for benchmark NTFS scanning.");
     Ok(true)
 }
@@ -674,6 +693,7 @@ fn run_scan(
     sample_ms: u64,
     progress_every: u64,
     scanner: ScannerMode,
+    output: Option<PathBuf>,
 ) -> Result<()> {
     let mut measurements = Vec::with_capacity(iterations);
     let sample_interval = Duration::from_millis(sample_ms.max(1));
@@ -684,8 +704,24 @@ fn run_scan(
         measurements.push(measurement_from_run(iteration, scan));
     }
 
-    write_measurements(&mut io::stdout().lock(), &measurements)?;
+    if let Some(output) = output {
+        write_output_file(&output, |file| write_measurements(file, &measurements))?;
+    } else {
+        write_measurements(&mut io::stdout().lock(), &measurements)?;
+    }
     Ok(())
+}
+
+fn write_output_file(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+    write(&mut file)
 }
 
 fn run_export(
@@ -3847,9 +3883,9 @@ mod tests {
         single_line_value, suite_audit_rows, suite_audit_status, suite_same_machine_comparisons,
         summarize_export_measurements, summarize_responsiveness_measurements, summarize_rows,
         write_competitor_template, write_export_measurements, write_measurements,
-        write_public_comparisons, write_responsiveness_measurements, write_responsiveness_summary,
-        write_same_machine_comparisons, write_suite_audit, write_suite_manifest,
-        write_suite_metadata, write_suite_report, write_summary,
+        write_output_file, write_public_comparisons, write_responsiveness_measurements,
+        write_responsiveness_summary, write_same_machine_comparisons, write_suite_audit,
+        write_suite_manifest, write_suite_metadata, write_suite_report, write_summary,
     };
     use clap::Parser;
 
@@ -4324,6 +4360,58 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
                 PublicClaimId::WizTreeSsd460Gb
             ]
         );
+    }
+
+    #[test]
+    fn scan_cli_should_accept_output_file() {
+        let args = Args::try_parse_from([
+            "diskloom-bench",
+            "scan",
+            ".",
+            "--scanner",
+            "ntfs",
+            "--output",
+            "target/bench-ntfs.csv",
+        ])
+        .unwrap();
+
+        let Command::Scan {
+            scanner, output, ..
+        } = args.command
+        else {
+            panic!("expected scan command");
+        };
+
+        assert_eq!(scanner, ScannerMode::Ntfs);
+        assert_eq!(
+            output,
+            Some(std::path::PathBuf::from("target/bench-ntfs.csv"))
+        );
+    }
+
+    #[test]
+    fn write_output_file_should_create_parent_directory() {
+        use std::io::Write as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "diskloom-bench-output-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = dir.join("nested").join("bench.csv");
+
+        write_output_file(&output, |file| {
+            writeln!(file, "diskloom")?;
+            Ok(())
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&output).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+
+        assert_eq!(text.trim(), "diskloom");
     }
 
     #[test]

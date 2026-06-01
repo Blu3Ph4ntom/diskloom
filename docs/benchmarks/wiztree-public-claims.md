@@ -48,6 +48,12 @@ target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim w
 target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
 ```
 
+From a non-elevated shell, use `--output` instead of redirection. DiskLoom waits for the UAC-launched benchmark and the elevated process writes the CSV:
+
+```powershell
+target\release\diskloom-bench.exe scan C:\ --scanner ntfs --iterations 5 --sample-ms 10 --output target\bench-ntfs.csv
+```
+
 Or generate a local bundle with raw DiskLoom measurements, source-labeled public claim rows, and a Markdown report:
 
 ```powershell
