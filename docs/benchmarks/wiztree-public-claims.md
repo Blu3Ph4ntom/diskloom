@@ -41,6 +41,7 @@ Capture and summarize a run before comparing it with the claim matrix:
 ```powershell
 target\release\diskloom-bench.exe scan C:\ --scanner ntfs --iterations 5 --sample-ms 10 > target\bench-ntfs.csv
 target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv
 target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-500gb-typical
 target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
 ```
