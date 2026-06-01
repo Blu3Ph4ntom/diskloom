@@ -182,6 +182,27 @@ impl FileGraphBuilder {
         allocated: u64,
         modified_unix: i64,
     ) -> Result<EntryId, FileGraphError> {
+        self.add_entry_with_flags(
+            parent,
+            name,
+            kind,
+            size,
+            allocated,
+            modified_unix,
+            EntryFlags::empty(),
+        )
+    }
+
+    pub fn add_entry_with_flags(
+        &mut self,
+        parent: Option<EntryId>,
+        name: &str,
+        kind: FileKind,
+        size: u64,
+        allocated: u64,
+        modified_unix: i64,
+        extra_flags: EntryFlags,
+    ) -> Result<EntryId, FileGraphError> {
         let id = EntryId(self.parents.len() as u32);
         if parent == Some(id) {
             return Err(FileGraphError::SelfParent { child: id });
@@ -199,6 +220,7 @@ impl FileGraphBuilder {
             FileKind::Symlink => flags.insert(EntryFlags::SYMLINK),
             FileKind::File | FileKind::Other => {}
         }
+        flags.insert(extra_flags);
 
         let name_id = self.names.intern(name);
         self.parents.push(parent);
