@@ -29,7 +29,8 @@
 - File type stats. Initial implementation done.
 - Background scan worker. Initial implementation with fallback progress counts done.
 - Scanner mode selection. Initial implementation done.
-- Search/filter UI. Initial name, regex, extension, path, size, and allocated-size filters done.
+- Search/filter UI. Initial name, regex, extension, path, size, allocated-size, and modified-date filters done.
+- GUI CSV export. Initial non-blocking export done.
 - Shell actions. Initial Explorer, properties, recycle delete, and rename controls done.
 - Dark mode. Initial implementation done.
 - High-DPI polish.
