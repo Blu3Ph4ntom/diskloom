@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::{ByteSize, StringId, StringInterner};
+use crate::{ByteSize, StringId, StringInterner, StringTable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntryId(pub u32);
@@ -53,7 +53,7 @@ pub enum FileGraphError {
 
 #[derive(Debug, Clone)]
 pub struct FileGraph {
-    names: StringInterner,
+    names: StringTable,
     parents: Vec<Option<EntryId>>,
     name_ids: Vec<StringId>,
     flags: Vec<EntryFlags>,
@@ -216,7 +216,7 @@ impl FileGraphBuilder {
     #[must_use]
     pub fn finish(self) -> FileGraph {
         let mut graph = FileGraph {
-            names: self.names,
+            names: self.names.finish(),
             parents: self.parents,
             name_ids: self.name_ids,
             flags: self.flags,

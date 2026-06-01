@@ -9,6 +9,11 @@ pub struct StringInterner {
     index: HashMap<String, StringId>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct StringTable {
+    values: Vec<String>,
+}
+
 impl StringInterner {
     #[must_use]
     pub fn new() -> Self {
@@ -27,6 +32,30 @@ impl StringInterner {
         id
     }
 
+    #[must_use]
+    pub fn get(&self, id: StringId) -> Option<&str> {
+        self.values.get(id.0 as usize).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    #[must_use]
+    pub fn finish(self) -> StringTable {
+        StringTable {
+            values: self.values,
+        }
+    }
+}
+
+impl StringTable {
     #[must_use]
     pub fn get(&self, id: StringId) -> Option<&str> {
         self.values.get(id.0 as usize).map(String::as_str)
@@ -63,5 +92,15 @@ mod tests {
         let id = interner.intern("src");
 
         assert_eq!(interner.get(id), Some("src"));
+    }
+
+    #[test]
+    fn finish_should_drop_lookup_index_and_keep_values() {
+        let mut interner = StringInterner::new();
+        let id = interner.intern("src");
+
+        let table = interner.finish();
+
+        assert_eq!(table.get(id), Some("src"));
     }
 }
