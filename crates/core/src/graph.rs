@@ -4,6 +4,8 @@ use thiserror::Error;
 
 use crate::{ByteSize, StringId, StringInterner, StringTable};
 
+const NO_PARENT: u32 = u32::MAX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntryId(pub u32);
 
@@ -63,9 +65,9 @@ pub enum FileGraphError {
 #[derive(Debug, Clone)]
 pub struct FileGraph {
     names: StringTable,
-    parents: Vec<Option<EntryId>>,
+    parents: Vec<u32>,
     name_ids: Vec<StringId>,
-    flags: Vec<EntryFlags>,
+    flags: Vec<u16>,
     modified_unix: Vec<i64>,
     own_size: Vec<u64>,
     own_allocated: Vec<u64>,
@@ -90,9 +92,9 @@ impl FileGraph {
         let idx = id.0 as usize;
         Some(GraphEntry {
             id,
-            parent: *self.parents.get(idx)?,
+            parent: decode_parent(*self.parents.get(idx)?),
             name: *self.name_ids.get(idx)?,
-            flags: *self.flags.get(idx)?,
+            flags: EntryFlags::from_bits_retain(*self.flags.get(idx)?),
             modified_unix: *self.modified_unix.get(idx)?,
         })
     }
@@ -123,7 +125,7 @@ impl FileGraph {
         self.parents
             .iter()
             .enumerate()
-            .filter(move |(_, candidate)| **candidate == Some(parent))
+            .filter(move |(_, candidate)| **candidate == parent.0)
             .map(|(idx, _)| EntryId(idx as u32))
     }
 
@@ -134,7 +136,11 @@ impl FileGraph {
 
         while let Some(entry_id) = current {
             names.push(self.name(entry_id)?);
-            current = self.parents.get(entry_id.0 as usize).copied().flatten();
+            current = self
+                .parents
+                .get(entry_id.0 as usize)
+                .copied()
+                .and_then(decode_parent);
         }
 
         let mut path = PathBuf::new();
@@ -150,7 +156,7 @@ impl FileGraph {
         self.descendants.fill(0);
 
         for idx in (0..self.parents.len()).rev() {
-            let Some(parent) = self.parents[idx] else {
+            let Some(parent) = decode_parent(self.parents[idx]) else {
                 continue;
             };
             let parent_idx = parent.0 as usize;
@@ -168,9 +174,9 @@ impl FileGraph {
 #[derive(Debug, Default)]
 pub struct FileGraphBuilder {
     names: StringInterner,
-    parents: Vec<Option<EntryId>>,
+    parents: Vec<u32>,
     name_ids: Vec<StringId>,
-    flags: Vec<EntryFlags>,
+    flags: Vec<u16>,
     modified_unix: Vec<i64>,
     own_size: Vec<u64>,
     own_allocated: Vec<u64>,
@@ -238,9 +244,9 @@ impl FileGraphBuilder {
         flags.insert(metadata.extra_flags);
 
         let name_id = self.names.intern(name);
-        self.parents.push(parent);
+        self.parents.push(encode_parent(parent));
         self.name_ids.push(name_id);
-        self.flags.push(flags);
+        self.flags.push(flags.bits());
         self.modified_unix.push(metadata.modified_unix);
         self.own_size.push(metadata.size);
         self.own_allocated.push(metadata.allocated);
@@ -274,9 +280,9 @@ impl FileGraphBuilder {
         flags.insert(metadata.extra_flags);
 
         let name_id = self.names.intern_owned(name);
-        self.parents.push(parent);
+        self.parents.push(encode_parent(parent));
         self.name_ids.push(name_id);
-        self.flags.push(flags);
+        self.flags.push(flags.bits());
         self.modified_unix.push(metadata.modified_unix);
         self.own_size.push(metadata.size);
         self.own_allocated.push(metadata.allocated);
@@ -304,6 +310,14 @@ impl FileGraphBuilder {
         graph.aggregate();
         graph
     }
+}
+
+fn encode_parent(parent: Option<EntryId>) -> u32 {
+    parent.map_or(NO_PARENT, |id| id.0)
+}
+
+fn decode_parent(parent: u32) -> Option<EntryId> {
+    (parent != NO_PARENT).then_some(EntryId(parent))
 }
 
 #[cfg(test)]

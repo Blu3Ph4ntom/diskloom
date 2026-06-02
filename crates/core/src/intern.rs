@@ -11,7 +11,8 @@ pub struct StringInterner {
 
 #[derive(Debug, Default, Clone)]
 pub struct StringTable {
-    values: Vec<String>,
+    offsets: Vec<u32>,
+    bytes: Vec<u8>,
 }
 
 impl StringInterner {
@@ -83,9 +84,15 @@ impl StringInterner {
 
     #[must_use]
     pub fn finish(self) -> StringTable {
-        StringTable {
-            values: self.values,
+        let byte_len = self.values.iter().map(String::len).sum();
+        let mut offsets = Vec::with_capacity(self.values.len().saturating_add(1));
+        let mut bytes = Vec::with_capacity(byte_len);
+        offsets.push(0);
+        for value in self.values {
+            bytes.extend_from_slice(value.as_bytes());
+            offsets.push(bytes.len() as u32);
         }
+        StringTable { offsets, bytes }
     }
 }
 
@@ -98,17 +105,20 @@ impl Default for StringInterner {
 impl StringTable {
     #[must_use]
     pub fn get(&self, id: StringId) -> Option<&str> {
-        self.values.get(id.0 as usize).map(String::as_str)
+        let idx = id.0 as usize;
+        let start = *self.offsets.get(idx)? as usize;
+        let end = *self.offsets.get(idx.saturating_add(1))? as usize;
+        std::str::from_utf8(self.bytes.get(start..end)?).ok()
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.offsets.len().saturating_sub(1)
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.len() == 0
     }
 }
 
@@ -162,5 +172,18 @@ mod tests {
         let table = interner.finish();
 
         assert_eq!(table.get(id), Some("src"));
+    }
+
+    #[test]
+    fn finish_should_pack_names_without_per_name_string_headers() {
+        let mut interner = StringInterner::without_lookup();
+        let first = interner.intern("Program Files");
+        let second = interner.intern("readme.md");
+
+        let table = interner.finish();
+
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(first), Some("Program Files"));
+        assert_eq!(table.get(second), Some("readme.md"));
     }
 }

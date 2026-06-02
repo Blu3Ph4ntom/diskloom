@@ -26,8 +26,8 @@ const UI_PROGRESS_EVERY: u64 = 1_024;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
 const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
-const MAX_SCAN_CACHE_ITEMS: usize = 2;
-const MAX_SCAN_CACHE_ENTRIES: usize = 3_000_000;
+const MAX_SCAN_CACHE_ITEMS: usize = 1;
+const MAX_SCAN_CACHE_ENTRIES: usize = 400_000;
 const SKIP_STARTUP_ELEVATION_ENV: &str = "DISKLOOM_SKIP_STARTUP_ELEVATION";
 
 fn main() {
