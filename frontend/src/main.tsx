@@ -54,6 +54,7 @@ type ScanCompleteDto = ScanProgressDto & {
 type TreeRowDto = {
   id: number;
   name: string;
+  path: string;
   depth: number;
   isDir: boolean;
   expanded: boolean;
@@ -104,6 +105,7 @@ function App() {
   const [sortKey, setSortKey] = useState<SortKey>("size");
   const [sortDescending, setSortDescending] = useState(true);
   const [railCollapsed, setRailCollapsed] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const treeRef = useRef<HTMLDivElement>(null);
@@ -192,7 +194,7 @@ function App() {
     setProgress(EMPTY_PROGRESS);
 
     try {
-      await invoke("start_scan", { path: target, scanner: "auto" });
+      await invoke("start_scan", { path: target, scanner: "auto", force: options?.force ?? false });
     } catch (scanError) {
       const message = String(scanError);
       if (message.toLowerCase().includes("already running")) {
@@ -261,19 +263,19 @@ function App() {
     }
   }, [path, selectedId, selectedPath, startScanFor]);
 
-  const openExplorer = useCallback(async () => {
+  const openExplorer = useCallback(async (targetPath?: string, targetId?: number) => {
     setError("");
     try {
-      await invoke("open_path", { path, id: selectedId });
+      await invoke("open_path", { path: targetPath ?? path, id: targetId ?? selectedId });
     } catch (openError) {
       setError(String(openError));
     }
   }, [path, selectedId]);
 
-  const showProperties = useCallback(async () => {
+  const showProperties = useCallback(async (targetPath?: string, targetId?: number) => {
     setError("");
     try {
-      await invoke("show_path_properties", { path, id: selectedId });
+      await invoke("show_path_properties", { path: targetPath ?? path, id: targetId ?? selectedId });
     } catch (propertiesError) {
       setError(String(propertiesError));
     }
@@ -283,6 +285,16 @@ function App() {
     const items = await invoke<DriveDto[]>("discover_drives");
     setDrives(items);
   }, []);
+
+  const refreshScan = useCallback(async () => {
+    await refreshDrives();
+    const target = normalizeScanTarget(path);
+    if (!target) {
+      return;
+    }
+    setStatus("Refreshing");
+    await startScanFor(target, { force: true });
+  }, [path, refreshDrives, startScanFor]);
 
   const changeSort = useCallback((nextKey: SortKey) => {
     if (nextKey === sortKey) {
@@ -477,15 +489,19 @@ function App() {
   const bottomSpacer = Math.max(0, visibleTotal - rowOffset - rows.length) * ROW_HEIGHT;
   const subline = error || selectedPath || detail;
   const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
+  const selectedRow = rows.find((row) => row.id === selectedId) ?? null;
+  const infoPath = selectedPath || path;
 
   return (
     <main className="app-shell" data-scanning={scanning} data-rail-collapsed={railCollapsed}>
       <aside className="drive-rail">
         <div className="rail-title">
           <button
-            className="icon-button"
+            className="icon-button has-tooltip"
             type="button"
             aria-label="Toggle drives"
+            data-tooltip={railCollapsed ? "Show drives" : "Collapse drives"}
+            title={railCollapsed ? "Show drives" : "Collapse drives"}
             onClick={() => setRailCollapsed((value) => !value)}
           >
             <Menu size={21} strokeWidth={1.8} />
@@ -503,6 +519,7 @@ function App() {
                 data-active={drivePath === activeDriveRoot}
                 data-root={drive.path.replace("\\", "")}
                 onClick={() => chooseDrive(drive)}
+                title={driveCapacityLine(drive)}
                 type="button"
               >
                 <span className="drive-icon">
@@ -529,6 +546,7 @@ function App() {
               autoFocus
               spellcheck={false}
               value={commandText}
+              title="Search loaded results or enter a drive or folder path"
               placeholder="Search or enter path..."
               onInput={(event) => handleCommandInput(event.currentTarget.value)}
             />
@@ -546,27 +564,45 @@ function App() {
             </span>
           </div>
           <div className="command-actions">
-            <button className="icon-button" type="button" aria-label="Open in Explorer" onClick={openExplorer}>
+            <button
+              className="icon-button has-tooltip"
+              type="button"
+              aria-label="Show selected in folder"
+              data-tooltip="Show selected in folder"
+              title="Show selected in folder"
+              onClick={() => void openExplorer()}
+            >
               <FolderOpen size={21} strokeWidth={1.7} />
             </button>
-            <button className="icon-button" type="button" aria-label="Properties" onClick={showProperties}>
+            <button
+              className="icon-button has-tooltip"
+              type="button"
+              aria-label="Scan details"
+              data-tooltip="Scan details"
+              title="Scan details"
+              onClick={() => setInfoOpen((value) => !value)}
+            >
               <Info size={21} strokeWidth={1.7} />
             </button>
             <button
-              className="icon-button"
+              className="icon-button has-tooltip"
               type="button"
-              aria-label="Refresh drives"
-              onClick={() => void refreshDrives()}
+              aria-label="Force rescan"
+              data-tooltip="Force rescan"
+              title="Force rescan"
+              onClick={() => void refreshScan()}
             >
               <RefreshCw size={20} strokeWidth={1.7} />
             </button>
             {scanning ? (
-              <button className="text-action" onClick={cancelScan} type="button">
+              <button className="text-action has-tooltip" data-tooltip="Stop scan" title="Stop scan" onClick={cancelScan} type="button">
                 Stop
               </button>
             ) : (
               <button
-                className="text-action danger"
+                className="text-action danger has-tooltip"
+                data-tooltip="Delete selected item"
+                title="Delete selected item"
                 disabled={selectedId === null}
                 onClick={() => setDeleteDialogOpen(true)}
                 type="button"
@@ -575,6 +611,44 @@ function App() {
                 Recycle
               </button>
             )}
+            {infoOpen ? (
+              <section className="info-popover" aria-label="Scan details">
+                <div className="info-title">
+                  <strong>{selectedRow ? "Selected item" : "Current scan"}</strong>
+                  <span>{status}</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>Path</dt>
+                    <dd title={infoPath}>{infoPath || "-"}</dd>
+                  </div>
+                  <div>
+                    <dt>Scanner</dt>
+                    <dd>{complete?.fallbackReason ?? complete?.scannerLabel ?? detail}</dd>
+                  </div>
+                  <div>
+                    <dt>Entries</dt>
+                    <dd>{formatCount(totals.entries)}</dd>
+                  </div>
+                  <div>
+                    <dt>Size</dt>
+                    <dd>{formatBytes(selectedRow?.sizeBytes ?? complete?.sizeBytes ?? 0)}</dd>
+                  </div>
+                  <div>
+                    <dt>Elapsed</dt>
+                    <dd>{complete?.elapsedMs === 0 ? "cached" : formatElapsed(totals.elapsedMs)}</dd>
+                  </div>
+                </dl>
+                <div className="info-actions">
+              <button type="button" title="Show selected item in File Explorer" onClick={() => void openExplorer()}>
+                    Show in folder
+                  </button>
+                  <button type="button" title="Open Windows properties" onClick={() => void showProperties()}>
+                    Properties
+                  </button>
+                </div>
+              </section>
+            ) : null}
           </div>
         </header>
 
@@ -603,7 +677,7 @@ function App() {
 
         <section className="table-shell">
           <div className="table-header">
-            <button type="button" onClick={() => changeSort("name")} data-active={sortKey === "name"}>
+            <button type="button" title="Sort by name" onClick={() => changeSort("name")} data-active={sortKey === "name"}>
               Name
               {sortKey === "name" && sortDescending ? (
                 <ChevronDown size={15} strokeWidth={1.8} />
@@ -611,7 +685,7 @@ function App() {
                 <ChevronUp size={15} strokeWidth={1.8} />
               )}
             </button>
-            <button type="button" onClick={() => changeSort("size")} data-active={sortKey === "size"}>
+            <button type="button" title="Sort by size" onClick={() => changeSort("size")} data-active={sortKey === "size"}>
               Size
               {sortKey === "size" && !sortDescending ? (
                 <ChevronUp size={15} strokeWidth={1.8} />
@@ -620,7 +694,7 @@ function App() {
               )}
               <Filter size={17} strokeWidth={1.7} />
             </button>
-            <button type="button" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
+            <button type="button" title="Sort by modified date" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
               Last Modified
               {sortKey === "modified" && !sortDescending ? (
                 <ChevronUp size={15} strokeWidth={1.8} />
@@ -637,19 +711,23 @@ function App() {
               const share = Math.max(2, Math.min(100, (row.sizeBytes / rowBarBase) * 100));
               const shareLabel = Math.round(Math.min(100, (row.sizeBytes / rowBarBase) * 100));
               return (
-                <button
+                <div
                   key={row.id}
                   className="tree-row"
                   data-selected={selectedId === row.id}
                   style={{ "--depth": row.depth } as JSX.CSSProperties}
                   onClick={() => void selectRow(row)}
                   onDblClick={() => void toggleRow(row)}
-                  type="button"
+                  onKeyDown={(event) => handleRowKeyDown(event, row, selectRow, toggleRow)}
+                  role="button"
+                  tabIndex={0}
+                  title={row.path || row.name}
                 >
                   <span className="row-name">
                     <span
                       className="disclosure"
                       data-visible={row.childCount > 0}
+                      title={row.expanded ? "Collapse folder" : "Expand folder"}
                       onClick={(event) => {
                         event.stopPropagation();
                         void toggleRow(row);
@@ -671,6 +749,19 @@ function App() {
                       )}
                     </span>
                     <span className="name-text">{row.name}</span>
+                    <button
+                      className="row-folder-button has-tooltip"
+                      type="button"
+                      aria-label={row.isDir ? "Open folder" : "Show in folder"}
+                      data-tooltip={row.isDir ? "Open folder" : "Show in folder"}
+                      title={row.isDir ? "Open folder" : "Show in folder"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void openExplorer(row.path, row.id);
+                      }}
+                    >
+                      <FolderOpen size={16} strokeWidth={1.75} />
+                    </button>
                   </span>
                   <span className="size-cell">
                     <span>{formatBytes(row.sizeBytes)}</span>
@@ -680,7 +771,7 @@ function App() {
                     <span className="percent-cell">{shareLabel}%</span>
                   </span>
                   <span className="date-cell">{formatModified(row.modifiedUnix)}</span>
-                </button>
+                </div>
               );
             })}
             {rows.length === 0 ? (
@@ -700,13 +791,18 @@ function App() {
             <h2>Delete selected item?</h2>
             <p>{selectedPath}</p>
             <div className="dialog-actions">
-              <button type="button" onClick={() => setDeleteDialogOpen(false)}>
+              <button type="button" title="Cancel" onClick={() => setDeleteDialogOpen(false)}>
                 Cancel
               </button>
-              <button type="button" onClick={() => void deleteSelected("recycle")}>
+              <button type="button" title="Move selected item to Recycle Bin" onClick={() => void deleteSelected("recycle")}>
                 Move to Recycle Bin
               </button>
-              <button className="danger" type="button" onClick={() => void deleteSelected("permanent")}>
+              <button
+                className="danger"
+                type="button"
+                title="Permanently delete selected item"
+                onClick={() => void deleteSelected("permanent")}
+              >
                 Permanently delete
               </button>
             </div>
@@ -735,6 +831,22 @@ function StreamingRows(props: { progress: ScanProgressDto }) {
       ))}
     </div>
   );
+}
+
+function handleRowKeyDown(
+  event: JSX.TargetedKeyboardEvent<HTMLDivElement>,
+  row: TreeRowDto,
+  selectRow: (row: TreeRowDto) => Promise<void>,
+  toggleRow: (row: TreeRowDto) => Promise<void>,
+) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    void selectRow(row);
+  }
+  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+    event.preventDefault();
+    void toggleRow(row);
+  }
 }
 
 function preferredDrive(drives: DriveDto[]) {

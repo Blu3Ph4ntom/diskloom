@@ -166,6 +166,40 @@ button:not(:disabled) {
   font-size: 16px;
 }
 
+.has-tooltip {
+  position: relative;
+}
+
+.has-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: -34px;
+  z-index: 40;
+  max-width: 220px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: oklch(0.16 0.007 220);
+  box-shadow: 0 12px 28px oklch(0.04 0.006 220 / 0.42);
+  font-size: 12px;
+  line-height: 1.2;
+  opacity: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  transform: translate(-50%, -3px);
+  transition:
+    opacity 120ms ease-out,
+    transform 120ms ease-out;
+}
+
+.has-tooltip:hover::after,
+.has-tooltip:focus-visible::after {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
 .icon-button:hover,
 .text-action:hover {
   color: var(--text);
@@ -411,6 +445,78 @@ button:disabled {
   gap: 10px;
 }
 
+.info-popover {
+  position: absolute;
+  right: 0;
+  top: 44px;
+  z-index: 20;
+  width: min(390px, calc(100vw - 40px));
+  display: grid;
+  gap: 13px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: oklch(0.18 0.007 220);
+  box-shadow: 0 18px 42px oklch(0.05 0.006 220 / 0.46);
+}
+
+.info-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.info-title span {
+  color: var(--muted);
+}
+
+.info-popover dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.info-popover dl div {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.info-popover dt {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.info-popover dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.info-actions button {
+  height: 32px;
+  border-radius: 7px;
+  padding: 0 11px;
+  color: var(--text);
+  background: oklch(0.25 0.008 220);
+}
+
+.info-actions button:hover {
+  background: oklch(0.29 0.01 220);
+}
+
 .scan-readout {
   display: none;
   position: absolute;
@@ -503,7 +609,7 @@ button:disabled {
 .table-header {
   height: 38px;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) 300px 290px;
+  grid-template-columns: minmax(420px, 1fr) 252px 246px;
   align-items: center;
   border-bottom: 1px solid var(--line-soft);
   background: oklch(0.18 0.006 220);
@@ -570,7 +676,7 @@ button:disabled {
   width: 100%;
   height: 38px;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) 300px 290px;
+  grid-template-columns: minmax(420px, 1fr) 252px 246px;
   align-items: center;
   padding: 0;
   border-bottom: 1px solid oklch(0.23 0.007 220);
@@ -578,6 +684,7 @@ button:disabled {
   background: var(--row);
   text-align: left;
   cursor: pointer;
+  user-select: none;
   transition:
     background 140ms ease-out,
     color 140ms ease-out;
@@ -647,15 +754,40 @@ button:disabled {
 
 .name-text {
   min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.row-folder-button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  margin-left: 8px;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  opacity: 0;
+}
+
+.tree-row:hover .row-folder-button,
+.tree-row[data-selected="true"] .row-folder-button,
+.tree-row:focus-within .row-folder-button {
+  opacity: 1;
+}
+
+.row-folder-button:hover {
+  color: var(--text);
+  background: oklch(0.27 0.009 220);
+}
+
 .size-cell {
   min-width: 0;
   display: grid;
-  grid-template-columns: 86px minmax(104px, 1fr) 44px;
+  grid-template-columns: 82px minmax(82px, 1fr) 42px;
   align-items: center;
   gap: 10px;
   padding: 0 12px;
@@ -788,7 +920,7 @@ button:disabled {
   --w: 60%;
   height: 38px;
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) 300px 290px;
+  grid-template-columns: minmax(420px, 1fr) 252px 246px;
   align-items: center;
   border-bottom: 1px solid oklch(0.22 0.007 220);
 }
@@ -886,7 +1018,7 @@ button:disabled {
   .table-header,
   .tree-row,
   .stream-row {
-    grid-template-columns: minmax(220px, 1fr) 236px 206px;
+    grid-template-columns: minmax(240px, 1fr) 210px 190px;
   }
 
   .tree-viewport {

@@ -308,6 +308,7 @@ struct ScanCompleteDto {
 struct TreeRowDto {
     id: u32,
     name: String,
+    path: String,
     depth: u32,
     is_dir: bool,
     expanded: bool,
@@ -356,6 +357,7 @@ fn discover_drives() -> Vec<DriveDto> {
 fn start_scan(
     path: String,
     scanner: String,
+    force: Option<bool>,
     state: State<'_, SharedState>,
     window: Window,
 ) -> Result<(), String> {
@@ -366,6 +368,7 @@ fn start_scan(
     let scanner = ScannerMode::parse(&scanner);
     let path_buf = PathBuf::from(&path);
     let path_key = cache_key_for_path(&path_buf);
+    let force = force.unwrap_or(false);
 
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -373,14 +376,21 @@ fn start_scan(
         if state.scanning {
             return Err("a scan is already running".to_owned());
         }
-        if let Some(cached) = take_cached_scan(&mut state, &path_key) {
+        if force {
+            state.cache.retain(|cached| cached.path_key != path_key);
+        } else {
+            if let Some(cached) = take_cached_scan(&mut state, &path_key) {
+                cache_current_scan(&mut state);
+                let dto = restore_cached_scan(&mut state, cached);
+                emit_or_log(&window, "scan-started", path);
+                emit_or_log(&window, "scan-complete", dto);
+                return Ok(());
+            }
             cache_current_scan(&mut state);
-            let dto = restore_cached_scan(&mut state, cached);
-            emit_or_log(&window, "scan-started", path);
-            emit_or_log(&window, "scan-complete", dto);
-            return Ok(());
         }
-        cache_current_scan(&mut state);
+        if force && state.current_path_key.as_deref() != Some(path_key.as_str()) {
+            cache_current_scan(&mut state);
+        }
         state.graph = None;
         state.index = None;
         state.visible_roots.clear();
@@ -835,6 +845,8 @@ fn tree_row_from_graph(
     let stats = graph.stats(id)?;
     let child_count = index.child_count(id);
     let is_dir = entry.flags.contains(EntryFlags::DIRECTORY);
+    let display_path = display_path_from_graph(graph, id)?;
+    let name = display_name_from_path(graph, id, &display_path);
     let (size_bytes, allocated_bytes) = if is_dir {
         (stats.total_size.bytes(), stats.total_allocated.bytes())
     } else {
@@ -842,7 +854,8 @@ fn tree_row_from_graph(
     };
     Some(TreeRowDto {
         id: id.0,
-        name: graph.name(id).unwrap_or_default().to_owned(),
+        name,
+        path: display_path.to_string_lossy().into_owned(),
         depth: depth as u32,
         is_dir,
         expanded: state.expanded.contains(&id),
@@ -856,9 +869,40 @@ fn tree_row_from_graph(
 fn selected_path_from_state(state: &AppState) -> Option<String> {
     let graph = state.graph.as_deref()?;
     let selected = state.selected?;
-    graph
-        .reconstruct_path(selected)
-        .map(|path| path.to_string_lossy().into_owned())
+    display_path_from_graph(graph, selected).map(|path| path.to_string_lossy().into_owned())
+}
+
+fn display_path_from_graph(graph: &FileGraph, id: EntryId) -> Option<PathBuf> {
+    let path = graph.reconstruct_path(id)?;
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Some(path);
+    };
+    if !is_probable_short_name(name) {
+        return Some(path);
+    }
+    std::fs::canonicalize(&path)
+        .ok()
+        .map(strip_verbatim_prefix)
+        .or(Some(path))
+}
+
+fn display_name_from_path(graph: &FileGraph, id: EntryId, path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| graph.name(id).unwrap_or_default().to_owned())
+}
+
+fn is_probable_short_name(name: &str) -> bool {
+    name.contains('~')
+}
+
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(stripped) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path
 }
 
 fn find_graph_path(graph: &FileGraph, target: &Path) -> Option<EntryId> {
