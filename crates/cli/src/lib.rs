@@ -120,6 +120,7 @@ struct ScanOutcome {
     summary: ScanSummary,
     scanner_label: &'static str,
     fallback_reason: Option<String>,
+    display_root: Option<PathBuf>,
 }
 
 pub fn run() -> Result<()> {
@@ -173,11 +174,12 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     let outcome = scan_path(&command)
         .with_context(|| format!("failed to scan {}", command.path.display()))?;
     let elapsed = started.elapsed();
+    let display_root = outcome.display_root.clone();
     let graph = outcome.graph;
     let summary = outcome.summary;
 
     let filter = query_filter(&command)?.compile()?;
-    let ids = ranked_entry_ids(&graph, &filter, &command);
+    let ids = ranked_entry_ids(&graph, &filter, &command, display_root.as_deref());
 
     let mut stdout = io::stdout().lock();
     write_scan_summary(
@@ -232,7 +234,8 @@ fn scan_path(command: &ScanCommand) -> Result<ScanOutcome> {
         ScannerMode::Fallback => scan_fallback(command, None),
         ScannerMode::Ntfs => scan_ntfs(command).map_err(Into::into),
         ScannerMode::Auto => {
-            if drive_volume(&command.path).is_some() {
+            let resolved_path = resolved_scan_path(&command.path);
+            if drive_for_path(&resolved_path).is_some() {
                 match scan_ntfs(command) {
                     Ok(outcome) => Ok(outcome),
                     Err(error) => scan_fallback(command, Some(error.to_string())),
@@ -261,7 +264,7 @@ fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bo
 }
 
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner != ScannerMode::Fallback && drive_volume(path).is_some()
+    scanner != ScannerMode::Fallback && drive_for_path(&resolved_scan_path(path)).is_some()
 }
 
 fn volume_arg_is_drive_root(volume: &str) -> bool {
@@ -306,12 +309,14 @@ fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Resu
         summary,
         scanner_label: "fallback traversal",
         fallback_reason,
+        display_root: None,
     })
 }
 
 fn scan_ntfs(command: &ScanCommand) -> Result<ScanOutcome, diskloom_ntfs::NtfsScanError> {
-    let volume =
-        drive_volume(&command.path).unwrap_or_else(|| command.path.to_string_lossy().into_owned());
+    let resolved_path = resolved_scan_path(&command.path);
+    let volume = drive_for_path(&resolved_path)
+        .unwrap_or_else(|| command.path.to_string_lossy().into_owned());
     let graph = NtfsScanner::scan_volume(&volume)?;
     let summary = summary_from_graph(&graph);
     Ok(ScanOutcome {
@@ -319,6 +324,7 @@ fn scan_ntfs(command: &ScanCommand) -> Result<ScanOutcome, diskloom_ntfs::NtfsSc
         summary,
         scanner_label: "direct NTFS MFT",
         fallback_reason: None,
+        display_root: display_root_for_direct_scan(&resolved_path),
     })
 }
 
@@ -352,6 +358,45 @@ fn drive_volume(path: &Path) -> Option<String> {
     Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
+fn drive_for_path(path: &Path) -> Option<String> {
+    if let Some(volume) = drive_volume(path) {
+        return Some(volume);
+    }
+    let value = path.to_string_lossy();
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    Some(format!("{}:", letter.to_ascii_uppercase()))
+}
+
+fn display_root_for_direct_scan(path: &Path) -> Option<PathBuf> {
+    drive_volume(path).is_none().then(|| path.to_path_buf())
+}
+
+fn resolved_scan_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path)
+        .map(strip_verbatim_prefix)
+        .unwrap_or_else(|_| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|current_dir| current_dir.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+            }
+        })
+}
+
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(stripped) = value.strip_prefix(r"\\?\") {
+        return PathBuf::from(stripped);
+    }
+    path
+}
+
 fn query_filter(command: &ScanCommand) -> Result<QueryFilter> {
     let name = matcher_from_pattern(command.name.as_deref(), command.regex)?;
     let path = matcher_from_pattern(command.path_filter.as_deref(), command.regex)?;
@@ -382,19 +427,21 @@ fn ranked_entry_ids(
     graph: &FileGraph,
     filter: &CompiledFilter,
     command: &ScanCommand,
+    display_root: Option<&Path>,
 ) -> Vec<EntryId> {
+    let root_ids = visible_root_ids(graph, display_root);
     let use_deep_ranking = command.deep || command_has_filters(command);
     let ids: Vec<_> = if use_deep_ranking {
-        graph
-            .ids()
+        root_ids
+            .iter()
+            .flat_map(|root| descendants_of(graph, *root))
             .filter(|id| entry_has_parent(graph, *id))
             .filter(|id| filter.matches(graph, *id))
             .collect()
     } else {
-        graph
-            .ids()
-            .filter(|id| !entry_has_parent(graph, *id))
-            .flat_map(|root| graph.children_of(root))
+        root_ids
+            .iter()
+            .flat_map(|root| graph.children_of(*root))
             .filter(|id| filter.matches(graph, *id))
             .collect()
     };
@@ -403,6 +450,44 @@ fn ranked_entry_ids(
 
 fn entry_has_parent(graph: &FileGraph, id: EntryId) -> bool {
     graph.entry(id).is_some_and(|entry| entry.parent.is_some())
+}
+
+fn visible_root_ids(graph: &FileGraph, display_root: Option<&Path>) -> Vec<EntryId> {
+    if let Some(display_root) = display_root
+        && let Some(root) = find_graph_path(graph, display_root)
+    {
+        return vec![root];
+    }
+    graph
+        .ids()
+        .filter(|id| !entry_has_parent(graph, *id))
+        .collect()
+}
+
+fn descendants_of(graph: &FileGraph, root: EntryId) -> Vec<EntryId> {
+    let mut ids = Vec::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        ids.push(id);
+        pending.extend(graph.children_of(id));
+    }
+    ids
+}
+
+fn find_graph_path(graph: &FileGraph, target: &Path) -> Option<EntryId> {
+    let target = normalized_path_key(target);
+    graph.ids().find(|id| {
+        graph
+            .reconstruct_path(*id)
+            .is_some_and(|path| normalized_path_key(&path) == target)
+    })
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
 }
 
 fn command_has_filters(command: &ScanCommand) -> bool {
@@ -663,14 +748,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_needs_elevation_should_match_direct_drive_scans_only() {
+    fn scan_needs_elevation_should_match_drive_backed_scan_targets() {
         assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("c:\\"),
             ScannerMode::Fallback
         ));
-        assert!(!scan_needs_elevation(
+        assert!(scan_needs_elevation(
             Path::new("c:\\Users"),
             ScannerMode::Auto
         ));
@@ -726,7 +811,7 @@ mod tests {
         let command = scan_command();
         let filter = query_filter(&command).unwrap().compile().unwrap();
 
-        let ids = ranked_entry_ids(&graph, &filter, &command);
+        let ids = ranked_entry_ids(&graph, &filter, &command, None);
 
         assert_eq!(ids, vec![target, src]);
         assert!(!ids.contains(&root));
@@ -750,11 +835,44 @@ mod tests {
         command.deep = true;
         let filter = query_filter(&command).unwrap().compile().unwrap();
 
-        let ids = ranked_entry_ids(&graph, &filter, &command);
+        let ids = ranked_entry_ids(&graph, &filter, &command, None);
 
         assert!(ids.contains(&target));
         assert!(ids.contains(&nested));
         assert!(!ids.contains(&root));
+    }
+
+    #[test]
+    fn direct_scan_ranking_should_scope_to_display_root_children() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, "C:\\", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let users = builder
+            .add_entry(Some(root), "Users", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let windows = builder
+            .add_entry(
+                Some(root),
+                "Windows",
+                FileKind::Directory,
+                10_000,
+                10_000,
+                0,
+            )
+            .unwrap();
+        let profile = builder
+            .add_entry(Some(users), "heman", FileKind::Directory, 2_000, 2_000, 0)
+            .unwrap();
+        let graph = builder.finish();
+        let command = scan_command();
+        let filter = query_filter(&command).unwrap().compile().unwrap();
+
+        let ids = ranked_entry_ids(&graph, &filter, &command, Some(Path::new("C:\\Users")));
+
+        assert_eq!(ids, vec![profile]);
+        assert!(!ids.contains(&windows));
+        assert!(!ids.contains(&users));
     }
 
     #[test]
