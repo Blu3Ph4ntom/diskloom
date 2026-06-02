@@ -43,29 +43,21 @@ function New-IconPng {
     $graphics.Clear([System.Drawing.Color]::Transparent)
     $graphics.ScaleTransform($scale, $scale)
 
-    $shell = New-RoundedRectangle -X 18 -Y 18 -Width 220 -Height 220 -Radius 42
-    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 16, 24, 29)), $shell)
-    $graphics.DrawPath([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 169, 207, 217), 7), $shell)
+    $shell = New-RoundedRectangle -X 18 -Y 18 -Width 220 -Height 220 -Radius 44
+    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 12, 18, 22)), $shell)
+    $graphics.DrawPath([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 112, 214, 232), 8), $shell)
 
-    $accent = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 84, 198, 219), 8)
+    $accent = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 84, 198, 219), 10)
     $accent.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $accent.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $soft = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 218, 231, 234), 10)
-    $soft.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $soft.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $graphics.DrawLine($accent, 58, 190, 198, 190)
 
-    $graphics.DrawBezier($accent, 58, 76, 92, 111, 160, 111, 198, 76)
-    $graphics.DrawBezier($accent, 54, 104, 96, 137, 171, 137, 210, 104)
-    $graphics.DrawLine($soft, 74, 170, 183, 170)
-    $graphics.DrawLine($soft, 86, 90, 172, 90)
-    $graphics.DrawLine($soft, 74, 170, 91, 90)
-    $graphics.DrawLine($soft, 183, 170, 172, 90)
-    $graphics.DrawLine([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 169, 207, 217), 7), 86, 128, 188, 128)
-
-    $dotBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 84, 198, 219))
-    foreach ($x in @(96, 128, 160)) {
-        $graphics.FillEllipse($dotBrush, $x - 8, 190 - 8, 16, 16)
-    }
+    $font = [System.Drawing.Font]::new("Segoe UI Semibold", 86, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+    $format = [System.Drawing.StringFormat]::new()
+    $format.Alignment = [System.Drawing.StringAlignment]::Center
+    $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $brush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 229, 239, 242))
+    $graphics.DrawString("DL", $font, $brush, [System.Drawing.RectangleF]::new(22, 50, 212, 124), $format)
 
     $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
     $graphics.Dispose()
@@ -97,14 +89,9 @@ $stream.Dispose()
 
 $svg = @'
 <svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="18" y="18" width="220" height="220" rx="42" fill="#10181d" stroke="#a9cfd9" stroke-width="7"/>
-  <path d="M58 76C92 111 160 111 198 76" stroke="#54c6db" stroke-width="8" stroke-linecap="round"/>
-  <path d="M54 104C96 137 171 137 210 104" stroke="#54c6db" stroke-width="8" stroke-linecap="round"/>
-  <path d="M74 170H183M86 90H172M74 170L91 90M183 170L172 90" stroke="#dae7ea" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M86 128H188" stroke="#a9cfd9" stroke-width="7" stroke-linecap="round"/>
-  <circle cx="96" cy="190" r="8" fill="#54c6db"/>
-  <circle cx="128" cy="190" r="8" fill="#54c6db"/>
-  <circle cx="160" cy="190" r="8" fill="#54c6db"/>
+  <rect x="18" y="18" width="220" height="220" rx="44" fill="#0c1216" stroke="#70d6e8" stroke-width="8"/>
+  <text x="128" y="146" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="92" font-weight="700" fill="#e5eff2">DL</text>
+  <path d="M58 190H198" stroke="#54c6db" stroke-width="10" stroke-linecap="round"/>
 </svg>
 '@
 Set-Content -LiteralPath $svgPath -Value $svg -Encoding UTF8

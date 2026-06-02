@@ -407,10 +407,18 @@ function App() {
       }
       tooltipElementRef.current = element;
       const rect = element.getBoundingClientRect();
+      const estimatedWidth = Math.min(360, Math.max(112, text.length * 7 + 18));
+      const estimatedHeight = text.length > 42 ? 46 : 30;
+      const belowY = rect.bottom + 10;
       setTooltip({
         text,
-        x: Math.min(window.innerWidth - 14, Math.max(14, rect.left + rect.width / 2)),
-        y: Math.min(window.innerHeight - 14, rect.bottom + 10),
+        x: Math.min(
+          window.innerWidth - estimatedWidth - 8,
+          Math.max(8, rect.left + rect.width / 2 - estimatedWidth / 2),
+        ),
+        y: belowY + estimatedHeight > window.innerHeight - 8
+          ? Math.max(8, rect.top - estimatedHeight - 10)
+          : belowY,
       });
     };
 
@@ -642,7 +650,7 @@ function App() {
     <main className="app-shell" data-scanning={scanning || deleting} data-rail-collapsed={railCollapsed}>
       <aside className="drive-rail">
         <div className="rail-title">
-          <div className="product-mark has-tooltip" data-tooltip="DiskLoom">
+          <div className="product-mark" aria-hidden="true">
             <LogoMark />
           </div>
           <button
@@ -667,7 +675,6 @@ function App() {
                 data-active={drivePath === activeDriveRoot}
                 data-root={drive.path.replace("\\", "")}
                 onClick={() => chooseDrive(drive)}
-                data-tooltip={driveCapacityLine(drive)}
                 type="button"
               >
                 <span className="drive-icon">
@@ -694,7 +701,6 @@ function App() {
               autoFocus
               spellcheck={false}
               value={commandText}
-              data-tooltip="Search loaded results or enter a drive or folder path"
               placeholder="Search or enter path..."
               onInput={(event) => handleCommandInput(event.currentTarget.value)}
             />
@@ -743,13 +749,12 @@ function App() {
               <RefreshCw size={20} strokeWidth={1.7} />
             </button>
             {scanning ? (
-              <button className="text-action has-tooltip" data-tooltip="Stop scan" onClick={cancelScan} type="button">
+              <button className="text-action" onClick={cancelScan} type="button">
                 Stop
               </button>
             ) : deleting ? (
               <button
-                className="text-action has-tooltip"
-                data-tooltip="Delete is running in the background"
+                className="text-action"
                 disabled
                 type="button"
               >
@@ -757,8 +762,7 @@ function App() {
               </button>
             ) : (
               <button
-                className="text-action danger has-tooltip"
-                data-tooltip="Delete selected item"
+                className="text-action danger"
                 disabled={selectedId === null}
                 onClick={() => setDeleteDialogOpen(true)}
                 type="button"
@@ -776,7 +780,7 @@ function App() {
                 <dl>
                   <div>
                     <dt>Path</dt>
-                    <dd data-tooltip={infoPath}>{infoPath || "-"}</dd>
+                    <dd>{infoPath || "-"}</dd>
                   </div>
                   <div>
                     <dt>Scanner</dt>
@@ -796,10 +800,10 @@ function App() {
                   </div>
                 </dl>
                 <div className="info-actions">
-              <button type="button" data-tooltip="Show selected item in File Explorer" onClick={() => void openExplorer()}>
+                  <button type="button" onClick={() => void openExplorer()}>
                     Show in folder
                   </button>
-                  <button type="button" data-tooltip="Open Windows properties" onClick={() => void showProperties()}>
+                  <button type="button" onClick={() => void showProperties()}>
                     Properties
                   </button>
                 </div>
@@ -833,7 +837,7 @@ function App() {
 
         <section className="table-shell">
           <div className="table-header">
-            <button type="button" data-tooltip="Sort by name" onClick={() => changeSort("name")} data-active={sortKey === "name"}>
+            <button type="button" onClick={() => changeSort("name")} data-active={sortKey === "name"}>
               Name
               {sortKey === "name" && sortDescending ? (
                 <ChevronDown size={15} strokeWidth={1.8} />
@@ -841,7 +845,7 @@ function App() {
                 <ChevronUp size={15} strokeWidth={1.8} />
               )}
             </button>
-            <button type="button" data-tooltip="Sort by size" onClick={() => changeSort("size")} data-active={sortKey === "size"}>
+            <button type="button" onClick={() => changeSort("size")} data-active={sortKey === "size"}>
               Size
               {sortKey === "size" && !sortDescending ? (
                 <ChevronUp size={15} strokeWidth={1.8} />
@@ -850,7 +854,7 @@ function App() {
               )}
               <Filter size={17} strokeWidth={1.7} />
             </button>
-            <button type="button" data-tooltip="Sort by modified date" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
+            <button type="button" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
               Last Modified
               {sortKey === "modified" && !sortDescending ? (
                 <ChevronUp size={15} strokeWidth={1.8} />
@@ -877,13 +881,11 @@ function App() {
                   onKeyDown={(event) => handleRowKeyDown(event, row, selectRow, toggleRow)}
                   role="button"
                   tabIndex={0}
-                  data-tooltip={row.path || row.name}
                 >
                   <span className="row-name">
                     <span
                       className="disclosure"
                       data-visible={row.childCount > 0}
-                      data-tooltip={row.expanded ? "Collapse folder" : "Expand folder"}
                       onClick={(event) => {
                         event.stopPropagation();
                         void toggleRow(row);
@@ -946,12 +948,11 @@ function App() {
             <h2>Delete selected item?</h2>
             <p>{selectedPath}</p>
             <div className="dialog-actions">
-              <button type="button" data-tooltip="Cancel" disabled={deleting} onClick={() => setDeleteDialogOpen(false)}>
+              <button type="button" disabled={deleting} onClick={() => setDeleteDialogOpen(false)}>
                 Cancel
               </button>
               <button
                 type="button"
-                data-tooltip="Move selected item to Recycle Bin"
                 disabled={deleting}
                 onClick={() => void deleteSelected("recycle")}
               >
@@ -960,7 +961,6 @@ function App() {
               <button
                 className="danger"
                 type="button"
-                data-tooltip="Permanently delete selected item"
                 disabled={deleting}
                 onClick={() => void deleteSelected("permanent")}
               >
@@ -978,15 +978,9 @@ function App() {
 function LogoMark() {
   return (
     <svg className="logo-mark" viewBox="0 0 64 64" aria-hidden="true">
-      <rect x="8" y="8" width="48" height="48" rx="11" />
-      <path d="M18 42h28" />
-      <path d="M20 42l4-20h24l6 20" />
-      <path d="M25 31h25" />
-      <circle cx="25" cy="47" r="2.3" />
-      <circle cx="32" cy="47" r="2.3" />
-      <circle cx="39" cy="47" r="2.3" />
-      <path className="logo-thread" d="M17 20c8 9 21 9 30 0" />
-      <path className="logo-thread" d="M17 27c10 8 26 8 36 0" />
+      <rect x="7" y="7" width="50" height="50" rx="12" />
+      <text className="logo-text" x="32" y="37" text-anchor="middle">DL</text>
+      <path className="logo-thread" d="M17 48h30" />
     </svg>
   );
 }
