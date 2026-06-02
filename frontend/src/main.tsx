@@ -51,6 +51,16 @@ type ScanCompleteDto = ScanProgressDto & {
   allocatedBytes: number;
 };
 
+type DeleteEventDto = {
+  path: string;
+  permanently: boolean;
+  elapsedMs: number;
+};
+
+type DeleteErrorDto = DeleteEventDto & {
+  error: string;
+};
+
 type TreeRowDto = {
   id: number;
   name: string;
@@ -90,6 +100,9 @@ function App() {
   const [commandText, setCommandText] = useState("");
   const [drives, setDrives] = useState<DriveDto[]>([]);
   const [scanning, setScanning] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deletePath, setDeletePath] = useState("");
+  const [deleteElapsedMs, setDeleteElapsedMs] = useState(0);
   const [status, setStatus] = useState("Ready");
   const [detail, setDetail] = useState("Type a drive, folder, or search.");
   const [progress, setProgress] = useState<ScanProgressDto>(EMPTY_PROGRESS);
@@ -109,10 +122,13 @@ function App() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const treeRef = useRef<HTMLDivElement>(null);
+  const pathRef = useRef("");
   const scanningRef = useRef(false);
   const queuedScanPath = useRef("");
   const lastStartedPath = useRef("");
   const loadedPathRef = useRef("");
+  const pendingDeleteRefreshPath = useRef("");
+  const deleteStartedAt = useRef<number | null>(null);
 
   const rowLimit = useMemo(
     () => Math.max(90, Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2),
@@ -250,18 +266,29 @@ function App() {
     if (selectedId === null || !selectedPath) {
       return;
     }
+    const permanently = mode === "permanent";
+    const refreshTarget = normalizeScanTarget(path) || loadedPathRef.current;
+    pendingDeleteRefreshPath.current = refreshTarget;
+    deleteStartedAt.current = performance.now();
+    setDeleteElapsedMs(0);
+    setDeleting(true);
+    setDeletePath(selectedPath);
+    setStatus(permanently ? "Deleting" : "Moving to Recycle Bin");
+    setDetail(selectedPath);
     setError("");
     setDeleteDialogOpen(false);
     try {
-      await invoke("delete_entry", { id: selectedId, permanently: mode === "permanent" });
+      await invoke("delete_entry", { id: selectedId, permanently });
       setSelectedId(null);
       setSelectedPath("");
-      await startScanFor(path, { force: true });
     } catch (deleteError) {
+      pendingDeleteRefreshPath.current = "";
+      deleteStartedAt.current = null;
+      setDeleting(false);
       setStatus("Delete failed");
       setError(String(deleteError));
     }
-  }, [path, selectedId, selectedPath, startScanFor]);
+  }, [path, selectedId, selectedPath]);
 
   const openExplorer = useCallback(async (targetPath?: string, targetId?: number) => {
     setError("");
@@ -333,12 +360,28 @@ function App() {
   }, [loadRows, rowOffset]);
 
   useEffect(() => {
+    pathRef.current = path;
+  }, [path]);
+
+  useEffect(() => {
     scanningRef.current = scanning;
   }, [scanning]);
 
   useEffect(() => {
     loadedPathRef.current = loadedPath;
   }, [loadedPath]);
+
+  useEffect(() => {
+    if (!deleting) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (deleteStartedAt.current !== null) {
+        setDeleteElapsedMs(Math.max(0, performance.now() - deleteStartedAt.current));
+      }
+    }, 180);
+    return () => window.clearInterval(timer);
+  }, [deleting]);
 
   useEffect(() => {
     let cleanup = false;
@@ -473,6 +516,42 @@ function App() {
         setStatus("Scan failed");
         setError(event.payload);
       }),
+      listen<DeleteEventDto>("delete-started", (event) => {
+        deleteStartedAt.current = performance.now();
+        setDeleteElapsedMs(0);
+        setDeleting(true);
+        setDeletePath(event.payload.path);
+        setStatus(event.payload.permanently ? "Deleting" : "Moving to Recycle Bin");
+        setDetail(event.payload.path);
+      }),
+      listen<DeleteEventDto>("delete-complete", (event) => {
+        const refreshTarget = pendingDeleteRefreshPath.current;
+        pendingDeleteRefreshPath.current = "";
+        deleteStartedAt.current = null;
+        setDeleteElapsedMs(event.payload.elapsedMs);
+        setDeleting(false);
+        setDeletePath("");
+        setSelectedId(null);
+        setSelectedPath("");
+        setStatus("Deleted");
+        setDetail(`${shortPathLabel(event.payload.path)} · ${formatElapsed(event.payload.elapsedMs)}`);
+
+        if (
+          refreshTarget &&
+          normalizeScanTarget(pathRef.current).toLowerCase() === refreshTarget.toLowerCase()
+        ) {
+          void startScanFor(refreshTarget, { force: true });
+        }
+      }),
+      listen<DeleteErrorDto>("delete-error", (event) => {
+        pendingDeleteRefreshPath.current = "";
+        deleteStartedAt.current = null;
+        setDeleteElapsedMs(event.payload.elapsedMs);
+        setDeleting(false);
+        setStatus("Delete failed");
+        setDetail(event.payload.path);
+        setError(event.payload.error);
+      }),
     ];
 
     return () => {
@@ -493,7 +572,7 @@ function App() {
   const infoPath = selectedPath || path;
 
   return (
-    <main className="app-shell" data-scanning={scanning} data-rail-collapsed={railCollapsed}>
+    <main className="app-shell" data-scanning={scanning || deleting} data-rail-collapsed={railCollapsed}>
       <aside className="drive-rail">
         <div className="rail-title">
           <button
@@ -551,10 +630,12 @@ function App() {
               onInput={(event) => handleCommandInput(event.currentTarget.value)}
             />
           </label>
-          <div className="scan-timer" data-active={scanning}>
-            <span className="live-dot" data-active={scanning} />
+          <div className="scan-timer" data-active={scanning || deleting}>
+            <span className="live-dot" data-active={scanning || deleting} />
             <span>
-              {scanning
+              {deleting
+                ? `${formatElapsed(deleteElapsedMs)} · deleting ${shortPathLabel(deletePath)}`
+                : scanning
                 ? `${formatElapsed(totals.elapsedMs)} · ${formatCount(totals.entries)} scanned`
                 : complete
                   ? complete.elapsedMs === 0
@@ -590,6 +671,7 @@ function App() {
               aria-label="Force rescan"
               data-tooltip="Force rescan"
               title="Force rescan"
+              disabled={deleting}
               onClick={() => void refreshScan()}
             >
               <RefreshCw size={20} strokeWidth={1.7} />
@@ -597,6 +679,16 @@ function App() {
             {scanning ? (
               <button className="text-action has-tooltip" data-tooltip="Stop scan" title="Stop scan" onClick={cancelScan} type="button">
                 Stop
+              </button>
+            ) : deleting ? (
+              <button
+                className="text-action has-tooltip"
+                data-tooltip="Delete is running in the background"
+                title="Delete is running in the background"
+                disabled
+                type="button"
+              >
+                Deleting
               </button>
             ) : (
               <button
@@ -655,7 +747,7 @@ function App() {
         <section className="scan-readout">
           <div>
             <div className="readout-status">
-              <span className="live-dot" data-active={scanning} />
+              <span className="live-dot" data-active={scanning || deleting} />
               <strong>{status}</strong>
               <span>{subline}</span>
             </div>
@@ -668,7 +760,7 @@ function App() {
           </div>
           <div className="readout-capacity">
             <span>{complete ? formatBytes(complete.sizeBytes) : "Scanning"}</span>
-            <div className="capacity-track" data-live={scanning}>
+            <div className="capacity-track" data-live={scanning || deleting}>
               <span style={{ width: `${activeUsedPercent ?? 0}%` }} />
             </div>
             <span>{activeUsedPercent === null ? "" : `${Math.round(activeUsedPercent)}% full`}</span>
@@ -791,16 +883,22 @@ function App() {
             <h2>Delete selected item?</h2>
             <p>{selectedPath}</p>
             <div className="dialog-actions">
-              <button type="button" title="Cancel" onClick={() => setDeleteDialogOpen(false)}>
+              <button type="button" title="Cancel" disabled={deleting} onClick={() => setDeleteDialogOpen(false)}>
                 Cancel
               </button>
-              <button type="button" title="Move selected item to Recycle Bin" onClick={() => void deleteSelected("recycle")}>
+              <button
+                type="button"
+                title="Move selected item to Recycle Bin"
+                disabled={deleting}
+                onClick={() => void deleteSelected("recycle")}
+              >
                 Move to Recycle Bin
               </button>
               <button
                 className="danger"
                 type="button"
                 title="Permanently delete selected item"
+                disabled={deleting}
                 onClick={() => void deleteSelected("permanent")}
               >
                 Permanently delete
@@ -864,6 +962,15 @@ function normalizeScanTarget(value: string) {
     return `${trimmed}\\`;
   }
   return trimmed;
+}
+
+function shortPathLabel(value: string) {
+  const trimmed = value.trim().replace(/[\\/]+$/, "");
+  if (!trimmed) {
+    return "item";
+  }
+  const match = /[^\\/]+$/.exec(trimmed);
+  return match?.[0] || trimmed;
 }
 
 function isDriveRoot(value: string) {

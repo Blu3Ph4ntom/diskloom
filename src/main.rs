@@ -305,6 +305,23 @@ struct ScanCompleteDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeleteEventDto {
+    path: String,
+    permanently: bool,
+    elapsed_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteErrorDto {
+    path: String,
+    permanently: bool,
+    elapsed_ms: u128,
+    error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TreeRowDto {
     id: u32,
     name: String,
@@ -505,14 +522,60 @@ fn delete_entry(
     id: u32,
     permanently: Option<bool>,
     state: State<'_, SharedState>,
+    window: Window,
 ) -> Result<(), String> {
     let path = selected_entry_path(id, &state)?;
-    if permanently.unwrap_or(false) {
-        delete_permanently(&path)
-            .map_err(|error| format!("failed to permanently delete path: {error}"))
-    } else {
-        recycle_delete(&path).map_err(|error| format!("failed to move to Recycle Bin: {error}"))
-    }
+    let permanently = permanently.unwrap_or(false);
+    let path_label = path.to_string_lossy().into_owned();
+    let shared = Arc::clone(&state.inner);
+
+    emit_or_log(
+        &window,
+        "delete-started",
+        DeleteEventDto {
+            path: path_label.clone(),
+            permanently,
+            elapsed_ms: 0,
+        },
+    );
+
+    thread::spawn(move || {
+        let started = Instant::now();
+        let result = if permanently {
+            delete_permanently(&path)
+                .map_err(|error| format!("failed to permanently delete path: {error}"))
+        } else {
+            recycle_delete(&path).map_err(|error| format!("failed to move to Recycle Bin: {error}"))
+        };
+        let elapsed_ms = started.elapsed().as_millis();
+
+        match result {
+            Ok(()) => {
+                invalidate_scan_cache(&shared);
+                emit_or_log(
+                    &window,
+                    "delete-complete",
+                    DeleteEventDto {
+                        path: path_label,
+                        permanently,
+                        elapsed_ms,
+                    },
+                );
+            }
+            Err(error) => emit_or_log(
+                &window,
+                "delete-error",
+                DeleteErrorDto {
+                    path: path_label,
+                    permanently,
+                    elapsed_ms,
+                    error,
+                },
+            ),
+        }
+    });
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -582,6 +645,12 @@ fn delete_permanently(path: &Path) -> std::io::Result<()> {
     } else {
         std::fs::remove_file(path)
     }
+}
+
+fn invalidate_scan_cache(shared: &Arc<Mutex<AppState>>) {
+    let mut state = lock_state(shared);
+    state.cache.clear();
+    state.selected = None;
 }
 
 fn apply_scan_complete(

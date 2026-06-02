@@ -73,7 +73,10 @@ pub fn recycle_delete(path: impl AsRef<Path>) -> Result<(), ShellActionError> {
     use windows::{
         Win32::{
             Foundation::HWND,
-            UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, SHFILEOPSTRUCTW, SHFileOperationW},
+            UI::Shell::{
+                FO_DELETE, FOF_ALLOWUNDO, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+                SHFileOperationW,
+            },
         },
         core::{BOOL, PCWSTR},
     };
@@ -84,7 +87,7 @@ pub fn recycle_delete(path: impl AsRef<Path>) -> Result<(), ShellActionError> {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(from.as_ptr()),
         pTo: PCWSTR::null(),
-        fFlags: FOF_ALLOWUNDO.0 as u16,
+        fFlags: (FOF_ALLOWUNDO.0 | FOF_SILENT.0 | FOF_NOERRORUI.0) as u16,
         fAnyOperationsAborted: BOOL::from(false),
         hNameMappings: std::ptr::null_mut(),
         lpszProgressTitle: PCWSTR::null(),
