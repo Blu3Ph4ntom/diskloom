@@ -1250,6 +1250,7 @@ fn scan_graph_fallback(path: PathBuf, fallback: bool) -> Result<ScanGraphOutcome
     let (graph, summary) = FallbackScanner::scan(ScanOptions {
         root: path,
         follow_symlinks: false,
+        precise_allocated: false,
     })?;
 
     Ok(ScanGraphOutcome {
@@ -1321,6 +1322,7 @@ fn scan_fallback_with_progress(
         ScanOptions {
             root: path,
             follow_symlinks: false,
+            precise_allocated: false,
         },
         progress_every,
         |_| {

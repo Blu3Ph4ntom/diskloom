@@ -87,6 +87,9 @@ struct ScanCommand {
     follow_symlinks: bool,
 
     #[arg(long)]
+    precise_allocated: bool,
+
+    #[arg(long)]
     duplicates: bool,
 
     #[arg(long)]
@@ -296,6 +299,7 @@ fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Resu
     let (graph, summary) = FallbackScanner::scan(ScanOptions {
         root: command.path.clone(),
         follow_symlinks: command.follow_symlinks,
+        precise_allocated: command.precise_allocated,
     })?;
     Ok(ScanOutcome {
         graph,
@@ -833,6 +837,7 @@ mod tests {
             modified_before: None,
             files_only: false,
             follow_symlinks: false,
+            precise_allocated: false,
             duplicates: false,
             file_types: false,
             deep: false,

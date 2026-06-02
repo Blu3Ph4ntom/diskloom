@@ -4,13 +4,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use diskloom_core::{FileGraph, FileGraphBuilder, FileGraphError, FileKind};
+use diskloom_core::{
+    EntryFlags, EntryMetadata, FileGraph, FileGraphBuilder, FileGraphError, FileKind,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub root: PathBuf,
     pub follow_symlinks: bool,
+    pub precise_allocated: bool,
 }
 
 impl ScanOptions {
@@ -19,6 +22,7 @@ impl ScanOptions {
         Self {
             root: root.into(),
             follow_symlinks: false,
+            precise_allocated: false,
         }
     }
 }
@@ -71,13 +75,16 @@ impl FallbackScanner {
         progress_every: u64,
         mut on_progress: impl FnMut(ScanSummary) -> ScanControl,
     ) -> Result<(FileGraph, ScanSummary), ScanError> {
+        let follow_symlinks = options.follow_symlinks;
+        let precise_allocated = options.precise_allocated;
         let root_metadata = metadata_for(&options.root, options.follow_symlinks)?;
         let root_kind = kind_for(&root_metadata);
         let root_size = logical_size(&root_metadata, root_kind);
-        let root_allocated = allocated_size(&options.root, root_kind, root_size);
+        let root_allocated =
+            allocated_size(Some(&options.root), root_kind, root_size, precise_allocated);
         let root_name = root_name(&options.root);
 
-        let mut builder = FileGraphBuilder::new();
+        let mut builder = FileGraphBuilder::without_name_dedup();
         let root = builder.add_entry(
             None,
             &root_name,
@@ -114,23 +121,37 @@ impl FallbackScanner {
                     summary.inaccessible += 1;
                     continue;
                 };
-                let path = child.path();
-                let Ok(metadata) = metadata_for(&path, options.follow_symlinks) else {
+                let mut path = None;
+                let metadata = if follow_symlinks {
+                    let child_path = child.path();
+                    let metadata = fs::metadata(&child_path);
+                    path = Some(child_path);
+                    metadata
+                } else {
+                    child.metadata()
+                };
+                let Ok(metadata) = metadata else {
                     summary.inaccessible += 1;
                     continue;
                 };
 
                 let kind = kind_for(&metadata);
                 let size = logical_size(&metadata, kind);
-                let allocated = allocated_size(&path, kind, size);
+                if precise_allocated && kind == FileKind::File && path.is_none() {
+                    path = Some(child.path());
+                }
+                let allocated = allocated_size(path.as_deref(), kind, size, precise_allocated);
                 let name = child.file_name().to_string_lossy().into_owned();
-                let id = builder.add_entry(
+                let id = builder.add_entry_with_flags_owned_name(
                     Some(parent),
-                    &name,
-                    kind,
-                    size,
-                    allocated,
-                    modified_unix(&metadata),
+                    name,
+                    EntryMetadata {
+                        kind,
+                        size,
+                        allocated,
+                        modified_unix: modified_unix(&metadata),
+                        extra_flags: EntryFlags::empty(),
+                    },
                 )?;
 
                 summary.entries += 1;
@@ -143,7 +164,7 @@ impl FallbackScanner {
                 )?;
 
                 if kind == FileKind::Directory {
-                    pending.push((path, id));
+                    pending.push((path.unwrap_or_else(|| child.path()), id));
                 }
             }
         }
@@ -192,7 +213,12 @@ fn logical_size(metadata: &fs::Metadata, kind: FileKind) -> u64 {
 }
 
 #[cfg(windows)]
-fn allocated_size(path: &Path, kind: FileKind, fallback: u64) -> u64 {
+fn allocated_size(
+    path: Option<&Path>,
+    kind: FileKind,
+    fallback: u64,
+    precise_allocated: bool,
+) -> u64 {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::{Win32::Storage::FileSystem::GetCompressedFileSizeW, core::PCWSTR};
@@ -200,6 +226,12 @@ fn allocated_size(path: &Path, kind: FileKind, fallback: u64) -> u64 {
     if kind != FileKind::File {
         return 0;
     }
+    if !precise_allocated {
+        return fallback;
+    }
+    let Some(path) = path else {
+        return fallback;
+    };
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut high = 0_u32;
@@ -213,7 +245,7 @@ fn allocated_size(path: &Path, kind: FileKind, fallback: u64) -> u64 {
 }
 
 #[cfg(not(windows))]
-fn allocated_size(_: &Path, kind: FileKind, fallback: u64) -> u64 {
+fn allocated_size(_: Option<&Path>, kind: FileKind, fallback: u64, _: bool) -> u64 {
     if kind == FileKind::File { fallback } else { 0 }
 }
 
@@ -306,6 +338,7 @@ mod tests {
         let stats = graph.stats(root).unwrap();
 
         assert_eq!(stats.total_size.bytes(), 12);
+        assert_eq!(stats.total_allocated.bytes(), 12);
     }
 
     #[test]

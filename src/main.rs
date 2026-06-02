@@ -1068,6 +1068,7 @@ fn scan_fallback(
         ScanOptions {
             root: path,
             follow_symlinks: false,
+            precise_allocated: false,
         },
         UI_PROGRESS_EVERY,
         |summary| {
