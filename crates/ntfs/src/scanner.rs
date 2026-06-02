@@ -12,6 +12,7 @@ use crate::mft::{
 };
 
 const ROOT_RECORD_NUMBER: u64 = 5;
+const RESERVED_METADATA_RECORDS: u64 = 16;
 const MFT_READ_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 const NO_PARENT_RECORD: u64 = u64::MAX;
 
@@ -799,6 +800,9 @@ fn raw_entry_from_scanned_record(
     if !parsed.header.is_in_use() || parsed.header.base_file_record != 0 {
         return None;
     }
+    if is_reserved_metadata_record(record_number) {
+        return None;
+    }
 
     let name = parsed.file_name?;
     let is_directory = parsed.header.is_directory();
@@ -893,20 +897,23 @@ fn add_entry_recursive(
     visiting[record_number] = true;
 
     let parent_record_number = entries.parent_record_number(record_number);
-    let parent = parent_record_number
-        .and_then(|parent| {
-            if parent == record_number as u64 {
-                None
+    let parent = match parent_record_number {
+        Some(parent) if is_reserved_metadata_record(parent) => {
+            visiting[record_number] = false;
+            return Ok(None);
+        }
+        Some(parent) if parent != record_number as u64 => {
+            let parent = usize::try_from(parent)
+                .ok()
+                .filter(|parent| *parent < entries.len());
+            if let Some(parent) = parent.filter(|parent| entries.is_present(*parent)) {
+                add_entry_recursive(parent, entries, builder, ids, visiting, root_name)?
             } else {
-                usize::try_from(parent)
-                    .ok()
-                    .filter(|parent| *parent < entries.len())
+                fallback_root_parent(record_number, ids)
             }
-        })
-        .map(|parent| add_entry_recursive(parent, entries, builder, ids, visiting, root_name))
-        .transpose()?
-        .flatten();
-    let parent = parent.or_else(|| fallback_root_parent(record_number, ids));
+        }
+        Some(_) | None => fallback_root_parent(record_number, ids),
+    };
 
     let mut flags = EntryFlags::empty();
     if entries.hard_links[record_number] > 1 {
@@ -939,6 +946,10 @@ fn fallback_root_parent(record_number: usize, ids: &[Option<EntryId>]) -> Option
         return None;
     }
     ids.get(ROOT_RECORD_NUMBER as usize).copied().flatten()
+}
+
+fn is_reserved_metadata_record(record_number: u64) -> bool {
+    record_number < RESERVED_METADATA_RECORDS && record_number != ROOT_RECORD_NUMBER
 }
 
 fn root_display_name(volume: &str) -> String {
@@ -1140,6 +1151,69 @@ mod tests {
             graph.reconstruct_path(orphan).unwrap().to_string_lossy(),
             "C:\\orphan.bin"
         );
+    }
+
+    #[test]
+    fn build_graph_from_entries_should_skip_children_under_reserved_metadata() {
+        let mut entries = NtfsRawEntries::with_len(43);
+        entries.insert(
+            ROOT_RECORD_NUMBER as usize,
+            NtfsRawEntry {
+                parent_record_number: None,
+                name: ".".to_owned(),
+                kind: FileKind::Directory,
+                size: 0,
+                allocated: 0,
+                modified_unix: 0,
+                hard_links: 1,
+            },
+        );
+        entries.insert(
+            42,
+            NtfsRawEntry {
+                parent_record_number: Some(11),
+                name: "$UsnJrnl".to_owned(),
+                kind: FileKind::File,
+                size: 500_000_000_000,
+                allocated: 500_000_000_000,
+                modified_unix: 0,
+                hard_links: 1,
+            },
+        );
+
+        let graph = build_graph_from_entries(entries, "C:\\".to_owned()).unwrap();
+
+        assert!(graph.ids().all(|id| graph.name(id) != Some("$UsnJrnl")));
+        assert_eq!(graph.len(), 1);
+    }
+
+    #[test]
+    fn raw_entry_from_scanned_record_should_skip_reserved_metadata_records() {
+        let parsed = ScannedFileRecord {
+            header: FileRecordHeader {
+                sequence_number: 1,
+                hard_link_count: 1,
+                first_attribute_offset: 56,
+                flags: 0x0001,
+                bytes_in_use: 0,
+                bytes_allocated: 0,
+                base_file_record: 0,
+                next_attribute_id: 0,
+                record_number: 8,
+            },
+            standard_modified_unix: Some(200),
+            file_name: Some(ScannedFileNameAttribute {
+                parent_record_number: ROOT_RECORD_NUMBER,
+                allocated_size: 500_000_000_000,
+                data_size: 500_000_000_000,
+                modified_unix: 100,
+                name: "$BadClus".to_owned(),
+            }),
+            data_size: 500_000_000_000,
+            allocated_size: 500_000_000_000,
+        };
+
+        assert!(raw_entry_from_scanned_record(8, parsed).is_none());
     }
 
     #[test]
