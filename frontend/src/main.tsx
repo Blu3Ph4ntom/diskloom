@@ -5,11 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
-type ScannerMode = "auto" | "ntfs" | "fallback";
-
 type StartupDto = {
   path: string | null;
-  scanner: ScannerMode;
+  scanner: "auto" | "ntfs" | "fallback";
   scan: boolean;
   elevated: boolean;
 };
@@ -53,34 +51,40 @@ type TreeViewportDto = {
 };
 
 const ROW_HEIGHT = 34;
-const OVERSCAN_ROWS = 28;
+const OVERSCAN_ROWS = 30;
+const EMPTY_PROGRESS: ScanProgressDto = {
+  entries: 0,
+  files: 0,
+  directories: 0,
+  inaccessible: 0,
+  elapsedMs: 0,
+};
 
 function App() {
-  const [path, setPath] = useState(".");
-  const [scanner, setScanner] = useState<ScannerMode>("auto");
+  const [ready, setReady] = useState(false);
+  const [path, setPath] = useState("");
+  const [query, setQuery] = useState("");
   const [drives, setDrives] = useState<DriveDto[]>([]);
   const [scanning, setScanning] = useState(false);
   const [status, setStatus] = useState("Ready");
-  const [detail, setDetail] = useState("");
-  const [progress, setProgress] = useState<ScanProgressDto>({
-    entries: 0,
-    files: 0,
-    directories: 0,
-    inaccessible: 0,
-    elapsedMs: 0,
-  });
+  const [detail, setDetail] = useState("Type a drive or folder path.");
+  const [progress, setProgress] = useState<ScanProgressDto>(EMPTY_PROGRESS);
   const [complete, setComplete] = useState<ScanCompleteDto | null>(null);
   const [rows, setRows] = useState<TreeRowDto[]>([]);
   const [rowOffset, setRowOffset] = useState(0);
   const [visibleTotal, setVisibleTotal] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(460);
+  const [viewportHeight, setViewportHeight] = useState(480);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedPath, setSelectedPath] = useState("");
   const [error, setError] = useState("");
+
   const treeRef = useRef<HTMLDivElement>(null);
-  const autoScanStarted = useRef(false);
+  const scanningRef = useRef(false);
+  const queuedScanPath = useRef("");
+  const lastStartedPath = useRef("");
 
   const rowLimit = useMemo(
-    () => Math.max(80, Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2),
+    () => Math.max(90, Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2),
     [viewportHeight],
   );
 
@@ -89,42 +93,71 @@ function App() {
       const viewport = await invoke<TreeViewportDto>("get_visible_rows", {
         offset: Math.max(0, offset),
         limit: rowLimit,
+        query,
       });
       setRows(viewport.rows);
       setRowOffset(viewport.offset);
       setVisibleTotal(viewport.total);
     },
-    [rowLimit],
+    [query, rowLimit],
   );
 
-  const startScan = useCallback(async () => {
+  const startScanFor = useCallback(async (rawPath: string) => {
+    const target = normalizeScanTarget(rawPath);
+    if (!target) {
+      return;
+    }
+
+    if (scanningRef.current) {
+      queuedScanPath.current = target;
+      setStatus("Cancelling");
+      try {
+        await invoke("cancel_scan");
+      } catch {
+        // Best effort. The running scan will either stop or finish.
+      }
+      return;
+    }
+
+    lastStartedPath.current = target;
+    queuedScanPath.current = "";
     setError("");
     setComplete(null);
     setRows([]);
     setVisibleTotal(0);
+    setSelectedId(null);
     setSelectedPath("");
     setStatus("Scanning");
-    setDetail(path);
+    setDetail(target);
     setScanning(true);
-    setProgress({
-      entries: 0,
-      files: 0,
-      directories: 0,
-      inaccessible: 0,
-      elapsedMs: 0,
-    });
+    scanningRef.current = true;
+    setProgress(EMPTY_PROGRESS);
+
     try {
-      await invoke("start_scan", { path, scanner });
+      await invoke("start_scan", { path: target, scanner: "auto" });
     } catch (scanError) {
+      const message = String(scanError);
+      if (message.toLowerCase().includes("already running")) {
+        queuedScanPath.current = target;
+        setStatus("Cancelling");
+        try {
+          await invoke("cancel_scan");
+        } catch {
+          // Best effort. The running scan will either stop or finish.
+        }
+        return;
+      }
+      scanningRef.current = false;
       setScanning(false);
       setStatus("Scan failed");
-      setError(String(scanError));
+      setError(message);
     }
-  }, [path, scanner]);
+  }, []);
 
   const cancelScan = useCallback(async () => {
-    await invoke("cancel_scan");
+    queuedScanPath.current = "";
     setStatus("Cancelling");
+    await invoke("cancel_scan");
   }, []);
 
   const toggleRow = useCallback(
@@ -136,18 +169,40 @@ function App() {
         id: row.id,
         offset: rowOffset,
         limit: rowLimit,
+        query,
       });
       setRows(viewport.rows);
       setRowOffset(viewport.offset);
       setVisibleTotal(viewport.total);
     },
-    [rowLimit, rowOffset],
+    [query, rowLimit, rowOffset],
   );
 
   const selectRow = useCallback(async (row: TreeRowDto) => {
     const selected = await invoke<string | null>("select_entry", { id: row.id });
+    setSelectedId(row.id);
     setSelectedPath(selected ?? "");
   }, []);
+
+  const deleteSelected = useCallback(async () => {
+    if (selectedId === null || !selectedPath) {
+      return;
+    }
+    const confirmed = window.confirm(`Move to Recycle Bin?\n\n${selectedPath}`);
+    if (!confirmed) {
+      return;
+    }
+    setError("");
+    try {
+      await invoke("delete_entry", { id: selectedId });
+      setSelectedId(null);
+      setSelectedPath("");
+      await startScanFor(path);
+    } catch (deleteError) {
+      setStatus("Delete failed");
+      setError(String(deleteError));
+    }
+  }, [path, selectedId, selectedPath, startScanFor]);
 
   const handleScroll = useCallback(() => {
     const element = treeRef.current;
@@ -161,12 +216,11 @@ function App() {
   }, [loadRows, rowOffset]);
 
   useEffect(() => {
+    scanningRef.current = scanning;
+  }, [scanning]);
+
+  useEffect(() => {
     let cleanup = false;
-    void invoke<DriveDto[]>("discover_drives").then((items) => {
-      if (!cleanup) {
-        setDrives(items);
-      }
-    });
     void invoke<StartupDto>("get_startup").then((startup) => {
       if (cleanup) {
         return;
@@ -174,16 +228,47 @@ function App() {
       if (startup.path) {
         setPath(startup.path);
       }
-      setScanner(startup.scanner);
-      if (startup.scan && !autoScanStarted.current) {
-        autoScanStarted.current = true;
-        window.setTimeout(() => void startScan(), 120);
+      setReady(true);
+    });
+    void invoke<DriveDto[]>("discover_drives").then((items) => {
+      if (!cleanup) {
+        setDrives(items);
       }
     });
     return () => {
       cleanup = true;
     };
-  }, [startScan]);
+  }, []);
+
+  useEffect(() => {
+    if (!ready || path.trim() || drives.length === 0) {
+      return;
+    }
+    setPath(preferredDrive(drives));
+  }, [drives, path, ready]);
+
+  useEffect(() => {
+    if (!ready) {
+      return;
+    }
+    const target = normalizeScanTarget(path);
+    if (!target) {
+      setStatus("Ready");
+      return;
+    }
+    const delay = isDriveRoot(target) ? 180 : 650;
+    const timer = window.setTimeout(() => {
+      if (
+        !scanningRef.current &&
+        complete &&
+        lastStartedPath.current.toLowerCase() === target.toLowerCase()
+      ) {
+        return;
+      }
+      void startScanFor(target);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [complete, path, ready, startScanFor]);
 
   useEffect(() => {
     const element = treeRef.current;
@@ -198,29 +283,54 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!complete) {
+      return;
+    }
+    const element = treeRef.current;
+    if (element) {
+      element.scrollTop = 0;
+    }
+    void loadRows(0);
+  }, [complete, loadRows]);
+
+  useEffect(() => {
+    const runQueuedScan = () => {
+      const queued = queuedScanPath.current;
+      queuedScanPath.current = "";
+      if (!queued) {
+        return false;
+      }
+      window.setTimeout(() => void startScanFor(queued), 80);
+      return true;
+    };
+
     const unlisten = [
       listen<string>("scan-started", (event) => {
         setScanning(true);
+        scanningRef.current = true;
         setStatus("Scanning");
         setDetail(event.payload);
       }),
       listen<ScanProgressDto>("scan-progress", (event) => {
         setProgress(event.payload);
       }),
-      listen<ScanCompleteDto>("scan-complete", async (event) => {
+      listen<ScanCompleteDto>("scan-complete", (event) => {
         setScanning(false);
+        scanningRef.current = false;
         setStatus("Complete");
         setComplete(event.payload);
         setProgress(event.payload);
         setDetail(event.payload.fallbackReason ?? event.payload.scannerLabel);
-        const element = treeRef.current;
-        if (element) {
-          element.scrollTop = 0;
-        }
-        await loadRows(0);
+        void loadRows(0);
+        runQueuedScan();
       }),
       listen<string>("scan-error", (event) => {
         setScanning(false);
+        scanningRef.current = false;
+        if (runQueuedScan()) {
+          setError("");
+          return;
+        }
         setStatus("Scan failed");
         setError(event.payload);
       }),
@@ -233,63 +343,78 @@ function App() {
         }
       });
     };
-  }, [loadRows]);
+  }, [loadRows, startScanFor]);
 
   const totals = complete ?? progress;
   const topSpacer = rowOffset * ROW_HEIGHT;
   const bottomSpacer = Math.max(0, visibleTotal - rowOffset - rows.length) * ROW_HEIGHT;
+  const activeDrive = normalizeScanTarget(path).toLowerCase();
 
   return (
     <main className="app-shell">
-      <section className="command-bar">
+      <section className="topbar">
         <div className="brand-block">
-          <div className="brand">DiskLoom</div>
+          <div className="brand-mark">DL</div>
+          <div>
+            <div className="brand">DiskLoom</div>
+            <div className="tagline">See your disk clearly.</div>
+          </div>
           <div className="state-dot" data-active={scanning} />
         </div>
 
         <label className="path-field">
-          <span>Path</span>
-          <input value={path} onInput={(event) => setPath(event.currentTarget.value)} />
+          <span>Drive or folder</span>
+          <input
+            autoFocus
+            spellcheck={false}
+            value={path}
+            placeholder={"C:\\"}
+            onInput={(event) => setPath(event.currentTarget.value)}
+          />
         </label>
 
-        <div className="mode-group" role="radiogroup" aria-label="Scanner">
-          {(["auto", "ntfs", "fallback"] as ScannerMode[]).map((mode) => (
-            <button
-              key={mode}
-              className="mode-button"
-              data-active={scanner === mode}
-              disabled={scanning}
-              onClick={() => setScanner(mode)}
-              type="button"
-            >
-              {modeLabel(mode)}
-            </button>
-          ))}
-        </div>
+        <label className="search-field">
+          <span>Search</span>
+          <input
+            spellcheck={false}
+            value={query}
+            placeholder="Name or path"
+            onInput={(event) => setQuery(event.currentTarget.value)}
+          />
+        </label>
 
-        <div className="scan-actions">
-          <button className="primary-button" disabled={scanning} onClick={startScan} type="button">
-            Scan
-          </button>
-          <button className="quiet-button" disabled={!scanning} onClick={cancelScan} type="button">
-            Cancel
+        <div className="top-actions">
+          {scanning ? (
+            <button className="action-button" onClick={cancelScan} type="button">
+              Stop
+            </button>
+          ) : null}
+          <button
+            className="danger-button"
+            disabled={selectedId === null || scanning}
+            onClick={deleteSelected}
+            type="button"
+          >
+            Recycle
           </button>
         </div>
       </section>
 
       <section className="drive-strip" aria-label="Drives">
-        {drives.map((drive) => (
-          <button
-            key={drive.path}
-            className="drive-chip"
-            data-active={drive.path.toLowerCase() === path.toLowerCase()}
-            disabled={scanning}
-            onClick={() => setPath(drive.path)}
-            type="button"
-          >
-            {drive.label}
-          </button>
-        ))}
+        {drives.map((drive) => {
+          const drivePath = normalizeScanTarget(drive.path).toLowerCase();
+          return (
+            <button
+              key={drive.path}
+              className="drive-chip"
+              data-active={drivePath === activeDrive}
+              onClick={() => setPath(drive.path)}
+              type="button"
+            >
+              {drive.label}
+            </button>
+          );
+        })}
       </section>
 
       <section className="metric-strip">
@@ -306,7 +431,7 @@ function App() {
         <header className="tree-titlebar">
           <div>
             <h1>Files and folders</h1>
-            <p>{error || selectedPath || detail}</p>
+            <p className={error ? "error-text" : ""}>{error || selectedPath || detail}</p>
           </div>
           <div className="visible-count">{formatCount(visibleTotal)} visible</div>
         </header>
@@ -324,6 +449,7 @@ function App() {
             <button
               key={row.id}
               className="tree-row"
+              data-selected={selectedId === row.id}
               style={{ "--depth": row.depth } as JSX.CSSProperties}
               onClick={() => void selectRow(row)}
               onDblClick={() => void toggleRow(row)}
@@ -338,7 +464,7 @@ function App() {
                     void toggleRow(row);
                   }}
                 >
-                  {row.expanded ? "v" : ">"}
+                  {row.childCount === 0 ? "" : row.expanded ? "v" : ">"}
                 </span>
                 <span className="name-text">{row.name}</span>
               </span>
@@ -347,6 +473,15 @@ function App() {
               <span>{row.childCount > 0 ? formatCount(row.childCount) : ""}</span>
             </button>
           ))}
+          {rows.length === 0 ? (
+            <div className="empty-state">
+              {scanning
+                ? `${formatCount(progress.entries)} entries scanned`
+                : error
+                  ? "Scan did not finish."
+                  : "No files visible."}
+            </div>
+          ) : null}
           <div style={{ height: bottomSpacer }} />
         </div>
       </section>
@@ -363,11 +498,20 @@ function Metric(props: { label: string; value: string; strong?: boolean }) {
   );
 }
 
-function modeLabel(mode: ScannerMode) {
-  if (mode === "ntfs") {
-    return "NTFS";
+function preferredDrive(drives: DriveDto[]) {
+  return drives.find((drive) => drive.path.toLowerCase() === "c:\\")?.path ?? drives[0]?.path ?? "";
+}
+
+function normalizeScanTarget(value: string) {
+  const trimmed = value.trim();
+  if (/^[a-zA-Z]:$/.test(trimmed)) {
+    return `${trimmed}\\`;
   }
-  return mode[0].toUpperCase() + mode.slice(1);
+  return trimmed;
+}
+
+function isDriveRoot(value: string) {
+  return /^[a-zA-Z]:[\\/]*$/.test(value.trim());
 }
 
 function formatBytes(bytes: number) {

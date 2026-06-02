@@ -16,17 +16,23 @@ use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
+    VolumeKind, discover_volumes, is_process_elevated, recycle_delete,
+    relaunch_current_process_elevated,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri::{Emitter, Manager, State, Window};
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
 const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
+const SKIP_STARTUP_ELEVATION_ENV: &str = "DISKLOOM_SKIP_STARTUP_ELEVATION";
 
 fn main() {
+    if relaunch_elevated_at_startup() {
+        return;
+    }
+
     let startup = parse_startup_args(std::env::args().skip(1));
 
     tauri::Builder::default()
@@ -40,6 +46,7 @@ fn main() {
             get_visible_rows,
             toggle_entry,
             select_entry,
+            delete_entry,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -251,10 +258,13 @@ struct TreeViewportDto {
 
 #[tauri::command]
 fn get_startup(startup: State<'_, StartupState>) -> StartupDto {
+    let path = startup.0.path.clone().or_else(default_startup_path);
+    let scan = startup.0.scan || path.is_some();
+
     StartupDto {
-        path: startup.0.path.clone(),
+        path,
         scanner: startup.0.scanner.as_str(),
-        scan: startup.0.scan,
+        scan,
         elevated: is_process_elevated().unwrap_or(false),
     }
 }
@@ -277,7 +287,6 @@ fn start_scan(
     scanner: String,
     state: State<'_, SharedState>,
     window: Window,
-    app: AppHandle,
 ) -> Result<(), String> {
     let path = path.trim().to_owned();
     if path.is_empty() {
@@ -285,11 +294,6 @@ fn start_scan(
     }
     let scanner = ScannerMode::parse(&scanner);
     let path_buf = PathBuf::from(&path);
-
-    if maybe_relaunch_elevated(&path_buf, scanner)? {
-        app.exit(0);
-        return Ok(());
-    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -350,10 +354,11 @@ fn cancel_scan(state: State<'_, SharedState>) {
 fn get_visible_rows(
     offset: usize,
     limit: Option<usize>,
+    query: Option<String>,
     state: State<'_, SharedState>,
 ) -> TreeViewportDto {
     let state = lock_state(&state.inner);
-    viewport_from_state(&state, offset, normalized_limit(limit))
+    viewport_from_state(&state, offset, normalized_limit(limit), query.as_deref())
 }
 
 #[tauri::command]
@@ -361,6 +366,7 @@ fn toggle_entry(
     id: u32,
     offset: usize,
     limit: Option<usize>,
+    query: Option<String>,
     state: State<'_, SharedState>,
 ) -> TreeViewportDto {
     let mut state = lock_state(&state.inner);
@@ -372,7 +378,7 @@ fn toggle_entry(
     if can_expand && !state.expanded.insert(id) {
         state.expanded.remove(&id);
     }
-    viewport_from_state(&state, offset, normalized_limit(limit))
+    viewport_from_state(&state, offset, normalized_limit(limit), query.as_deref())
 }
 
 #[tauri::command]
@@ -381,6 +387,29 @@ fn select_entry(id: u32, state: State<'_, SharedState>) -> Option<String> {
     let id = EntryId(id);
     state.selected = Some(id);
     selected_path_from_state(&state)
+}
+
+#[tauri::command]
+fn delete_entry(id: u32, state: State<'_, SharedState>) -> Result<(), String> {
+    let path = {
+        let state = lock_state(&state.inner);
+        let graph = state
+            .graph
+            .as_deref()
+            .ok_or_else(|| "scan results are not loaded".to_owned())?;
+        let id = EntryId(id);
+        let entry = graph
+            .entry(id)
+            .ok_or_else(|| "selected entry no longer exists".to_owned())?;
+        if entry.parent.is_none() {
+            return Err("DiskLoom will not delete the scan root".to_owned());
+        }
+        graph
+            .reconstruct_path(id)
+            .ok_or_else(|| "failed to reconstruct selected path".to_owned())?
+    };
+
+    recycle_delete(&path).map_err(|error| format!("failed to move to Recycle Bin: {error}"))
 }
 
 fn apply_scan_complete(
@@ -429,7 +458,12 @@ fn apply_scan_error(shared: &Arc<Mutex<AppState>>, window: &Window, error: Strin
     emit_or_log(window, "scan-error", error);
 }
 
-fn viewport_from_state(state: &AppState, offset: usize, limit: usize) -> TreeViewportDto {
+fn viewport_from_state(
+    state: &AppState,
+    offset: usize,
+    limit: usize,
+    query: Option<&str>,
+) -> TreeViewportDto {
     let Some(graph) = state.graph.as_deref() else {
         return TreeViewportDto {
             offset: 0,
@@ -445,6 +479,7 @@ fn viewport_from_state(state: &AppState, offset: usize, limit: usize) -> TreeVie
         };
     };
 
+    let query = normalized_query(query);
     let mut cursor = 0;
     let mut rows = Vec::with_capacity(limit.min(DEFAULT_ROW_LIMIT));
     for root in &index.roots {
@@ -456,6 +491,7 @@ fn viewport_from_state(state: &AppState, offset: usize, limit: usize) -> TreeVie
             0,
             offset,
             limit,
+            query.as_deref(),
             &mut cursor,
             &mut rows,
         );
@@ -480,18 +516,22 @@ fn collect_visible_rows(
     depth: usize,
     offset: usize,
     limit: usize,
+    query: Option<&str>,
     cursor: &mut usize,
     rows: &mut Vec<TreeRowDto>,
 ) {
-    if *cursor >= offset
-        && rows.len() < limit
-        && let Some(row) = tree_row_from_graph(graph, index, state, id, depth)
-    {
-        rows.push(row);
+    let row_matches = query.is_none_or(|query| entry_matches_query(graph, id, query));
+    if row_matches {
+        if *cursor >= offset
+            && rows.len() < limit
+            && let Some(row) = tree_row_from_graph(graph, index, state, id, depth)
+        {
+            rows.push(row);
+        }
+        *cursor += 1;
     }
-    *cursor += 1;
 
-    if !state.expanded.contains(&id) {
+    if query.is_none() && !state.expanded.contains(&id) {
         return;
     }
     for child in index.children(id) {
@@ -503,6 +543,7 @@ fn collect_visible_rows(
             depth + 1,
             offset,
             limit,
+            query,
             cursor,
             rows,
         );
@@ -537,6 +578,43 @@ fn selected_path_from_state(state: &AppState) -> Option<String> {
     graph
         .reconstruct_path(selected)
         .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn normalized_query(query: Option<&str>) -> Option<String> {
+    let query = query?.trim();
+    if query.is_empty() {
+        return None;
+    }
+    Some(query.to_lowercase())
+}
+
+fn entry_matches_query(graph: &FileGraph, id: EntryId, query: &str) -> bool {
+    let name = graph.name(id).unwrap_or_default();
+    if contains_case_insensitive(name, query) {
+        return true;
+    }
+    if !query.contains(['\\', '/']) {
+        return false;
+    }
+    graph
+        .reconstruct_path(id)
+        .is_some_and(|path| contains_case_insensitive(&path.to_string_lossy(), query))
+}
+
+fn contains_case_insensitive(value: &str, lowercase_query: &str) -> bool {
+    if value.is_ascii() && lowercase_query.is_ascii() {
+        let needle = lowercase_query.as_bytes();
+        if needle.len() > value.len() {
+            return false;
+        }
+        return value.as_bytes().windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.to_ascii_lowercase() == *right)
+        });
+    }
+    value.to_lowercase().contains(lowercase_query)
 }
 
 fn scan_path(
@@ -668,31 +746,65 @@ fn graph_totals(graph: &FileGraph) -> (u64, u64) {
         )
 }
 
-fn maybe_relaunch_elevated(path: &Path, scanner: ScannerMode) -> Result<bool, String> {
-    if !scan_needs_elevation(path, scanner) || !should_request_elevation()? {
-        return Ok(false);
-    }
-
-    let args = [
-        "--path".to_owned(),
-        path.to_string_lossy().into_owned(),
-        "--scanner".to_owned(),
-        scanner.as_str().to_owned(),
-        "--scan".to_owned(),
-    ];
-    relaunch_current_process_elevated(args)
-        .map_err(|error| format!("failed to request administrator access: {error}"))?;
-    Ok(true)
-}
-
+#[cfg(test)]
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
     scanner != ScannerMode::Fallback && drive_volume(path).is_some()
 }
 
-fn should_request_elevation() -> Result<bool, String> {
-    is_process_elevated()
-        .map(|is_elevated| !is_elevated)
-        .map_err(|error| format!("failed to check administrator elevation: {error}"))
+fn relaunch_elevated_at_startup() -> bool {
+    if std::env::var_os(SKIP_STARTUP_ELEVATION_ENV).is_some() {
+        return false;
+    }
+    match is_process_elevated() {
+        Ok(true) => false,
+        Ok(false) => {
+            let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+            match relaunch_current_process_elevated(args) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("failed to request administrator access: {error}");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to check administrator elevation: {error}");
+            false
+        }
+    }
+}
+
+fn default_startup_path() -> Option<String> {
+    system_drive_root()
+        .or_else(|| {
+            discover_volume_shortcuts()
+                .into_iter()
+                .find(|volume| volume.is_ntfs)
+                .map(|volume| volume.root)
+        })
+        .or_else(|| {
+            discover_volume_shortcuts()
+                .into_iter()
+                .next()
+                .map(|volume| volume.root)
+        })
+}
+
+fn system_drive_root() -> Option<String> {
+    let value = std::env::var_os("SystemDrive")?;
+    let mut drive = value
+        .to_string_lossy()
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_owned();
+    if drive.is_empty() {
+        return None;
+    }
+    if !drive.ends_with(':') {
+        return None;
+    }
+    drive.push('\\');
+    Some(drive)
 }
 
 fn drive_volume(path: &Path) -> Option<String> {
@@ -888,11 +1000,27 @@ mod tests {
         };
         state.expanded.insert(root);
 
-        let viewport = viewport_from_state(&state, 1, 2);
+        let viewport = viewport_from_state(&state, 1, 2, None);
 
         assert_eq!(viewport.total, 3);
         assert_eq!(viewport.rows.len(), 2);
         assert_eq!(viewport.rows[0].name, "big");
+    }
+
+    #[test]
+    fn viewport_query_should_search_all_descendants() {
+        let graph = Arc::new(sample_graph());
+        let index = TreeIndex::build(&graph);
+        let state = AppState {
+            graph: Some(Arc::clone(&graph)),
+            index: Some(index),
+            ..AppState::default()
+        };
+
+        let viewport = viewport_from_state(&state, 0, 10, Some("large"));
+
+        assert_eq!(viewport.total, 1);
+        assert_eq!(viewport.rows[0].name, "large.bin");
     }
 
     #[test]
