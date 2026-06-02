@@ -164,8 +164,8 @@ Build an installer package:
 The Windows packages include:
 
 - `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
-- `dlm.exe`: CLI analyzer. The installer package installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
-- `diskloom-setup.exe`: elevated setup binary included in the installer package. It installs the GUI and CLI, creates the Start Menu shortcut, and updates the machine PATH.
+- `dlm.exe`: CLI analyzer. The native Windows installer installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
+- `DiskLoomSetup-x64.exe`: native NSIS wizard installer for the GUI and CLI.
 
 ## License
 

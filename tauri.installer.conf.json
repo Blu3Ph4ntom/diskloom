@@ -1,0 +1,32 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run build"
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "DiskLoom",
+    "homepage": "https://github.com/Blu3Ph4ntom/diskloom",
+    "category": "Utility",
+    "shortDescription": "Fast Windows disk space analyzer.",
+    "longDescription": "DiskLoom is an open-source Windows disk analyzer built for fast scanning and low memory use.",
+    "licenseFile": "LICENSE-MIT",
+    "resources": {
+      "target/release/dlm.exe": "dlm.exe",
+      "target/release/diskloom-setup.exe": "diskloom-setup.exe",
+      "README.md": "README.md",
+      "LICENSE-MIT": "LICENSE-MIT",
+      "LICENSE-APACHE": "LICENSE-APACHE",
+      "docs/BENCHMARKS.md": "docs/BENCHMARKS.md",
+      "docs/ROADMAP.md": "docs/ROADMAP.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerIcon": "icons/icon.ico",
+        "startMenuFolder": "DiskLoom",
+        "installerHooks": "scripts/nsis-hooks.nsh"
+      }
+    }
+  }
+}

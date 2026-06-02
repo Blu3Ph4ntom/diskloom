@@ -8,9 +8,10 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $outputRootPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputRoot))
-$packageName = "diskloom-installer-windows-x64"
-$packageDir = Join-Path $outputRootPath $packageName
-$zipPath = Join-Path $outputRootPath "$packageName.zip"
+$installerPath = Join-Path $outputRootPath "DiskLoomSetup-x64.exe"
+$legacyPackageName = "diskloom-installer-windows-x64"
+$legacyPackageDir = Join-Path $outputRootPath $legacyPackageName
+$legacyZipPath = Join-Path $outputRootPath "$legacyPackageName.zip"
 
 function Assert-UnderPath {
     param(
@@ -26,39 +27,37 @@ function Assert-UnderPath {
 }
 
 Assert-UnderPath -Child $outputRootPath -Parent $repoRoot
-Assert-UnderPath -Child $packageDir -Parent $outputRootPath
+Assert-UnderPath -Child $installerPath -Parent $outputRootPath
+Assert-UnderPath -Child $legacyPackageDir -Parent $outputRootPath
 
 Push-Location $repoRoot
 try {
     if (-not $SkipBuild) {
-        cargo build --release --locked -p diskloom-app
         cargo build --release --locked -p diskloom-cli --bin dlm
         cargo build --release --locked -p diskloom-installer --bin diskloom-setup
+        cargo tauri build --bundles nsis --ci --config tauri.installer.conf.json
     }
 
-    if (Test-Path -LiteralPath $packageDir) {
-        Remove-Item -LiteralPath $packageDir -Recurse -Force
+    if (Test-Path -LiteralPath $legacyPackageDir) {
+        Remove-Item -LiteralPath $legacyPackageDir -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $packageDir | Out-Null
-
-    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom.exe") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\dlm.exe") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom-setup.exe") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-MIT") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-APACHE") -Destination $packageDir
-
-    $docsDir = Join-Path $packageDir "docs"
-    New-Item -ItemType Directory -Path $docsDir | Out-Null
-    Copy-Item -LiteralPath (Join-Path $repoRoot "docs\BENCHMARKS.md") -Destination $docsDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "docs\ROADMAP.md") -Destination $docsDir
-
-    if (Test-Path -LiteralPath $zipPath) {
-        Remove-Item -LiteralPath $zipPath -Force
+    if (Test-Path -LiteralPath $legacyZipPath) {
+        Remove-Item -LiteralPath $legacyZipPath -Force
     }
-    Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
 
-    Write-Host "Installer package written to $zipPath"
+    $nsisDir = Join-Path $repoRoot "target\release\bundle\nsis"
+    $nsisInstaller = Get-ChildItem -LiteralPath $nsisDir -Filter "*.exe" |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
+    if (-not $nsisInstaller) {
+        throw "No NSIS installer was produced in $nsisDir"
+    }
+
+    New-Item -ItemType Directory -Path $outputRootPath -Force | Out-Null
+    Copy-Item -LiteralPath $nsisInstaller.FullName -Destination $installerPath -Force
+
+    Write-Host "Native installer written to $installerPath"
 }
 finally {
     Pop-Location

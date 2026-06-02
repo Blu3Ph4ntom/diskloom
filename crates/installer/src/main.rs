@@ -28,6 +28,10 @@ struct Args {
     /// Do not create a Start Menu shortcut.
     #[arg(long)]
     no_shortcut: bool,
+
+    /// Remove the install directory from the machine PATH.
+    #[arg(long)]
+    remove_path: bool,
 }
 
 fn main() {
@@ -50,6 +54,12 @@ fn run() -> Result<()> {
         Some(install_dir) => install_dir,
         None => default_install_dir(),
     };
+
+    if args.remove_path {
+        remove_install_path(&install_dir)?;
+        println!("DiskLoom PATH entry removed for {}", install_dir.display());
+        return Ok(());
+    }
 
     install_bundle(&source_dir, &install_dir, !args.no_path, !args.no_shortcut)?;
 
@@ -138,6 +148,14 @@ fn install_bundle(
         create_start_menu_shortcut(&install_dir)?;
     }
 
+    Ok(())
+}
+
+fn remove_install_path(install_dir: &Path) -> Result<()> {
+    let changed = remove_from_machine_path(install_dir)?;
+    if changed {
+        broadcast_environment_change();
+    }
     Ok(())
 }
 
@@ -294,6 +312,41 @@ fn append_path_value(path_value: &str, entry: &str) -> String {
     } else {
         format!("{current};{entry}")
     }
+}
+
+#[cfg(windows)]
+fn remove_from_machine_path(install_dir: &Path) -> Result<bool> {
+    let install_path = normalized_path_text(install_dir);
+    let current = read_machine_path()?;
+    let Some(updated) = remove_path_value(&current, &install_path) else {
+        return Ok(false);
+    };
+    write_machine_path(&updated)?;
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn remove_from_machine_path(_: &Path) -> Result<bool> {
+    bail!("machine PATH uninstall is Windows-only")
+}
+
+fn remove_path_value(path_value: &str, entry: &str) -> Option<String> {
+    let expected = trim_trailing_separators(entry);
+    let mut changed = false;
+    let mut retained = Vec::new();
+    for part in path_value.split(';') {
+        let normalized = trim_trailing_separators(part);
+        if normalized.is_empty() {
+            continue;
+        }
+        if normalized.eq_ignore_ascii_case(expected) {
+            changed = true;
+        } else {
+            retained.push(part.trim());
+        }
+    }
+
+    changed.then(|| retained.join(";"))
 }
 
 #[cfg(windows)]
@@ -495,6 +548,7 @@ fn wide_path(path: &Path) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
+    use super::remove_path_value;
     use super::{append_path_value, path_value_contains, trim_trailing_separators};
 
     #[test]
@@ -526,6 +580,26 @@ mod tests {
         assert_eq!(
             append_path_value(r"C:\Windows;", r"C:\Program Files\DiskLoom"),
             r"C:\Windows;C:\Program Files\DiskLoom"
+        );
+    }
+
+    #[test]
+    fn remove_path_value_should_drop_matching_entry() {
+        assert_eq!(
+            remove_path_value(
+                r"C:\Windows;C:\Program Files\DiskLoom;C:\Tools",
+                r"c:\program files\diskloom\"
+            )
+            .as_deref(),
+            Some(r"C:\Windows;C:\Tools")
+        );
+    }
+
+    #[test]
+    fn remove_path_value_should_return_none_without_match() {
+        assert_eq!(
+            remove_path_value(r"C:\Windows;C:\Tools", r"C:\Program Files\DiskLoom"),
+            None
         );
     }
 }

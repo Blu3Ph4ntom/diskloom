@@ -338,7 +338,7 @@ fn scan_path(command: &ScanCommand) -> Result<ScanOutcome> {
         ScannerMode::Ntfs => scan_ntfs(command).map_err(Into::into),
         ScannerMode::Auto => {
             let resolved_path = resolved_scan_path(&command.path);
-            if drive_for_path(&resolved_path).is_some() {
+            if drive_for_path(&resolved_path).is_some() && is_already_elevated() {
                 match scan_ntfs(command) {
                     Ok(outcome) => Ok(outcome),
                     Err(error) => scan_fallback(command, Some(error.to_string())),
@@ -403,7 +403,7 @@ fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bo
 }
 
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner != ScannerMode::Fallback && drive_for_path(&resolved_scan_path(path)).is_some()
+    scanner == ScannerMode::Ntfs && drive_for_path(&resolved_scan_path(path)).is_some()
 }
 
 fn volume_arg_is_drive_root(volume: &str) -> bool {
@@ -432,9 +432,19 @@ fn should_request_elevation() -> Result<bool> {
     Ok(!is_process_elevated().context("failed to check administrator elevation")?)
 }
 
+#[cfg(windows)]
+fn is_already_elevated() -> bool {
+    is_process_elevated().unwrap_or(false)
+}
+
 #[cfg(not(windows))]
 fn should_request_elevation() -> Result<bool> {
     Ok(false)
+}
+
+#[cfg(not(windows))]
+fn is_already_elevated() -> bool {
+    false
 }
 
 fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Result<ScanOutcome> {
@@ -942,13 +952,13 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_drive_backed_scan_targets() {
-        assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
+        assert!(!scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("c:\\"),
             ScannerMode::Fallback
         ));
-        assert!(scan_needs_elevation(
+        assert!(!scan_needs_elevation(
             Path::new("c:\\Users"),
             ScannerMode::Auto
         ));

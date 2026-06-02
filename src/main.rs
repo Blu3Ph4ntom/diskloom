@@ -17,7 +17,7 @@ use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
     VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
-    relaunch_current_process_elevated, show_properties,
+    show_properties,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
@@ -28,13 +28,7 @@ const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
 const MAX_SCAN_CACHE_ITEMS: usize = 1;
 const MAX_SCAN_CACHE_ENTRIES: usize = 400_000;
-const SKIP_STARTUP_ELEVATION_ENV: &str = "DISKLOOM_SKIP_STARTUP_ELEVATION";
-
 fn main() {
-    if relaunch_elevated_at_startup() {
-        return;
-    }
-
     let startup = parse_startup_args(std::env::args().skip(1));
 
     tauri::Builder::default()
@@ -1175,30 +1169,7 @@ fn totals_for_roots(graph: &FileGraph, roots: &[EntryId]) -> (u64, u64) {
 
 #[cfg(test)]
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner != ScannerMode::Fallback && drive_volume(path).is_some()
-}
-
-fn relaunch_elevated_at_startup() -> bool {
-    if std::env::var_os(SKIP_STARTUP_ELEVATION_ENV).is_some() {
-        return false;
-    }
-    match is_process_elevated() {
-        Ok(true) => false,
-        Ok(false) => {
-            let args = std::env::args_os().skip(1).collect::<Vec<_>>();
-            match relaunch_current_process_elevated(args) {
-                Ok(()) => true,
-                Err(error) => {
-                    eprintln!("failed to request administrator access: {error}");
-                    false
-                }
-            }
-        }
-        Err(error) => {
-            eprintln!("failed to check administrator elevation: {error}");
-            false
-        }
-    }
+    scanner == ScannerMode::Ntfs && drive_volume(path).is_some()
 }
 
 fn default_startup_path() -> Option<String> {
@@ -1479,7 +1450,7 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_direct_drive_scans_only() {
-        assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
+        assert!(!scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("C:\\"),
