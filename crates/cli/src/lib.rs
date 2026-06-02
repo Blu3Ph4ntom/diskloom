@@ -192,12 +192,13 @@ fn run_scan_to_writer(
     writer: &mut impl Write,
     show_spinner: bool,
 ) -> Result<()> {
+    let display_path = display_scan_path(&command.path);
     let mut spinner = show_spinner
-        .then(|| StatusSpinner::start_if_terminal(format!("Scanning {}", command.path.display())))
+        .then(|| StatusSpinner::start_if_terminal(format!("Scanning {}", display_path.display())))
         .flatten();
     let started = Instant::now();
     let outcome = scan_path(&command)
-        .with_context(|| format!("failed to scan {}", command.path.display()))?;
+        .with_context(|| format!("failed to scan {}", display_path.display()))?;
     if let Some(spinner) = spinner.as_mut() {
         spinner.stop();
     }
@@ -211,7 +212,7 @@ fn run_scan_to_writer(
 
     write_scan_summary(
         writer,
-        &command.path,
+        &display_path,
         outcome.scanner_label,
         &summary,
         elapsed,
@@ -438,7 +439,7 @@ fn should_request_elevation() -> Result<bool> {
 
 fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Result<ScanOutcome> {
     let (graph, summary) = FallbackScanner::scan(ScanOptions {
-        root: command.path.clone(),
+        root: scan_input_path(&command.path),
         follow_symlinks: command.follow_symlinks,
         precise_allocated: command.precise_allocated,
     })?;
@@ -514,6 +515,10 @@ fn display_root_for_direct_scan(path: &Path) -> Option<PathBuf> {
 }
 
 fn resolved_scan_path(path: &Path) -> PathBuf {
+    if let Some(root) = drive_root_from_designator(path) {
+        return root;
+    }
+
     std::fs::canonicalize(path)
         .map(strip_verbatim_prefix)
         .unwrap_or_else(|_| {
@@ -525,6 +530,25 @@ fn resolved_scan_path(path: &Path) -> PathBuf {
                     .unwrap_or_else(|_| path.to_path_buf())
             }
         })
+}
+
+fn scan_input_path(path: &Path) -> PathBuf {
+    drive_root_from_designator(path).unwrap_or_else(|| path.to_path_buf())
+}
+
+fn display_scan_path(path: &Path) -> PathBuf {
+    scan_input_path(path)
+}
+
+fn drive_root_from_designator(path: &Path) -> Option<PathBuf> {
+    let value = path.to_string_lossy();
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' || chars.next().is_some() {
+        return None;
+    }
+
+    Some(PathBuf::from(format!("{}:\\", letter.to_ascii_uppercase())))
 }
 
 fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
@@ -870,8 +894,9 @@ mod tests {
     use diskloom_core::{FileGraphBuilder, FileKind};
 
     use super::{
-        ScanCommand, ScannerMode, drive_volume, format_count, normalize_args, query_filter,
-        ranked_entry_ids, scan_needs_elevation, volume_arg_is_drive_root,
+        ScanCommand, ScannerMode, display_root_for_direct_scan, display_scan_path, drive_volume,
+        format_count, normalize_args, query_filter, ranked_entry_ids, resolved_scan_path,
+        scan_input_path, scan_needs_elevation, volume_arg_is_drive_root,
         write_duplicate_candidates,
     };
 
@@ -883,6 +908,36 @@ mod tests {
     #[test]
     fn drive_volume_should_reject_folder_path() {
         assert_eq!(drive_volume(Path::new("c:\\Users")), None);
+    }
+
+    #[test]
+    fn resolved_scan_path_should_treat_bare_drive_as_root() {
+        assert_eq!(resolved_scan_path(Path::new("a:")), PathBuf::from("A:\\"));
+    }
+
+    #[test]
+    fn scan_input_path_should_treat_bare_drive_as_root() {
+        assert_eq!(scan_input_path(Path::new("A:")), PathBuf::from("A:\\"));
+    }
+
+    #[test]
+    fn display_scan_path_should_treat_bare_drive_as_root() {
+        assert_eq!(display_scan_path(Path::new("a:")), PathBuf::from("A:\\"));
+    }
+
+    #[test]
+    fn direct_scan_display_root_should_not_scope_bare_drive() {
+        let resolved_path = resolved_scan_path(Path::new("a:"));
+
+        assert!(display_root_for_direct_scan(&resolved_path).is_none());
+    }
+
+    #[test]
+    fn scan_input_path_should_keep_relative_folder_paths() {
+        assert_eq!(
+            scan_input_path(Path::new("target")),
+            PathBuf::from("target")
+        );
     }
 
     #[test]
