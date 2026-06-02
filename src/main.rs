@@ -203,7 +203,8 @@ fn should_skip_build_dir(path: &Path) -> bool {
 }
 
 fn is_build_input(path: &Path) -> bool {
-    if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    if matches!(extension, Some("rs" | "slint")) {
         return true;
     }
 
@@ -296,6 +297,9 @@ mod tests {
     #[test]
     fn build_input_detection_should_track_rust_and_manifest_files() {
         assert!(is_build_input(std::path::Path::new("src/main.rs")));
+        assert!(is_build_input(std::path::Path::new(
+            "crates/ui/ui/diskloom.slint"
+        )));
         assert!(is_build_input(std::path::Path::new("Cargo.toml")));
         assert!(is_build_input(std::path::Path::new("Cargo.lock")));
         assert!(!is_build_input(std::path::Path::new("README.md")));
