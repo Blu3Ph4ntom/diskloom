@@ -403,7 +403,7 @@ fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bo
 }
 
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner == ScannerMode::Ntfs && drive_for_path(&resolved_scan_path(path)).is_some()
+    scanner != ScannerMode::Fallback && drive_for_path(&resolved_scan_path(path)).is_some()
 }
 
 fn volume_arg_is_drive_root(volume: &str) -> bool {
@@ -952,13 +952,13 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_drive_backed_scan_targets() {
-        assert!(!scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
+        assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("c:\\"),
             ScannerMode::Fallback
         ));
-        assert!(!scan_needs_elevation(
+        assert!(scan_needs_elevation(
             Path::new("c:\\Users"),
             ScannerMode::Auto
         ));

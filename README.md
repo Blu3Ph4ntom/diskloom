@@ -66,7 +66,7 @@ Run a fallback scan:
 dlm . --scanner fallback --limit 25
 ```
 
-Run auto mode, which uses direct NTFS MFT scanning for drive roots and fallback traversal for folders:
+Run auto mode, which uses direct NTFS MFT scanning for NTFS-backed drive roots and folders:
 
 ```powershell
 dlm C:\ --scanner auto --limit 25
@@ -78,7 +78,7 @@ Force direct NTFS MFT scanning:
 dlm C:\ --scanner ntfs --limit 25
 ```
 
-Direct NTFS drive scans require administrator access on Windows. If DiskLoom is not already elevated, the CLI, GUI, and benchmark harness request UAC elevation and relaunch the same command instead of silently falling back to traversal.
+Direct NTFS scans require administrator access on Windows. The GUI requests UAC once at startup so scan actions do not trigger repeated prompts. CLI scan commands request UAC when auto or direct NTFS mode targets an NTFS-backed path. Explicit `--scanner fallback` stays non-admin.
 
 Export CSV:
 

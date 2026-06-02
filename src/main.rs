@@ -17,7 +17,7 @@ use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
     VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
-    show_properties,
+    relaunch_current_process_elevated, show_properties,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
@@ -29,6 +29,8 @@ const MAX_ROW_LIMIT: usize = 600;
 const MAX_SCAN_CACHE_ITEMS: usize = 1;
 const MAX_SCAN_CACHE_ENTRIES: usize = 400_000;
 fn main() {
+    relaunch_elevated_at_startup();
+
     let startup = parse_startup_args(std::env::args().skip(1));
 
     tauri::Builder::default()
@@ -55,6 +57,24 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("failed to run DiskLoom");
 }
+
+#[cfg(windows)]
+fn relaunch_elevated_at_startup() {
+    if is_process_elevated().unwrap_or(false) {
+        return;
+    }
+
+    match relaunch_current_process_elevated(std::env::args_os().skip(1)) {
+        Ok(()) => std::process::exit(0),
+        Err(error) => {
+            eprintln!("failed to request administrator access: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn relaunch_elevated_at_startup() {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScannerMode {
@@ -1169,7 +1189,7 @@ fn totals_for_roots(graph: &FileGraph, roots: &[EntryId]) -> (u64, u64) {
 
 #[cfg(test)]
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner == ScannerMode::Ntfs && drive_volume(path).is_some()
+    scanner != ScannerMode::Fallback && drive_for_path(path).is_some()
 }
 
 fn default_startup_path() -> Option<String> {
@@ -1450,13 +1470,13 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_direct_drive_scans_only() {
-        assert!(!scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
+        assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("C:\\"),
             ScannerMode::Fallback
         ));
-        assert!(!scan_needs_elevation(
+        assert!(scan_needs_elevation(
             Path::new("C:\\Users"),
             ScannerMode::Auto
         ));
