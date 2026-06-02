@@ -1,99 +1,138 @@
 param(
-    [string]$IconDir = "icons"
+    [string]$SourceImage = "assets\icon.png",
+    [string]$IconDir = "icons",
+    [string]$FrontendPublicDir = "frontend\public"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+$sourcePath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $SourceImage))
 $iconDirPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $IconDir))
+$frontendPublicPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $FrontendPublicDir))
+
+if (-not (Test-Path -LiteralPath $sourcePath)) {
+    throw "Source icon not found: $sourcePath"
+}
+
 New-Item -ItemType Directory -Path $iconDirPath -Force | Out-Null
+New-Item -ItemType Directory -Path $frontendPublicPath -Force | Out-Null
 
 Add-Type -AssemblyName System.Drawing
 
-function New-RoundedRectangle {
+function Save-ResizedPng {
     param(
-        [float]$X,
-        [float]$Y,
-        [float]$Width,
-        [float]$Height,
-        [float]$Radius
-    )
-
-    $path = [System.Drawing.Drawing2D.GraphicsPath]::new()
-    $diameter = $Radius * 2
-    $path.AddArc($X, $Y, $diameter, $diameter, 180, 90)
-    $path.AddArc($X + $Width - $diameter, $Y, $diameter, $diameter, 270, 90)
-    $path.AddArc($X + $Width - $diameter, $Y + $Height - $diameter, $diameter, $diameter, 0, 90)
-    $path.AddArc($X, $Y + $Height - $diameter, $diameter, $diameter, 90, 90)
-    $path.CloseFigure()
-    return $path
-}
-
-function New-IconPng {
-    param(
+        [System.Drawing.Image]$Source,
         [int]$Size,
         [string]$Path
     )
 
-    $scale = $Size / 256.0
     $bitmap = [System.Drawing.Bitmap]::new($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-    $graphics.Clear([System.Drawing.Color]::Transparent)
-    $graphics.ScaleTransform($scale, $scale)
+    try {
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+        $graphics.Clear([System.Drawing.Color]::Transparent)
 
-    $shell = New-RoundedRectangle -X 18 -Y 18 -Width 220 -Height 220 -Radius 44
-    $graphics.FillPath([System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 12, 18, 22)), $shell)
-    $graphics.DrawPath([System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 112, 214, 232), 8), $shell)
+        $scale = [Math]::Max($Size / [double]$Source.Width, $Size / [double]$Source.Height)
+        $drawWidth = [int][Math]::Round($Source.Width * $scale)
+        $drawHeight = [int][Math]::Round($Source.Height * $scale)
+        $x = [int][Math]::Floor(($Size - $drawWidth) / 2)
+        $y = [int][Math]::Floor(($Size - $drawHeight) / 2)
+        $graphics.DrawImage($Source, $x, $y, $drawWidth, $drawHeight)
 
-    $accent = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 84, 198, 219), 10)
-    $accent.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $accent.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-    $graphics.DrawLine($accent, 58, 190, 198, 190)
-
-    $font = [System.Drawing.Font]::new("Segoe UI Semibold", 86, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-    $format = [System.Drawing.StringFormat]::new()
-    $format.Alignment = [System.Drawing.StringAlignment]::Center
-    $format.LineAlignment = [System.Drawing.StringAlignment]::Center
-    $brush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(255, 229, 239, 242))
-    $graphics.DrawString("DL", $font, $brush, [System.Drawing.RectangleF]::new(22, 50, 212, 124), $format)
-
-    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose()
-    $bitmap.Dispose()
+        $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
 }
 
-$pngPath = Join-Path $iconDirPath "icon.png"
-$icoPath = Join-Path $iconDirPath "icon.ico"
-$svgPath = Join-Path $iconDirPath "icon.svg"
+function Write-IconFile {
+    param(
+        [System.Drawing.Image]$Source,
+        [string]$Path
+    )
 
-New-IconPng -Size 256 -Path $pngPath
-$pngBytes = [System.IO.File]::ReadAllBytes($pngPath)
-$stream = [System.IO.File]::Create($icoPath)
-$writer = [System.IO.BinaryWriter]::new($stream)
-$writer.Write([uint16]0)
-$writer.Write([uint16]1)
-$writer.Write([uint16]1)
-$writer.Write([byte]0)
-$writer.Write([byte]0)
-$writer.Write([byte]0)
-$writer.Write([byte]0)
-$writer.Write([uint16]1)
-$writer.Write([uint16]32)
-$writer.Write([uint32]$pngBytes.Length)
-$writer.Write([uint32]22)
-$writer.Write($pngBytes)
-$writer.Dispose()
-$stream.Dispose()
+    $sizes = @(256, 128, 64, 48, 32, 16)
+    $pngEntries = @()
+    $tempFiles = @()
+    try {
+        foreach ($size in $sizes) {
+            $tempPath = [System.IO.Path]::GetTempFileName()
+            $tempFiles += $tempPath
+            Save-ResizedPng -Source $Source -Size $size -Path $tempPath
+            $pngEntries += [pscustomobject]@{
+                Size = $size
+                Bytes = [System.IO.File]::ReadAllBytes($tempPath)
+            }
+        }
 
-$svg = @'
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="18" y="18" width="220" height="220" rx="44" fill="#0c1216" stroke="#70d6e8" stroke-width="8"/>
-  <text x="128" y="146" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="92" font-weight="700" fill="#e5eff2">DL</text>
-  <path d="M58 190H198" stroke="#54c6db" stroke-width="10" stroke-linecap="round"/>
-</svg>
-'@
-Set-Content -LiteralPath $svgPath -Value $svg -Encoding UTF8
+        $stream = [System.IO.File]::Create($Path)
+        $writer = [System.IO.BinaryWriter]::new($stream)
+        try {
+            $writer.Write([uint16]0)
+            $writer.Write([uint16]1)
+            $writer.Write([uint16]$pngEntries.Count)
 
-Write-Host "Generated $icoPath"
+            $offset = 6 + (16 * $pngEntries.Count)
+            foreach ($entry in $pngEntries) {
+                $dimension = if ($entry.Size -eq 256) { 0 } else { $entry.Size }
+                $writer.Write([byte]$dimension)
+                $writer.Write([byte]$dimension)
+                $writer.Write([byte]0)
+                $writer.Write([byte]0)
+                $writer.Write([uint16]1)
+                $writer.Write([uint16]32)
+                $writer.Write([uint32]$entry.Bytes.Length)
+                $writer.Write([uint32]$offset)
+                $offset += $entry.Bytes.Length
+            }
+
+            foreach ($entry in $pngEntries) {
+                $writer.Write($entry.Bytes)
+            }
+        }
+        finally {
+            $writer.Dispose()
+            $stream.Dispose()
+        }
+    }
+    finally {
+        foreach ($tempFile in $tempFiles) {
+            if (Test-Path -LiteralPath $tempFile) {
+                Remove-Item -LiteralPath $tempFile -Force
+            }
+        }
+    }
+}
+
+$strippedTempPath = [System.IO.Path]::GetTempFileName()
+$source = [System.Drawing.Image]::FromFile($sourcePath)
+try {
+    Save-ResizedPng -Source $source -Size 1024 -Path $strippedTempPath
+}
+finally {
+    $source.Dispose()
+}
+
+Move-Item -LiteralPath $strippedTempPath -Destination $sourcePath -Force
+
+$cleanSource = [System.Drawing.Image]::FromFile($sourcePath)
+try {
+    Save-ResizedPng -Source $cleanSource -Size 256 -Path (Join-Path $iconDirPath "icon.png")
+    Save-ResizedPng -Source $cleanSource -Size 256 -Path (Join-Path $frontendPublicPath "icon.png")
+    Write-IconFile -Source $cleanSource -Path (Join-Path $iconDirPath "icon.ico")
+}
+finally {
+    $cleanSource.Dispose()
+    if (Test-Path -LiteralPath $strippedTempPath) {
+        Remove-Item -LiteralPath $strippedTempPath -Force
+    }
+}
+
+Write-Host "Generated DiskLoom icons from $sourcePath"

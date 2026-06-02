@@ -976,13 +976,7 @@ function App() {
 }
 
 function LogoMark() {
-  return (
-    <svg className="logo-mark" viewBox="0 0 64 64" aria-hidden="true">
-      <rect x="7" y="7" width="50" height="50" rx="12" />
-      <text className="logo-text" x="32" y="37" text-anchor="middle">DL</text>
-      <path className="logo-thread" d="M17 48h30" />
-    </svg>
-  );
+  return <img className="logo-mark" src="/icon.png" alt="" draggable={false} />;
 }
 
 function TooltipLayer(props: { tooltip: TooltipState }) {

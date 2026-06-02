@@ -140,31 +140,15 @@ button:not(:disabled) {
   box-shadow:
     inset 0 1px 0 oklch(0.74 0.02 220 / 0.16),
     0 10px 24px oklch(0.05 0.006 220 / 0.32);
+  overflow: hidden;
 }
 
 .logo-mark {
-  width: 25px;
-  height: 25px;
-}
-
-.logo-mark rect {
-  fill: oklch(0.14 0.008 220);
-  stroke: oklch(0.72 0.026 205);
-  stroke-width: 2;
-}
-
-.logo-mark .logo-text {
-  fill: oklch(0.92 0.006 210);
-  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  font-size: 22px;
-  font-weight: 740;
-  letter-spacing: 0;
-}
-
-.logo-mark .logo-thread {
-  stroke: var(--accent);
-  stroke-linecap: round;
-  stroke-width: 2.8;
+  width: 30px;
+  height: 30px;
+  display: block;
+  border-radius: 8px;
+  object-fit: cover;
 }
 
 .product-lockup {

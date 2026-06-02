@@ -728,6 +728,7 @@ dependencies = [
  "diskloom-query",
  "diskloom-scan",
  "diskloom-windows",
+ "embed-resource",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "diskloom-cli"
@@ -24,6 +25,9 @@ diskloom-ntfs.workspace = true
 diskloom-query.workspace = true
 diskloom-scan.workspace = true
 diskloom-windows.workspace = true
+
+[build-dependencies]
+embed-resource.workspace = true
 
 [lints]
 workspace = true
