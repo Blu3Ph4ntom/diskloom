@@ -18,9 +18,13 @@ pub enum ShellActionError {
 
 pub fn open_in_explorer(path: impl AsRef<Path>) -> Result<(), ShellActionError> {
     let path = path.as_ref();
-    Command::new("explorer")
-        .arg(format!("/select,{}", path.display()))
-        .spawn()?;
+    let mut command = Command::new("explorer");
+    if path.is_dir() {
+        command.arg(path);
+    } else {
+        command.arg(format!("/select,{}", path.display()));
+    }
+    command.spawn()?;
     Ok(())
 }
 

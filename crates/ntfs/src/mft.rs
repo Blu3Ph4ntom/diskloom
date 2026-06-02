@@ -78,6 +78,7 @@ struct AttributeHeader {
     kind: u32,
     length: u32,
     non_resident: bool,
+    name_length: u8,
 }
 
 impl FileRecordHeader {
@@ -240,6 +241,7 @@ fn parse_fixed_file_record(record: &[u8]) -> Result<ParsedFileRecord, MftParseEr
                 kind,
                 length,
                 non_resident,
+                name_length: record[offset + 9],
             },
             body: &record[offset..offset + length as usize],
         };
@@ -250,7 +252,7 @@ fn parse_fixed_file_record(record: &[u8]) -> Result<ParsedFileRecord, MftParseEr
             ATTR_FILE_NAME if !attribute.header.non_resident => {
                 parsed.file_names.push(parse_file_name(attribute.body)?);
             }
-            ATTR_DATA => {
+            ATTR_DATA if attribute.header.name_length == 0 => {
                 parse_data_attribute(attribute, &mut parsed)?;
             }
             _ => {}
@@ -291,6 +293,7 @@ fn parse_fixed_scanned_file_record_with_header(
                 kind,
                 length,
                 non_resident,
+                name_length: record[offset + 9],
             },
             body: &record[offset..offset + length as usize],
         };
@@ -307,7 +310,7 @@ fn parse_fixed_scanned_file_record_with_header(
                     best_name_priority = Some(priority);
                 }
             }
-            ATTR_DATA if !is_directory => {
+            ATTR_DATA if !is_directory && attribute.header.name_length == 0 => {
                 parse_scanned_data_attribute(attribute, &mut parsed)?;
             }
             _ => {}
@@ -841,6 +844,78 @@ mod tests {
     }
 
     #[test]
+    fn parse_file_record_should_ignore_named_alternate_data_stream_size() {
+        let mut record = [0_u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&3_u16.to_le_bytes());
+        record[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        record[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        record[20..22].copy_from_slice(&56_u16.to_le_bytes());
+        record[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        record[24..28].copy_from_slice(&256_u32.to_le_bytes());
+        record[28..32].copy_from_slice(&1024_u32.to_le_bytes());
+        record[44..48].copy_from_slice(&42_u32.to_le_bytes());
+        record[48..50].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[50..52].copy_from_slice(&0_u16.to_le_bytes());
+        record[52..54].copy_from_slice(&0_u16.to_le_bytes());
+        record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+
+        let name_offset = 56_usize;
+        let name_attr_len = write_file_name_attribute(&mut record[name_offset..], "download.mkv");
+        let data_offset = name_offset + name_attr_len;
+        let data_attr_len = write_data_attribute(&mut record[data_offset..]);
+        let ads_offset = data_offset + data_attr_len;
+        let ads_attr_len = write_named_resident_data_attribute(&mut record[ads_offset..], 62);
+        let end = ads_offset + ads_attr_len;
+        record[end..end + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        record[24..28].copy_from_slice(&(end as u32 + 4).to_le_bytes());
+
+        let parsed = parse_file_record(&record, 512).unwrap();
+
+        assert_eq!(parsed.data_size, 16);
+        assert_eq!(parsed.allocated_size, 16);
+    }
+
+    #[test]
+    fn parse_scanned_file_record_should_ignore_named_alternate_data_stream_size() {
+        let mut record = [0_u8; 1024];
+        record[0..4].copy_from_slice(b"FILE");
+        record[4..6].copy_from_slice(&48_u16.to_le_bytes());
+        record[6..8].copy_from_slice(&3_u16.to_le_bytes());
+        record[16..18].copy_from_slice(&1_u16.to_le_bytes());
+        record[18..20].copy_from_slice(&1_u16.to_le_bytes());
+        record[20..22].copy_from_slice(&56_u16.to_le_bytes());
+        record[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        record[24..28].copy_from_slice(&256_u32.to_le_bytes());
+        record[28..32].copy_from_slice(&1024_u32.to_le_bytes());
+        record[44..48].copy_from_slice(&42_u32.to_le_bytes());
+        record[48..50].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[50..52].copy_from_slice(&0_u16.to_le_bytes());
+        record[52..54].copy_from_slice(&0_u16.to_le_bytes());
+        record[510..512].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+        record[1022..1024].copy_from_slice(&0xAAAA_u16.to_le_bytes());
+
+        let name_offset = 56_usize;
+        let name_attr_len = write_file_name_attribute(&mut record[name_offset..], "download.mkv");
+        let data_offset = name_offset + name_attr_len;
+        let data_attr_len = write_invalid_runlist_data_attribute(&mut record[data_offset..]);
+        let ads_offset = data_offset + data_attr_len;
+        let ads_attr_len = write_named_resident_data_attribute(&mut record[ads_offset..], 62);
+        let end = ads_offset + ads_attr_len;
+        record[end..end + 4].copy_from_slice(&ATTR_END.to_le_bytes());
+        record[24..28].copy_from_slice(&(end as u32 + 4).to_le_bytes());
+
+        let parsed = parse_scanned_file_record(&record, 512).unwrap();
+
+        assert_eq!(parsed.file_name.unwrap().name, "download.mkv");
+        assert_eq!(parsed.data_size, 16);
+        assert_eq!(parsed.allocated_size, 32);
+        assert!(parse_file_record(&record, 512).is_err());
+    }
+
+    #[test]
     fn parse_scanned_file_record_in_place_should_apply_fixups() {
         let mut record = [0_u8; 1024];
         record[0..4].copy_from_slice(b"FILE");
@@ -957,6 +1032,26 @@ mod tests {
         output[40..48].copy_from_slice(&32_u64.to_le_bytes());
         output[48..56].copy_from_slice(&16_u64.to_le_bytes());
         output[64..64 + runlist.len()].copy_from_slice(&runlist);
+        attr_len
+    }
+
+    fn write_named_resident_data_attribute(output: &mut [u8], data_len: u32) -> usize {
+        let stream_name = "Zone.Identifier".encode_utf16().collect::<Vec<_>>();
+        let name_offset = 24_usize;
+        let value_offset = name_offset + stream_name.len() * 2;
+        let value_len = data_len as usize;
+        let attr_len = value_offset + value_len;
+        output[0..4].copy_from_slice(&ATTR_DATA.to_le_bytes());
+        output[4..8].copy_from_slice(&(attr_len as u32).to_le_bytes());
+        output[9] = stream_name.len() as u8;
+        output[10..12].copy_from_slice(&(name_offset as u16).to_le_bytes());
+        output[16..20].copy_from_slice(&data_len.to_le_bytes());
+        output[20..22].copy_from_slice(&(value_offset as u16).to_le_bytes());
+        for (idx, unit) in stream_name.iter().enumerate() {
+            let start = name_offset + idx * 2;
+            output[start..start + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        output[value_offset..value_offset + value_len].fill(b'Z');
         attr_len
     }
 }

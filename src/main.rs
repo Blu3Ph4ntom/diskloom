@@ -26,6 +26,8 @@ const UI_PROGRESS_EVERY: u64 = 1_024;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
 const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
+const MAX_SCAN_CACHE_ITEMS: usize = 2;
+const MAX_SCAN_CACHE_ENTRIES: usize = 3_000_000;
 const SKIP_STARTUP_ELEVATION_ENV: &str = "DISKLOOM_SKIP_STARTUP_ELEVATION";
 
 fn main() {
@@ -106,10 +108,24 @@ struct AppState {
     index: Option<TreeIndex>,
     sort: SortSpec,
     visible_roots: Vec<EntryId>,
+    current_path_key: Option<String>,
+    cache: Vec<CachedScan>,
     expanded: HashSet<EntryId>,
     selected: Option<EntryId>,
     cancel: Option<Arc<AtomicBool>>,
     scanning: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CachedScan {
+    path_key: String,
+    graph: Arc<FileGraph>,
+    visible_roots: Vec<EntryId>,
+    scanner_label: &'static str,
+    fallback_reason: Option<String>,
+    summary: ScanSummary,
+    size_bytes: u64,
+    allocated_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -349,6 +365,7 @@ fn start_scan(
     }
     let scanner = ScannerMode::parse(&scanner);
     let path_buf = PathBuf::from(&path);
+    let path_key = cache_key_for_path(&path_buf);
 
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -356,9 +373,18 @@ fn start_scan(
         if state.scanning {
             return Err("a scan is already running".to_owned());
         }
+        if let Some(cached) = take_cached_scan(&mut state, &path_key) {
+            cache_current_scan(&mut state);
+            let dto = restore_cached_scan(&mut state, cached);
+            emit_or_log(&window, "scan-started", path);
+            emit_or_log(&window, "scan-complete", dto);
+            return Ok(());
+        }
+        cache_current_scan(&mut state);
         state.graph = None;
         state.index = None;
         state.visible_roots.clear();
+        state.current_path_key = None;
         state.expanded.clear();
         state.selected = None;
         state.cancel = Some(Arc::clone(&cancel));
@@ -368,6 +394,7 @@ fn start_scan(
     let shared = Arc::clone(&state.inner);
     let window_for_start = window.clone();
     let window_for_thread = window;
+    let path_key_for_thread = path_key;
     emit_or_log(&window_for_start, "scan-started", path.clone());
 
     thread::spawn(move || {
@@ -390,7 +417,13 @@ fn start_scan(
         let result = scan_path(path_buf, scanner, &cancel, &mut on_progress);
         let elapsed_ms = started.elapsed().as_millis();
         match result {
-            Ok(outcome) => apply_scan_complete(&shared, &window_for_thread, outcome, elapsed_ms),
+            Ok(outcome) => apply_scan_complete(
+                &shared,
+                &window_for_thread,
+                outcome,
+                elapsed_ms,
+                path_key_for_thread,
+            ),
             Err(error) => apply_scan_error(&shared, &window_for_thread, error),
         }
     });
@@ -546,6 +579,7 @@ fn apply_scan_complete(
     window: &Window,
     outcome: ScanOutcome,
     elapsed_ms: u128,
+    path_key: String,
 ) {
     let graph = Arc::new(outcome.graph);
     let mut index = TreeIndex::build(&graph, SortSpec::default());
@@ -576,6 +610,7 @@ fn apply_scan_complete(
         }
         state.sort = index.sort;
         state.visible_roots = visible_roots;
+        state.current_path_key = Some(path_key);
         state.graph = Some(graph);
         state.index = Some(index);
         state.selected = None;
@@ -600,6 +635,92 @@ fn ensure_sort(state: &mut AppState, sort: SortSpec) {
     }
     state.index = Some(index);
     state.sort = sort;
+}
+
+fn cache_current_scan(state: &mut AppState) {
+    let Some(path_key) = state.current_path_key.clone() else {
+        return;
+    };
+    let Some(graph) = state.graph.as_ref().cloned() else {
+        return;
+    };
+    if graph.len() > MAX_SCAN_CACHE_ENTRIES {
+        return;
+    }
+    let Some(index) = state.index.as_ref() else {
+        return;
+    };
+    let visible_roots = if state.visible_roots.is_empty() {
+        index.roots.clone()
+    } else {
+        state.visible_roots.clone()
+    };
+    let (size_bytes, allocated_bytes) = totals_for_roots(&graph, &visible_roots);
+    let summary = summary_from_graph(&graph);
+    state.cache.retain(|cached| cached.path_key != path_key);
+    state.cache.insert(
+        0,
+        CachedScan {
+            path_key,
+            graph,
+            visible_roots,
+            scanner_label: "cached scan",
+            fallback_reason: None,
+            summary,
+            size_bytes,
+            allocated_bytes,
+        },
+    );
+    trim_scan_cache(state);
+}
+
+fn take_cached_scan(state: &mut AppState, path_key: &str) -> Option<CachedScan> {
+    let position = state
+        .cache
+        .iter()
+        .position(|cached| cached.path_key == path_key)?;
+    Some(state.cache.remove(position))
+}
+
+fn restore_cached_scan(state: &mut AppState, cached: CachedScan) -> ScanCompleteDto {
+    let mut index = TreeIndex::build(&cached.graph, state.sort);
+    index.roots = cached.visible_roots.clone();
+    state.expanded.clear();
+    for root in &index.roots {
+        state.expanded.insert(*root);
+    }
+    state.visible_roots = cached.visible_roots;
+    state.current_path_key = Some(cached.path_key);
+    state.graph = Some(cached.graph);
+    state.index = Some(index);
+    state.selected = None;
+    state.cancel = None;
+    state.scanning = false;
+
+    ScanCompleteDto {
+        scanner_label: cached.scanner_label,
+        fallback_reason: cached.fallback_reason,
+        entries: cached.summary.entries,
+        files: cached.summary.files,
+        directories: cached.summary.directories,
+        inaccessible: cached.summary.inaccessible,
+        elapsed_ms: 0,
+        size_bytes: cached.size_bytes,
+        allocated_bytes: cached.allocated_bytes,
+    }
+}
+
+fn trim_scan_cache(state: &mut AppState) {
+    while state.cache.len() > MAX_SCAN_CACHE_ITEMS {
+        state.cache.pop();
+    }
+    while cached_entry_count(&state.cache) > MAX_SCAN_CACHE_ENTRIES {
+        state.cache.pop();
+    }
+}
+
+fn cached_entry_count(cache: &[CachedScan]) -> usize {
+    cache.iter().map(|cached| cached.graph.len()).sum()
 }
 
 fn apply_scan_error(shared: &Arc<Mutex<AppState>>, window: &Window, error: String) {
@@ -713,15 +834,21 @@ fn tree_row_from_graph(
     let entry = graph.entry(id)?;
     let stats = graph.stats(id)?;
     let child_count = index.child_count(id);
+    let is_dir = entry.flags.contains(EntryFlags::DIRECTORY);
+    let (size_bytes, allocated_bytes) = if is_dir {
+        (stats.total_size.bytes(), stats.total_allocated.bytes())
+    } else {
+        (stats.own_size.bytes(), stats.own_allocated.bytes())
+    };
     Some(TreeRowDto {
         id: id.0,
         name: graph.name(id).unwrap_or_default().to_owned(),
         depth: depth as u32,
-        is_dir: entry.flags.contains(EntryFlags::DIRECTORY),
+        is_dir,
         expanded: state.expanded.contains(&id),
         child_count: child_count as u32,
-        size_bytes: stats.total_size.bytes(),
-        allocated_bytes: stats.total_allocated.bytes(),
+        size_bytes,
+        allocated_bytes,
         modified_unix: entry.modified_unix,
     })
 }
@@ -748,6 +875,10 @@ fn normalized_path_key(path: &Path) -> String {
         .trim()
         .trim_end_matches(['\\', '/'])
         .to_ascii_lowercase()
+}
+
+fn cache_key_for_path(path: &Path) -> String {
+    normalized_path_key(path)
 }
 
 fn normalized_query(query: Option<&str>) -> Option<String> {
@@ -1068,12 +1199,20 @@ fn compare_entry_ids(
                 .to_ascii_lowercase()
                 .cmp(&right_name.to_ascii_lowercase())
         }
-        SortKey::Size => {
-            compare_entry_numeric(graph, left, right, |stats| stats.total_size.bytes())
-        }
-        SortKey::Allocated => {
-            compare_entry_numeric(graph, left, right, |stats| stats.total_allocated.bytes())
-        }
+        SortKey::Size => compare_entry_display_numeric(graph, left, right, |stats, is_dir| {
+            if is_dir {
+                stats.total_size.bytes()
+            } else {
+                stats.own_size.bytes()
+            }
+        }),
+        SortKey::Allocated => compare_entry_display_numeric(graph, left, right, |stats, is_dir| {
+            if is_dir {
+                stats.total_allocated.bytes()
+            } else {
+                stats.own_allocated.bytes()
+            }
+        }),
         SortKey::Modified => {
             let left_modified = graph.entry(*left).map_or(0, |entry| entry.modified_unix);
             let right_modified = graph.entry(*right).map_or(0, |entry| entry.modified_unix);
@@ -1094,15 +1233,29 @@ fn compare_entry_ids(
     })
 }
 
-fn compare_entry_numeric(
+fn compare_entry_display_numeric(
     graph: &FileGraph,
     left: &EntryId,
     right: &EntryId,
-    value: impl Fn(diskloom_core::NodeStats) -> u64,
+    value: impl Fn(diskloom_core::NodeStats, bool) -> u64,
 ) -> CmpOrdering {
-    let left_value = graph.stats(*left).map_or(0, &value);
-    let right_value = graph.stats(*right).map_or(0, value);
+    let left_value = entry_display_numeric(graph, *left, &value);
+    let right_value = entry_display_numeric(graph, *right, &value);
     left_value.cmp(&right_value)
+}
+
+fn entry_display_numeric(
+    graph: &FileGraph,
+    id: EntryId,
+    value: &impl Fn(diskloom_core::NodeStats, bool) -> u64,
+) -> u64 {
+    let Some(stats) = graph.stats(id) else {
+        return 0;
+    };
+    let is_dir = graph
+        .entry(id)
+        .is_some_and(|entry| entry.flags.contains(EntryFlags::DIRECTORY));
+    value(stats, is_dir)
 }
 
 fn progress_dto(summary: ScanSummary, elapsed_ms: u128) -> ScanProgressDto {

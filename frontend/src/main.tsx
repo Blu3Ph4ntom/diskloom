@@ -15,8 +15,8 @@ import {
   HardDrive,
   Info,
   Menu,
+  RefreshCw,
   Search,
-  Settings,
   Trash2,
 } from "lucide-preact";
 import "./styles.css";
@@ -104,7 +104,6 @@ function App() {
   const [sortKey, setSortKey] = useState<SortKey>("size");
   const [sortDescending, setSortDescending] = useState(true);
   const [railCollapsed, setRailCollapsed] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const treeRef = useRef<HTMLDivElement>(null);
@@ -502,6 +501,7 @@ function App() {
                 key={drive.path}
                 className="drive-card"
                 data-active={drivePath === activeDriveRoot}
+                data-root={drive.path.replace("\\", "")}
                 onClick={() => chooseDrive(drive)}
                 type="button"
               >
@@ -539,7 +539,9 @@ function App() {
               {scanning
                 ? `${formatElapsed(totals.elapsedMs)} · ${formatCount(totals.entries)} scanned`
                 : complete
-                  ? `${formatElapsed(complete.elapsedMs)} scan`
+                  ? complete.elapsedMs === 0
+                    ? "cached"
+                    : `${formatElapsed(complete.elapsedMs)} scan`
                   : status}
             </span>
           </div>
@@ -553,10 +555,10 @@ function App() {
             <button
               className="icon-button"
               type="button"
-              aria-label="Settings"
-              onClick={() => setSettingsOpen((value) => !value)}
+              aria-label="Refresh drives"
+              onClick={() => void refreshDrives()}
             >
-              <Settings size={21} strokeWidth={1.7} />
+              <RefreshCw size={20} strokeWidth={1.7} />
             </button>
             {scanning ? (
               <button className="text-action" onClick={cancelScan} type="button">
@@ -573,17 +575,6 @@ function App() {
                 Recycle
               </button>
             )}
-            {settingsOpen ? (
-              <div className="settings-popover">
-                <strong>DiskLoom</strong>
-                <button type="button" onClick={() => void refreshDrives()}>
-                  Refresh drives
-                </button>
-                <button type="button" onClick={() => setRailCollapsed((value) => !value)}>
-                  {railCollapsed ? "Show drive rail" : "Hide drive rail"}
-                </button>
-              </div>
-            ) : null}
           </div>
         </header>
 

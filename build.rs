@@ -84,7 +84,7 @@ fn rerun_if_changed_recursive(path: &Path) {
 }
 
 fn run_npm(frontend: &Path, args: &[&str]) {
-    let status = Command::new("npm")
+    let status = Command::new(npm_command())
         .args(args)
         .current_dir(frontend)
         .status()
@@ -94,4 +94,8 @@ fn run_npm(frontend: &Path, args: &[&str]) {
         "DiskLoom frontend npm command failed: npm {}",
         args.join(" ")
     );
+}
+
+fn npm_command() -> &'static str {
+    if cfg!(windows) { "npm.cmd" } else { "npm" }
 }
