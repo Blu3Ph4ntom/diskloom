@@ -13,7 +13,7 @@ use crate::mft::{
 
 const ROOT_RECORD_NUMBER: u64 = 5;
 const RESERVED_METADATA_RECORDS: u64 = 16;
-const MFT_READ_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+const MFT_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const NO_PARENT_RECORD: u64 = u64::MAX;
 
 #[derive(Debug, Default)]
@@ -1336,8 +1336,8 @@ mod tests {
 
     #[test]
     fn records_per_mft_chunk_should_batch_records_with_floor_of_one() {
-        assert_eq!(records_per_mft_chunk(1024), 65_536);
-        assert_eq!(records_per_mft_chunk(16 * 1024 * 1024), 4);
+        assert_eq!(records_per_mft_chunk(1024), 8_192);
+        assert_eq!(records_per_mft_chunk(16 * 1024 * 1024), 1);
         assert_eq!(records_per_mft_chunk(0), 1);
     }
 

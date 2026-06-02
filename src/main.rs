@@ -23,11 +23,11 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
 
 const UI_PROGRESS_EVERY: u64 = 1_024;
-const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(120);
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(80);
 const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
-const MAX_SCAN_CACHE_ITEMS: usize = 1;
-const MAX_SCAN_CACHE_ENTRIES: usize = 400_000;
+const MAX_SCAN_CACHE_ITEMS: usize = 2;
+const MAX_SCAN_CACHE_ENTRIES: usize = 3_500_000;
 fn main() {
     relaunch_elevated_at_startup();
 

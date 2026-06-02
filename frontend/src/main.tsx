@@ -86,7 +86,7 @@ type TreeViewportDto = {
   rows: TreeRowDto[];
 };
 
-type SortKey = "name" | "size" | "modified";
+type SortKey = "name" | "size" | "allocated" | "modified";
 type DeleteMode = "recycle" | "permanent";
 
 const ROW_HEIGHT = 38;
@@ -149,10 +149,10 @@ function App() {
     [activeDriveRoot, drives],
   );
   const largestVisibleRow = useMemo(
-    () => rows.reduce((largest, row) => Math.max(largest, row.sizeBytes), 0),
+    () => rows.reduce((largest, row) => Math.max(largest, row.allocatedBytes), 0),
     [rows],
   );
-  const rowBarBase = Math.max(largestVisibleRow, complete?.sizeBytes ?? 0, 1);
+  const rowBarBase = Math.max(largestVisibleRow, complete?.allocatedBytes ?? 0, 1);
 
   const loadRows = useCallback(
     async (offset: number) => {
@@ -795,6 +795,10 @@ function App() {
                     <dd>{formatBytes(selectedRow?.sizeBytes ?? complete?.sizeBytes ?? 0)}</dd>
                   </div>
                   <div>
+                    <dt>Allocated</dt>
+                    <dd>{formatBytes(selectedRow?.allocatedBytes ?? complete?.allocatedBytes ?? 0)}</dd>
+                  </div>
+                  <div>
                     <dt>Elapsed</dt>
                     <dd>{complete?.elapsedMs === 0 ? "cached" : formatElapsed(totals.elapsedMs)}</dd>
                   </div>
@@ -827,7 +831,11 @@ function App() {
             </div>
           </div>
           <div className="readout-capacity">
-            <span>{complete ? formatBytes(complete.sizeBytes) : "Scanning"}</span>
+            <span>
+              {complete
+                ? `${formatBytes(complete.sizeBytes)} size · ${formatBytes(complete.allocatedBytes)} allocated`
+                : "Scanning"}
+            </span>
             <div className="capacity-track" data-live={scanning || deleting}>
               <span style={{ width: `${activeUsedPercent ?? 0}%` }} />
             </div>
@@ -854,6 +862,19 @@ function App() {
               )}
               <Filter size={17} strokeWidth={1.7} />
             </button>
+            <button
+              type="button"
+              onClick={() => changeSort("allocated")}
+              data-active={sortKey === "allocated"}
+            >
+              Allocated
+              {sortKey === "allocated" && !sortDescending ? (
+                <ChevronUp size={15} strokeWidth={1.8} />
+              ) : (
+                <ChevronDown size={15} strokeWidth={1.8} />
+              )}
+              <Filter size={17} strokeWidth={1.7} />
+            </button>
             <button type="button" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
               Last Modified
               {sortKey === "modified" && !sortDescending ? (
@@ -868,8 +889,8 @@ function App() {
           <div className="tree-viewport" ref={treeRef} onScroll={handleScroll}>
             <div style={{ height: topSpacer }} />
             {rows.map((row) => {
-              const share = Math.max(2, Math.min(100, (row.sizeBytes / rowBarBase) * 100));
-              const shareLabel = Math.round(Math.min(100, (row.sizeBytes / rowBarBase) * 100));
+              const share = Math.max(2, Math.min(100, (row.allocatedBytes / rowBarBase) * 100));
+              const shareLabel = Math.round(Math.min(100, (row.allocatedBytes / rowBarBase) * 100));
               return (
                 <div
                   key={row.id}
@@ -922,6 +943,9 @@ function App() {
                   </span>
                   <span className="size-cell">
                     <span>{formatBytes(row.sizeBytes)}</span>
+                  </span>
+                  <span className="size-cell allocated-cell">
+                    <span>{formatBytes(row.allocatedBytes)}</span>
                     <span className="row-meter">
                       <span style={{ width: `${share}%` }} />
                     </span>
