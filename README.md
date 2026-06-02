@@ -34,8 +34,8 @@ The project is Windows-first for v1. Future macOS and Linux support may arrive t
 
 Early development. Implemented pieces include:
 
-- Rust workspace with separate core, scan, query, duplicate, export, Windows, NTFS, CLI, UI, and benchmark crates.
-- Root launcher so `diskloom.exe` opens the GUI by default and routes `diskloom.exe cli ...` to the CLI.
+- Rust workspace with separate core, scan, query, duplicate, export, Windows, NTFS, CLI, and benchmark crates.
+- `diskloom.exe` is the product GUI, built with Tauri and Preact around the Rust scanner backend.
 - Compact graph with string interning, integer IDs, parent IDs, aggregation, and lazy path reconstruction.
 - Non-admin fallback scanner with Windows allocated-size reporting.
 - CLI scan/export mode.
@@ -45,9 +45,8 @@ Early development. Implemented pieces include:
 - CSV export.
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
-- Native Rust Win32 desktop shell with a scan control rail, discovered drive shortcuts, background scans, live progress counts, scanner mode selection, cancellation, and tree, files, types, and treemap tabs.
-- Native GUI row selection for tree/file results plus non-blocking Windows actions: open in Explorer, properties, and delete to Recycle Bin. Root rows are protected from recycle actions.
-- Query filters, CSV export, duplicate grouping, and rename remain implemented in shared crates and CLI paths; they are being rewired into the native GUI shell after the egui retirement.
+- Tauri GUI with discovered drive shortcuts, background scans, live progress counts, scanner mode selection, cancellation, and a virtualized expandable file tree.
+- Query filters, CSV export, duplicate grouping, shell actions, and rename remain implemented in shared crates and CLI paths; they are staged for the Tauri GUI after the analyzer tree is stable.
 - Benchmark harness for repeated scan timing, sampled process memory, foreground tick-gap responsiveness, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 
 The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
@@ -110,7 +109,7 @@ Probe the NTFS fast-path boundary:
 cargo run -p diskloom-cli -- ntfs-probe C:
 ```
 
-Launch the GUI shell:
+Launch the GUI app:
 
 ```powershell
 cargo run
@@ -151,10 +150,7 @@ Build a portable Windows zip:
 
 The portable package includes:
 
-- `diskloom.exe`: product launcher. Double-click starts the GUI; `diskloom.exe scan ...` or `diskloom.exe cli ...` runs CLI commands.
-- `diskloom-cli.exe`: direct CLI entry for scripts.
-- `diskloom-ui.exe`: direct GUI entry.
-- `diskloom-bench.exe`: benchmark harness.
+- `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
 
 ## License
 
