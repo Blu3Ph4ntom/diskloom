@@ -1,12 +1,17 @@
 use std::{
     ffi::OsString,
-    fs::File,
-    io::{self, Write},
+    fs::{self, File},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::find_duplicate_candidates;
@@ -19,6 +24,7 @@ use diskloom_query::{
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{
     VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
+    run_current_process_elevated_hidden_and_wait,
 };
 
 #[derive(Debug, Parser)]
@@ -106,6 +112,9 @@ struct ScanCommand {
 
     #[arg(long)]
     raw: bool,
+
+    #[arg(long, hide = true)]
+    elevated_output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -166,13 +175,32 @@ fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
 }
 
 fn run_scan(command: ScanCommand) -> Result<()> {
-    if maybe_relaunch_scan_elevated(&command)? {
+    if let Some(output_path) = command.elevated_output.clone() {
+        return run_elevated_child_scan(command, &output_path);
+    }
+
+    if maybe_run_scan_elevated_and_print(&command)? {
         return Ok(());
     }
 
+    let mut stdout = io::stdout().lock();
+    run_scan_to_writer(command, &mut stdout, true)
+}
+
+fn run_scan_to_writer(
+    command: ScanCommand,
+    writer: &mut impl Write,
+    show_spinner: bool,
+) -> Result<()> {
+    let mut spinner = show_spinner
+        .then(|| StatusSpinner::start_if_terminal(format!("Scanning {}", command.path.display())))
+        .flatten();
     let started = Instant::now();
     let outcome = scan_path(&command)
         .with_context(|| format!("failed to scan {}", command.path.display()))?;
+    if let Some(spinner) = spinner.as_mut() {
+        spinner.stop();
+    }
     let elapsed = started.elapsed();
     let display_root = outcome.display_root.clone();
     let graph = outcome.graph;
@@ -181,34 +209,29 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     let filter = query_filter(&command)?.compile()?;
     let ids = ranked_entry_ids(&graph, &filter, &command, display_root.as_deref());
 
-    let mut stdout = io::stdout().lock();
     write_scan_summary(
-        &mut stdout,
+        writer,
         &command.path,
         outcome.scanner_label,
         &summary,
         elapsed,
     )?;
     if let Some(reason) = outcome.fallback_reason {
-        writeln!(stdout, "Fallback: {reason}")?;
+        writeln!(writer, "Fallback: {reason}")?;
     }
     if !command.summary_only {
-        writeln!(stdout)?;
-        write_top_entries(&mut stdout, &graph, &ids, command.limit, command.raw)?;
+        writeln!(writer)?;
+        write_top_entries(writer, &graph, &ids, command.limit, command.raw)?;
     }
 
     if command.duplicates {
-        writeln!(stdout)?;
-        write_duplicate_candidates(&mut stdout, &graph, command.limit, command.raw)?;
+        writeln!(writer)?;
+        write_duplicate_candidates(writer, &graph, command.limit, command.raw)?;
     }
 
     if command.file_types {
-        writeln!(stdout)?;
-        write_file_type_stats(
-            &mut stdout,
-            &file_type_stats(&graph, command.limit),
-            command.raw,
-        )?;
+        writeln!(writer)?;
+        write_file_type_stats(writer, &file_type_stats(&graph, command.limit), command.raw)?;
     }
 
     if let Some(csv_path) = command.csv {
@@ -222,11 +245,90 @@ fn run_scan(command: ScanCommand) -> Result<()> {
             },
         )
         .with_context(|| format!("failed to export {}", csv_path.display()))?;
-        writeln!(stdout)?;
-        writeln!(stdout, "CSV exported to {}", csv_path.display())?;
+        writeln!(writer)?;
+        writeln!(writer, "CSV exported to {}", csv_path.display())?;
     }
 
     Ok(())
+}
+
+fn run_elevated_child_scan(command: ScanCommand, output_path: &Path) -> Result<()> {
+    let mut file = File::create(output_path)
+        .with_context(|| format!("failed to create {}", output_path.display()))?;
+    match run_scan_to_writer(command, &mut file, false) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = writeln!(file, "Error: {error:#}");
+            Err(error)
+        }
+    }
+}
+
+struct StatusSpinner {
+    running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StatusSpinner {
+    fn start_if_terminal(label: String) -> Option<Self> {
+        io::stderr().is_terminal().then(|| Self::start(label))
+    }
+
+    fn start(label: String) -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let handle = thread::spawn(move || {
+            let frames = ['|', '/', '-', '\\'];
+            let started = Instant::now();
+            let mut idx = 0;
+            while thread_running.load(Ordering::Relaxed) {
+                let mut stderr = io::stderr().lock();
+                let _ = write!(
+                    stderr,
+                    "\r{} {} ({})",
+                    frames[idx % frames.len()],
+                    label,
+                    format_duration(started.elapsed())
+                );
+                let _ = stderr.flush();
+                idx += 1;
+                thread::sleep(Duration::from_millis(110));
+            }
+        });
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) {
+        if self.handle.is_none() {
+            return;
+        }
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "\r{}\r", " ".repeat(120));
+        let _ = stderr.flush();
+    }
+}
+
+impl Drop for StatusSpinner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn elevated_output_path() -> PathBuf {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    std::env::temp_dir().join(format!(
+        "diskloom-elevated-{}-{millis}.txt",
+        std::process::id()
+    ))
 }
 
 fn scan_path(command: &ScanCommand) -> Result<ScanOutcome> {
@@ -247,12 +349,38 @@ fn scan_path(command: &ScanCommand) -> Result<ScanOutcome> {
     }
 }
 
-fn maybe_relaunch_scan_elevated(command: &ScanCommand) -> Result<bool> {
-    if scan_needs_elevation(&command.path, command.scanner) {
-        maybe_relaunch_current_command_elevated("direct NTFS scanning")
-    } else {
-        Ok(false)
+fn maybe_run_scan_elevated_and_print(command: &ScanCommand) -> Result<bool> {
+    if !scan_needs_elevation(&command.path, command.scanner) || !should_request_elevation()? {
+        return Ok(false);
     }
+
+    let output_path = elevated_output_path();
+    let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    args.push(OsString::from("--elevated-output"));
+    args.push(output_path.as_os_str().to_os_string());
+
+    eprintln!("DiskLoom requested administrator access for direct NTFS scanning.");
+    let mut spinner = StatusSpinner::start_if_terminal("Waiting for administrator scan".to_owned());
+    let exit_code = run_current_process_elevated_hidden_and_wait(&args)
+        .context("failed to run elevated DiskLoom scan")?;
+    if let Some(spinner) = spinner.as_mut() {
+        spinner.stop();
+    }
+
+    let output = fs::read_to_string(&output_path).with_context(|| {
+        format!(
+            "failed to read elevated scan output {}",
+            output_path.display()
+        )
+    })?;
+    let _ = fs::remove_file(&output_path);
+    print!("{output}");
+    io::stdout().flush().ok();
+
+    if exit_code != 0 {
+        bail!("elevated DiskLoom scan failed with exit code {exit_code}");
+    }
+    Ok(true)
 }
 
 fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bool> {
@@ -920,6 +1048,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_args_should_keep_default_path_with_hidden_elevation_output() {
+        let args = normalize_args([
+            OsString::from("dlm"),
+            OsString::from("--elevated-output"),
+            OsString::from("scan.txt"),
+        ]);
+
+        assert_eq!(
+            args,
+            [
+                OsString::from("dlm"),
+                OsString::from("scan"),
+                OsString::from("."),
+                OsString::from("--elevated-output"),
+                OsString::from("scan.txt"),
+            ]
+        );
+    }
+
+    #[test]
     fn normalize_args_should_treat_bare_path_as_scan_path() {
         let args = normalize_args([OsString::from("dlm"), OsString::from("C:\\Users\\heman")]);
 
@@ -962,6 +1110,7 @@ mod tests {
             limit: 15,
             summary_only: false,
             raw: false,
+            elevated_output: None,
         }
     }
 

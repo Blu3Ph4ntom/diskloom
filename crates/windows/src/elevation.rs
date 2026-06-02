@@ -111,15 +111,39 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_current_process_elevated_and_wait_with_show(
+        args,
+        windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+    )
+}
+
+#[cfg(windows)]
+pub fn run_current_process_elevated_hidden_and_wait<I, S>(args: I) -> Result<u32, ElevationError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_current_process_elevated_and_wait_with_show(
+        args,
+        windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
+    )
+}
+
+#[cfg(windows)]
+fn run_current_process_elevated_and_wait_with_show<I, S>(
+    args: I,
+    show_command: i32,
+) -> Result<u32, ElevationError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     use std::{mem::size_of, os::windows::ffi::OsStrExt};
 
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_OBJECT_0},
         System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
-        UI::{
-            Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
-            WindowsAndMessaging::SW_SHOWNORMAL,
-        },
+        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
     };
 
     let exe = std::env::current_exe()?;
@@ -141,7 +165,7 @@ where
         lpFile: file.as_ptr(),
         lpParameters: params.as_ptr(),
         lpDirectory: directory.as_ptr(),
-        nShow: SW_SHOWNORMAL,
+        nShow: show_command,
         ..SHELLEXECUTEINFOW::default()
     };
 
@@ -171,6 +195,15 @@ where
     let _ = unsafe { CloseHandle(execute_info.hProcess) };
 
     Ok(exit_code)
+}
+
+#[cfg(not(windows))]
+pub fn run_current_process_elevated_hidden_and_wait<I, S>(_: I) -> Result<u32, ElevationError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Err(ElevationError::UnsupportedPlatform)
 }
 
 #[cfg(not(windows))]
