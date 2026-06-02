@@ -209,6 +209,8 @@ struct DriveDto {
     path: String,
     label: String,
     is_ntfs: bool,
+    total_bytes: Option<u64>,
+    free_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -246,6 +248,7 @@ struct TreeRowDto {
     child_count: u32,
     size_bytes: u64,
     allocated_bytes: u64,
+    modified_unix: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -277,6 +280,8 @@ fn discover_drives() -> Vec<DriveDto> {
             path: volume.root,
             label: volume.label,
             is_ntfs: volume.is_ntfs,
+            total_bytes: volume.total_bytes,
+            free_bytes: volume.free_bytes,
         })
         .collect()
 }
@@ -569,6 +574,7 @@ fn tree_row_from_graph(
         child_count: child_count as u32,
         size_bytes: stats.total_size.bytes(),
         allocated_bytes: stats.total_allocated.bytes(),
+        modified_unix: entry.modified_unix,
     })
 }
 
@@ -835,6 +841,8 @@ fn discover_volume_shortcuts() -> Vec<VolumeShortcut> {
                 root: volume.root,
                 label,
                 is_ntfs,
+                total_bytes: volume.total_bytes,
+                free_bytes: volume.free_bytes,
             }
         })
         .collect()
@@ -845,6 +853,8 @@ struct VolumeShortcut {
     root: String,
     label: String,
     is_ntfs: bool,
+    total_bytes: Option<u64>,
+    free_bytes: Option<u64>,
 }
 
 fn sort_entry_ids_by_total_size(graph: &FileGraph, ids: &mut [EntryId]) {

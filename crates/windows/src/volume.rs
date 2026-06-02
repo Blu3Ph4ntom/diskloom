@@ -9,6 +9,8 @@ pub enum VolumeKind {
 pub struct VolumeInfo {
     pub root: String,
     pub kind: VolumeKind,
+    pub total_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -30,7 +32,13 @@ pub fn discover_volumes() -> Result<Vec<VolumeInfo>, WindowsVolumeError> {
         .into_iter()
         .map(|root| {
             let kind = volume_kind(&root).unwrap_or(VolumeKind::Unknown);
-            VolumeInfo { root, kind }
+            let (total_bytes, free_bytes) = volume_space(&root).unwrap_or((None, None));
+            VolumeInfo {
+                root,
+                kind,
+                total_bytes,
+                free_bytes,
+            }
         })
         .collect())
 }
@@ -98,6 +106,33 @@ fn volume_kind(root: &str) -> Result<VolumeKind, WindowsVolumeError> {
     } else {
         Ok(VolumeKind::Other(name))
     }
+}
+
+#[cfg(windows)]
+fn volume_space(root: &str) -> Result<(Option<u64>, Option<u64>), WindowsVolumeError> {
+    use windows::{Win32::Storage::FileSystem::GetDiskFreeSpaceExW, core::PCWSTR};
+
+    let root_wide = to_wide(root);
+    let mut free_available = 0_u64;
+    let mut total = 0_u64;
+    let mut total_free = 0_u64;
+
+    // SAFETY: `root_wide` is null-terminated and the output pointers reference valid u64
+    // storage for the duration of the call.
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(root_wide.as_ptr()),
+            Some(&mut free_available),
+            Some(&mut total),
+            Some(&mut total_free),
+        )
+    }
+    .map_err(|source| WindowsVolumeError::Api {
+        operation: "GetDiskFreeSpaceExW",
+        source,
+    })?;
+
+    Ok((Some(total), Some(total_free)))
 }
 
 #[cfg(windows)]

@@ -16,6 +16,8 @@ type DriveDto = {
   path: string;
   label: string;
   isNtfs: boolean;
+  totalBytes: number | null;
+  freeBytes: number | null;
 };
 
 type ScanProgressDto = {
@@ -42,6 +44,7 @@ type TreeRowDto = {
   childCount: number;
   sizeBytes: number;
   allocatedBytes: number;
+  modifiedUnix: number;
 };
 
 type TreeViewportDto = {
@@ -50,8 +53,8 @@ type TreeViewportDto = {
   rows: TreeRowDto[];
 };
 
-const ROW_HEIGHT = 34;
-const OVERSCAN_ROWS = 30;
+const ROW_HEIGHT = 38;
+const OVERSCAN_ROWS = 28;
 const EMPTY_PROGRESS: ScanProgressDto = {
   entries: 0,
   files: 0,
@@ -64,16 +67,17 @@ function App() {
   const [ready, setReady] = useState(false);
   const [path, setPath] = useState("");
   const [query, setQuery] = useState("");
+  const [commandText, setCommandText] = useState("");
   const [drives, setDrives] = useState<DriveDto[]>([]);
   const [scanning, setScanning] = useState(false);
   const [status, setStatus] = useState("Ready");
-  const [detail, setDetail] = useState("Type a drive or folder path.");
+  const [detail, setDetail] = useState("Type a drive, folder, or search.");
   const [progress, setProgress] = useState<ScanProgressDto>(EMPTY_PROGRESS);
   const [complete, setComplete] = useState<ScanCompleteDto | null>(null);
   const [rows, setRows] = useState<TreeRowDto[]>([]);
   const [rowOffset, setRowOffset] = useState(0);
   const [visibleTotal, setVisibleTotal] = useState(0);
-  const [viewportHeight, setViewportHeight] = useState(480);
+  const [viewportHeight, setViewportHeight] = useState(520);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedPath, setSelectedPath] = useState("");
   const [error, setError] = useState("");
@@ -87,6 +91,17 @@ function App() {
     () => Math.max(90, Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2),
     [viewportHeight],
   );
+
+  const activeDrive = normalizeScanTarget(path).toLowerCase();
+  const activeDriveInfo = useMemo(
+    () => drives.find((drive) => normalizeScanTarget(drive.path).toLowerCase() === activeDrive),
+    [activeDrive, drives],
+  );
+  const largestVisibleRow = useMemo(
+    () => rows.reduce((largest, row) => Math.max(largest, row.sizeBytes), 0),
+    [rows],
+  );
+  const rowBarBase = Math.max(largestVisibleRow, complete?.sizeBytes ?? 0, 1);
 
   const loadRows = useCallback(
     async (offset: number) => {
@@ -204,6 +219,22 @@ function App() {
     }
   }, [path, selectedId, selectedPath, startScanFor]);
 
+  const handleCommandInput = useCallback((value: string) => {
+    setCommandText(value);
+    if (looksLikePath(value)) {
+      setQuery("");
+      setPath(normalizeScanTarget(value));
+      return;
+    }
+    setQuery(value);
+  }, []);
+
+  const chooseDrive = useCallback((drive: DriveDto) => {
+    setQuery("");
+    setPath(drive.path);
+    setCommandText(drive.path);
+  }, []);
+
   const handleScroll = useCallback(() => {
     const element = treeRef.current;
     if (!element) {
@@ -227,6 +258,7 @@ function App() {
       }
       if (startup.path) {
         setPath(startup.path);
+        setCommandText(startup.path);
       }
       setReady(true);
     });
@@ -244,7 +276,9 @@ function App() {
     if (!ready || path.trim() || drives.length === 0) {
       return;
     }
-    setPath(preferredDrive(drives));
+    const nextPath = preferredDrive(drives);
+    setPath(nextPath);
+    setCommandText(nextPath);
   }, [drives, path, ready]);
 
   useEffect(() => {
@@ -348,158 +382,208 @@ function App() {
   const totals = complete ?? progress;
   const topSpacer = rowOffset * ROW_HEIGHT;
   const bottomSpacer = Math.max(0, visibleTotal - rowOffset - rows.length) * ROW_HEIGHT;
-  const activeDrive = normalizeScanTarget(path).toLowerCase();
+  const subline = error || selectedPath || detail;
+  const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
 
   return (
-    <main className="app-shell">
-      <section className="topbar">
-        <div className="brand-block">
-          <div className="brand-mark">DL</div>
-          <div>
-            <div className="brand">DiskLoom</div>
-            <div className="tagline">See your disk clearly.</div>
-          </div>
-          <div className="state-dot" data-active={scanning} />
-        </div>
-
-        <label className="path-field">
-          <span>Drive or folder</span>
-          <input
-            autoFocus
-            spellcheck={false}
-            value={path}
-            placeholder={"C:\\"}
-            onInput={(event) => setPath(event.currentTarget.value)}
-          />
-        </label>
-
-        <label className="search-field">
-          <span>Search</span>
-          <input
-            spellcheck={false}
-            value={query}
-            placeholder="Name or path"
-            onInput={(event) => setQuery(event.currentTarget.value)}
-          />
-        </label>
-
-        <div className="top-actions">
-          {scanning ? (
-            <button className="action-button" onClick={cancelScan} type="button">
-              Stop
-            </button>
-          ) : null}
-          <button
-            className="danger-button"
-            disabled={selectedId === null || scanning}
-            onClick={deleteSelected}
-            type="button"
-          >
-            Recycle
+    <main className="app-shell" data-scanning={scanning}>
+      <aside className="drive-rail">
+        <div className="rail-title">
+          <button className="icon-button" type="button" aria-label="Menu">
+            =
           </button>
-        </div>
-      </section>
-
-      <section className="drive-strip" aria-label="Drives">
-        {drives.map((drive) => {
-          const drivePath = normalizeScanTarget(drive.path).toLowerCase();
-          return (
-            <button
-              key={drive.path}
-              className="drive-chip"
-              data-active={drivePath === activeDrive}
-              onClick={() => setPath(drive.path)}
-              type="button"
-            >
-              {drive.label}
-            </button>
-          );
-        })}
-      </section>
-
-      <section className="metric-strip">
-        <Metric label="Status" value={status} strong />
-        <Metric label="Entries" value={formatCount(totals.entries)} />
-        <Metric label="Files" value={formatCount(totals.files)} />
-        <Metric label="Folders" value={formatCount(totals.directories)} />
-        <Metric label="Size" value={complete ? formatBytes(complete.sizeBytes) : "-"} />
-        <Metric label="Allocated" value={complete ? formatBytes(complete.allocatedBytes) : "-"} />
-        <Metric label="Elapsed" value={`${formatCount(totals.elapsedMs)} ms`} />
-      </section>
-
-      <section className="tree-surface">
-        <header className="tree-titlebar">
-          <div>
-            <h1>Files and folders</h1>
-            <p className={error ? "error-text" : ""}>{error || selectedPath || detail}</p>
+          <div className="product-lockup">
+            <span className="app-icon">DL</span>
+            <span>DiskLoom</span>
           </div>
-          <div className="visible-count">{formatCount(visibleTotal)} visible</div>
+        </div>
+
+        <div className="drive-list">
+          {drives.map((drive) => {
+            const drivePath = normalizeScanTarget(drive.path).toLowerCase();
+            const usedPercent = driveUsedPercent(drive);
+            return (
+              <button
+                key={drive.path}
+                className="drive-card"
+                data-active={drivePath === activeDrive}
+                onClick={() => chooseDrive(drive)}
+                type="button"
+              >
+                <span className="drive-icon" />
+                <span className="drive-copy">
+                  <span className="drive-name">{driveTitle(drive)}</span>
+                  <span className="rail-meter">
+                    <span style={{ width: `${usedPercent ?? 0}%` }} />
+                  </span>
+                  <span className="drive-meta">{driveCapacityLine(drive)}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      <section className="main-surface">
+        <header className="command-bar">
+          <label className="command-field">
+            <span className="search-glyph" />
+            <input
+              autoFocus
+              spellcheck={false}
+              value={commandText}
+              placeholder="Search or enter path..."
+              onInput={(event) => handleCommandInput(event.currentTarget.value)}
+            />
+          </label>
+          <div className="command-actions">
+            <button className="icon-button" type="button" aria-label="Open folder">
+              []
+            </button>
+            <button className="icon-button" type="button" aria-label="Info">
+              i
+            </button>
+            {scanning ? (
+              <button className="text-action" onClick={cancelScan} type="button">
+                Stop
+              </button>
+            ) : (
+              <button
+                className="text-action danger"
+                disabled={selectedId === null}
+                onClick={deleteSelected}
+                type="button"
+              >
+                Recycle
+              </button>
+            )}
+          </div>
         </header>
 
-        <div className="table-header">
-          <div>Name</div>
-          <div>Size</div>
-          <div>Allocated</div>
-          <div>Items</div>
-        </div>
-
-        <div className="tree-viewport" ref={treeRef} onScroll={handleScroll}>
-          <div style={{ height: topSpacer }} />
-          {rows.map((row) => (
-            <button
-              key={row.id}
-              className="tree-row"
-              data-selected={selectedId === row.id}
-              style={{ "--depth": row.depth } as JSX.CSSProperties}
-              onClick={() => void selectRow(row)}
-              onDblClick={() => void toggleRow(row)}
-              type="button"
-            >
-              <span className="row-name">
-                <span
-                  className="disclosure"
-                  data-visible={row.childCount > 0}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void toggleRow(row);
-                  }}
-                >
-                  {row.childCount === 0 ? "" : row.expanded ? "v" : ">"}
-                </span>
-                <span className="name-text">{row.name}</span>
-              </span>
-              <span>{formatBytes(row.sizeBytes)}</span>
-              <span>{formatBytes(row.allocatedBytes)}</span>
-              <span>{row.childCount > 0 ? formatCount(row.childCount) : ""}</span>
-            </button>
-          ))}
-          {rows.length === 0 ? (
-            <div className="empty-state">
-              {scanning
-                ? `${formatCount(progress.entries)} entries scanned`
-                : error
-                  ? "Scan did not finish."
-                  : "No files visible."}
+        <section className="scan-readout">
+          <div>
+            <div className="readout-status">
+              <span className="live-dot" data-active={scanning} />
+              <strong>{status}</strong>
+              <span>{subline}</span>
             </div>
-          ) : null}
-          <div style={{ height: bottomSpacer }} />
-        </div>
+            <div className="readout-counts">
+              <span>{formatCount(totals.entries)} entries</span>
+              <span>{formatCount(totals.files)} files</span>
+              <span>{formatCount(totals.directories)} folders</span>
+              <span>{formatCount(totals.elapsedMs)} ms</span>
+            </div>
+          </div>
+          <div className="readout-capacity">
+            <span>{complete ? formatBytes(complete.sizeBytes) : "Scanning"}</span>
+            <div className="capacity-track" data-live={scanning}>
+              <span style={{ width: `${activeUsedPercent ?? 0}%` }} />
+            </div>
+            <span>{activeUsedPercent === null ? "" : `${Math.round(activeUsedPercent)}% full`}</span>
+          </div>
+        </section>
+
+        <section className="table-shell">
+          <div className="table-header">
+            <button type="button">
+              Name
+              <span>^</span>
+            </button>
+            <button type="button">
+              Size
+              <span>v</span>
+            </button>
+            <button type="button">
+              Allocated
+              <span>v</span>
+            </button>
+            <button type="button">
+              Last Modified
+              <span>v</span>
+            </button>
+          </div>
+
+          <div className="tree-viewport" ref={treeRef} onScroll={handleScroll}>
+            <div style={{ height: topSpacer }} />
+            {rows.map((row) => {
+              const share = Math.max(2, Math.min(100, (row.sizeBytes / rowBarBase) * 100));
+              return (
+                <button
+                  key={row.id}
+                  className="tree-row"
+                  data-selected={selectedId === row.id}
+                  style={{ "--depth": row.depth } as JSX.CSSProperties}
+                  onClick={() => void selectRow(row)}
+                  onDblClick={() => void toggleRow(row)}
+                  type="button"
+                >
+                  <span className="row-name">
+                    <span
+                      className="disclosure"
+                      data-visible={row.childCount > 0}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void toggleRow(row);
+                      }}
+                    >
+                      {row.childCount === 0 ? "" : row.expanded ? "v" : ">"}
+                    </span>
+                    <span className="item-icon" data-kind={row.isDir ? "dir" : "file"} />
+                    <span className="name-text">{row.name}</span>
+                  </span>
+                  <span className="size-cell">
+                    <span>{formatBytes(row.sizeBytes)}</span>
+                    <span className="row-meter">
+                      <span style={{ width: `${share}%` }} />
+                    </span>
+                  </span>
+                  <span className="numeric-cell">{formatBytes(row.allocatedBytes)}</span>
+                  <span className="date-cell">{formatModified(row.modifiedUnix)}</span>
+                </button>
+              );
+            })}
+            {rows.length === 0 ? (
+              scanning ? (
+                <StreamingRows progress={progress} />
+              ) : (
+                <div className="empty-state">{error ? "Scan did not finish." : "No files visible."}</div>
+              )
+            ) : null}
+            <div style={{ height: bottomSpacer }} />
+          </div>
+        </section>
       </section>
     </main>
   );
 }
 
-function Metric(props: { label: string; value: string; strong?: boolean }) {
+function StreamingRows(props: { progress: ScanProgressDto }) {
+  const rows = Array.from({ length: 14 }, (_, index) => index);
   return (
-    <div className="metric" data-strong={props.strong}>
-      <span>{props.label}</span>
-      <strong>{props.value}</strong>
+    <div className="streaming-state">
+      <div className="stream-message">
+        <strong>{formatCount(props.progress.entries)} entries scanned</strong>
+        <span>Results are building in the scanner thread.</span>
+      </div>
+      {rows.map((row) => (
+        <div key={row} className="stream-row" style={{ "--w": `${44 + ((row * 13) % 42)}%` } as JSX.CSSProperties}>
+          <span />
+          <i />
+          <b />
+          <em />
+        </div>
+      ))}
     </div>
   );
 }
 
 function preferredDrive(drives: DriveDto[]) {
   return drives.find((drive) => drive.path.toLowerCase() === "c:\\")?.path ?? drives[0]?.path ?? "";
+}
+
+function looksLikePath(value: string) {
+  const trimmed = value.trim();
+  return /^[a-zA-Z]:/.test(trimmed) || trimmed.startsWith("\\\\") || trimmed.includes(":\\");
 }
 
 function normalizeScanTarget(value: string) {
@@ -512,6 +596,27 @@ function normalizeScanTarget(value: string) {
 
 function isDriveRoot(value: string) {
   return /^[a-zA-Z]:[\\/]*$/.test(value.trim());
+}
+
+function driveTitle(drive: DriveDto) {
+  const driveRoot = drive.path.replace("\\", "");
+  return `${driveRoot} ${drive.isNtfs ? "Local Disk" : drive.label.replace(driveRoot, "").trim() || "Drive"}`;
+}
+
+function driveUsedPercent(drive: DriveDto) {
+  if (!drive.totalBytes || drive.freeBytes === null) {
+    return null;
+  }
+  const used = Math.max(0, drive.totalBytes - drive.freeBytes);
+  return Math.min(100, Math.max(0, (used / drive.totalBytes) * 100));
+}
+
+function driveCapacityLine(drive: DriveDto) {
+  const usedPercent = driveUsedPercent(drive);
+  if (!drive.totalBytes || usedPercent === null) {
+    return drive.label;
+  }
+  return `${Math.round(usedPercent)}% full of ${formatBytes(drive.totalBytes)}`;
 }
 
 function formatBytes(bytes: number) {
@@ -536,6 +641,19 @@ function formatBytes(bytes: number) {
 
 function formatCount(value: number) {
   return Math.trunc(value).toLocaleString("en-US");
+}
+
+function formatModified(unix: number) {
+  if (!unix) {
+    return "-";
+  }
+  return new Date(unix * 1000).toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 render(<App />, document.getElementById("app")!);
