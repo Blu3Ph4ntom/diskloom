@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build installer package
+        shell: pwsh
+        run: ./scripts/package-installer.ps1
+      - name: Build portable package
+        shell: pwsh
+        run: ./scripts/package-portable.ps1 -SkipBuild
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            dist/diskloom-installer-windows-x64.zip `
+            dist/diskloom-portable-windows-x64.zip `
+            --title "DiskLoom $env:GITHUB_REF_NAME" `
+            --notes "Windows release. Use the installer package for DiskLoom plus dlm CLI PATH installation, or the portable package for a no-install build."
