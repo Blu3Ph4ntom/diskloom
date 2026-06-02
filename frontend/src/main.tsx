@@ -3,6 +3,7 @@ import type { JSX } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ChevronDown,
   ChevronRight,
@@ -15,9 +16,12 @@ import {
   HardDrive,
   Info,
   Menu,
+  Minus,
   RefreshCw,
   Search,
+  Square,
   Trash2,
+  X,
 } from "lucide-preact";
 import "./styles.css";
 
@@ -98,6 +102,7 @@ const EMPTY_PROGRESS: ScanProgressDto = {
   inaccessible: 0,
   elapsedMs: 0,
 };
+const appWindow = getCurrentWindow();
 
 function App() {
   const [ready, setReady] = useState(false);
@@ -645,10 +650,32 @@ function App() {
   const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
   const selectedRow = rows.find((row) => row.id === selectedId) ?? null;
   const infoPath = selectedPath || path;
+  const startWindowDrag = useCallback((event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    void appWindow.startDragging();
+  }, []);
+  const minimizeWindow = useCallback(() => {
+    void appWindow.minimize();
+  }, []);
+  const toggleMaximizeWindow = useCallback(() => {
+    void appWindow.toggleMaximize();
+  }, []);
+  const closeWindow = useCallback(() => {
+    void appWindow.close();
+  }, []);
 
   return (
-    <main className="app-shell" data-scanning={scanning || deleting} data-rail-collapsed={railCollapsed}>
-      <aside className="drive-rail">
+    <main className="app-frame" data-scanning={scanning || deleting}>
+      <TitleBar
+        onClose={closeWindow}
+        onDragStart={startWindowDrag}
+        onMinimize={minimizeWindow}
+        onToggleMaximize={toggleMaximizeWindow}
+      />
+      <div className="app-shell" data-rail-collapsed={railCollapsed}>
+        <aside className="drive-rail">
         <div className="rail-title">
           <div className="product-mark" aria-hidden="true">
             <LogoMark />
@@ -691,9 +718,9 @@ function App() {
             );
           })}
         </div>
-      </aside>
+        </aside>
 
-      <section className="main-surface">
+        <section className="main-surface">
         <header className="command-bar">
           <label className="command-field">
             <Search className="search-glyph" size={22} strokeWidth={1.75} />
@@ -965,7 +992,8 @@ function App() {
             <div style={{ height: bottomSpacer }} />
           </div>
         </section>
-      </section>
+        </section>
+      </div>
       {deleteDialogOpen ? (
         <div className="dialog-backdrop" role="presentation" onClick={() => setDeleteDialogOpen(false)}>
           <section className="delete-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
@@ -999,8 +1027,35 @@ function App() {
   );
 }
 
+function TitleBar(props: {
+  onClose: () => void;
+  onDragStart: (event: JSX.TargetedPointerEvent<HTMLDivElement>) => void;
+  onMinimize: () => void;
+  onToggleMaximize: () => void;
+}) {
+  return (
+    <header className="window-titlebar">
+      <div className="window-drag-region" onPointerDown={props.onDragStart} onDblClick={props.onToggleMaximize}>
+        <img className="window-icon" src="/icon-small.png" alt="" draggable={false} />
+        <span>DiskLoom</span>
+      </div>
+      <div className="window-controls">
+        <button type="button" aria-label="Minimize" onClick={props.onMinimize}>
+          <Minus size={14} strokeWidth={1.9} />
+        </button>
+        <button type="button" aria-label="Maximize" onClick={props.onToggleMaximize}>
+          <Square size={12} strokeWidth={1.75} />
+        </button>
+        <button className="window-close" type="button" aria-label="Close" onClick={props.onClose}>
+          <X size={15} strokeWidth={1.8} />
+        </button>
+      </div>
+    </header>
+  );
+}
+
 function LogoMark() {
-  return <img className="logo-mark" src="/icon.png" alt="" draggable={false} />;
+  return <img className="logo-mark" src="/icon-small.png" alt="" draggable={false} />;
 }
 
 function TooltipLayer(props: { tooltip: TooltipState }) {
