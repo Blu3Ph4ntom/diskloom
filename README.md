@@ -161,10 +161,11 @@ Build an installer package:
 .\scripts\package-installer.ps1
 ```
 
-The portable package includes:
+The Windows packages include:
 
 - `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
 - `dlm.exe`: CLI analyzer. The installer package installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
+- `diskloom-setup.exe`: elevated setup binary included in the installer package. It installs the GUI and CLI, creates the Start Menu shortcut, and updates the machine PATH.
 
 ## License
 

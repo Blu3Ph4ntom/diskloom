@@ -33,6 +33,7 @@ try {
     if (-not $SkipBuild) {
         cargo build --release --locked -p diskloom-app
         cargo build --release --locked -p diskloom-cli --bin dlm
+        cargo build --release --locked -p diskloom-installer --bin diskloom-setup
     }
 
     if (Test-Path -LiteralPath $packageDir) {
@@ -42,7 +43,7 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\dlm.exe") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\install.ps1") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom-setup.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-MIT") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-APACHE") -Destination $packageDir

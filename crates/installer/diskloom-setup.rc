@@ -1,0 +1,4 @@
+#define RT_MANIFEST 24
+
+1 ICON "../../icons/icon.ico"
+1 RT_MANIFEST "diskloom-setup.manifest"

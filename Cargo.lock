@@ -758,6 +758,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskloom-installer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "diskloom-windows",
+ "embed-resource",
+ "windows",
+]
+
+[[package]]
 name = "diskloom-ntfs"
 version = "0.1.0"
 dependencies = [

@@ -120,9 +120,7 @@ finally {
     $source.Dispose()
 }
 
-Move-Item -LiteralPath $strippedTempPath -Destination $sourcePath -Force
-
-$cleanSource = [System.Drawing.Image]::FromFile($sourcePath)
+$cleanSource = [System.Drawing.Image]::FromFile($strippedTempPath)
 try {
     Save-ResizedPng -Source $cleanSource -Size 256 -Path (Join-Path $iconDirPath "icon.png")
     Save-ResizedPng -Source $cleanSource -Size 256 -Path (Join-Path $frontendPublicPath "icon.png")
