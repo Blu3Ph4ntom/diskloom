@@ -32,6 +32,7 @@ Push-Location $repoRoot
 try {
     if (-not $SkipBuild) {
         cargo build --release --locked -p diskloom-app
+        cargo build --release --locked -p diskloom-cli --bin dlm
     }
 
     if (Test-Path -LiteralPath $packageDir) {
@@ -40,6 +41,7 @@ try {
     New-Item -ItemType Directory -Path $packageDir | Out-Null
 
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\diskloom.exe") -Destination $packageDir
+    Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\dlm.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-MIT") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-APACHE") -Destination $packageDir

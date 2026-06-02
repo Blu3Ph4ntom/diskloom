@@ -1,8 +1,9 @@
 use std::{
+    ffi::OsString,
     fs::File,
     io::{self, Write},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -20,7 +21,7 @@ use diskloom_windows::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "diskloom")]
+#[command(name = "dlm")]
 #[command(about = "DiskLoom disk analyzer")]
 pub struct Cli {
     #[command(subcommand)]
@@ -92,6 +93,12 @@ struct ScanCommand {
 
     #[arg(long, default_value_t = 25)]
     limit: usize,
+
+    #[arg(long)]
+    summary_only: bool,
+
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -109,7 +116,11 @@ struct ScanOutcome {
 }
 
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    run_with_args(std::env::args_os())
+}
+
+pub fn run_with_args(args: impl IntoIterator<Item = OsString>) -> Result<()> {
+    let cli = Cli::parse_from(normalize_args(args));
 
     match cli.command {
         Command::Scan(command) => run_scan(command),
@@ -121,6 +132,29 @@ pub fn run() -> Result<()> {
         }
         Command::Volumes => run_volumes(),
     }
+}
+
+fn normalize_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut args = args.into_iter().collect::<Vec<_>>();
+    if args.is_empty() {
+        return args;
+    }
+    let Some(first) = args.get(1).and_then(|arg| arg.to_str()).map(str::to_owned) else {
+        args.insert(1, OsString::from("scan"));
+        args.insert(2, OsString::from("."));
+        return args;
+    };
+    if matches!(
+        first.as_str(),
+        "scan" | "ntfs-probe" | "volumes" | "--help" | "-h"
+    ) {
+        return args;
+    }
+    args.insert(1, OsString::from("scan"));
+    if first.starts_with('-') {
+        args.insert(2, OsString::from("."));
+    }
+    args
 }
 
 fn run_scan(command: ScanCommand) -> Result<()> {
@@ -139,26 +173,33 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     let ids = top_entries_by_total_size(&graph, filter.matching_ids(&graph), command.limit);
 
     let mut stdout = io::stdout().lock();
-    writeln!(
-        stdout,
-        "Scanned {} entries ({} files, {} directories, {} inaccessible) in {:.2?}",
-        summary.entries, summary.files, summary.directories, summary.inaccessible, elapsed
+    write_scan_summary(
+        &mut stdout,
+        &command.path,
+        outcome.scanner_label,
+        &summary,
+        elapsed,
     )?;
-    writeln!(stdout, "Scanner: {}", outcome.scanner_label)?;
     if let Some(reason) = outcome.fallback_reason {
-        writeln!(stdout, "Fallback reason: {reason}")?;
+        writeln!(stdout, "Fallback: {reason}")?;
     }
-    writeln!(stdout)?;
-    write_top_entries(&mut stdout, &graph, &ids, command.limit)?;
+    if !command.summary_only {
+        writeln!(stdout)?;
+        write_top_entries(&mut stdout, &graph, &ids, command.limit, command.raw)?;
+    }
 
     if command.duplicates {
         writeln!(stdout)?;
-        write_duplicate_candidates(&mut stdout, &graph, command.limit)?;
+        write_duplicate_candidates(&mut stdout, &graph, command.limit, command.raw)?;
     }
 
     if command.file_types {
         writeln!(stdout)?;
-        write_file_type_stats(&mut stdout, &file_type_stats(&graph, command.limit))?;
+        write_file_type_stats(
+            &mut stdout,
+            &file_type_stats(&graph, command.limit),
+            command.raw,
+        )?;
     }
 
     if let Some(csv_path) = command.csv {
@@ -334,9 +375,14 @@ fn write_top_entries(
     graph: &FileGraph,
     ids: &[EntryId],
     limit: usize,
+    raw: bool,
 ) -> Result<()> {
-    writeln!(writer, "Top entries by total size:")?;
-    writeln!(writer, "size\tallocated\tkind\tpath")?;
+    writeln!(writer, "Top entries")?;
+    writeln!(
+        writer,
+        "{:<12} {:<12} {:<5} Path",
+        "Size", "Allocated", "Kind"
+    )?;
 
     for id in ids.iter().take(limit) {
         let Some(stats) = graph.stats(*id) else {
@@ -357,9 +403,9 @@ fn write_top_entries(
 
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}",
-            stats.total_size.bytes(),
-            stats.total_allocated.bytes(),
+            "{:<12} {:<12} {:<5} {}",
+            format_size(stats.total_size.bytes(), raw),
+            format_size(stats.total_allocated.bytes(), raw),
             kind,
             path
         )?;
@@ -372,16 +418,21 @@ fn write_duplicate_candidates(
     writer: &mut impl Write,
     graph: &FileGraph,
     limit: usize,
+    raw: bool,
 ) -> Result<()> {
     let candidates = find_duplicate_candidates(graph);
     writeln!(writer, "Duplicate candidates by size/name/date:")?;
-    writeln!(writer, "size\tentries\tmodified\tname")?;
+    writeln!(
+        writer,
+        "{:<12} {:<7} {:<12} Name",
+        "Size", "Entries", "Modified"
+    )?;
 
     for candidate in candidates.iter().take(limit) {
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}",
-            candidate.size,
+            "{:<12} {:<7} {:<12} {}",
+            format_size(candidate.size, raw),
             candidate.entries.len(),
             candidate.modified_unix,
             candidate.name
@@ -398,32 +449,133 @@ fn write_duplicate_candidates(
     Ok(())
 }
 
-fn write_file_type_stats(writer: &mut impl Write, stats: &[FileTypeStat]) -> Result<()> {
+fn write_file_type_stats(writer: &mut impl Write, stats: &[FileTypeStat], raw: bool) -> Result<()> {
     writeln!(writer, "File types by size:")?;
-    writeln!(writer, "size\tallocated\tfiles\textension")?;
+    writeln!(
+        writer,
+        "{:<12} {:<12} {:<8} Extension",
+        "Size", "Allocated", "Files"
+    )?;
 
     for stat in stats {
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}",
-            stat.size, stat.allocated, stat.files, stat.extension
+            "{:<12} {:<12} {:<8} {}",
+            format_size(stat.size, raw),
+            format_size(stat.allocated, raw),
+            format_count(stat.files),
+            stat.extension
         )?;
     }
 
     Ok(())
 }
 
+fn write_scan_summary(
+    writer: &mut impl Write,
+    path: &Path,
+    scanner_label: &str,
+    summary: &ScanSummary,
+    elapsed: Duration,
+) -> Result<()> {
+    writeln!(writer, "DiskLoom scan")?;
+    writeln!(writer, "{:<12} {}", "Path", path.display())?;
+    writeln!(writer, "{:<12} {}", "Scanner", scanner_label)?;
+    writeln!(
+        writer,
+        "{:<12} {}",
+        "Entries",
+        format_count(summary.entries)
+    )?;
+    writeln!(
+        writer,
+        "{:<12} {} files, {} folders, {} inaccessible",
+        "Breakdown",
+        format_count(summary.files),
+        format_count(summary.directories),
+        format_count(summary.inaccessible)
+    )?;
+    writeln!(writer, "{:<12} {}", "Elapsed", format_duration(elapsed))?;
+    Ok(())
+}
+
+fn format_size(bytes: u64, raw: bool) -> String {
+    if raw {
+        return bytes.to_string();
+    }
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        return format!("{bytes} B");
+    }
+    if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else if value >= 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
+fn format_count(value: u64) -> String {
+    let value = value.to_string();
+    let mut out = String::with_capacity(value.len() + value.len() / 3);
+    for (idx, ch) in value.chars().rev().enumerate() {
+        if idx > 0 && idx % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
+fn format_duration(duration: Duration) -> String {
+    let ms = duration.as_millis();
+    if ms < 1000 {
+        return format!("{ms} ms");
+    }
+    if ms < 60_000 {
+        return format!("{:.2} s", duration.as_secs_f64());
+    }
+    let minutes = ms / 60_000;
+    let seconds = (ms % 60_000) / 1000;
+    format!("{minutes}m {seconds}s")
+}
+
 fn run_volumes() -> Result<()> {
     let volumes = discover_volumes().context("failed to discover Windows volumes")?;
     let mut stdout = io::stdout().lock();
 
+    writeln!(
+        stdout,
+        "{:<8} {:<10} {:<12} {:<12}",
+        "Drive", "Format", "Used", "Total"
+    )?;
     for volume in volumes {
         let kind = match volume.kind {
             VolumeKind::Ntfs => "NTFS".to_owned(),
             VolumeKind::Other(name) => name,
             VolumeKind::Unknown => "unknown".to_owned(),
         };
-        writeln!(stdout, "{}\t{}", volume.root, kind)?;
+        let total = volume.total_bytes.unwrap_or_default();
+        let free = volume.free_bytes.unwrap_or_default();
+        let used = total.saturating_sub(free);
+        writeln!(
+            stdout,
+            "{:<8} {:<10} {:<12} {:<12}",
+            volume.root,
+            kind,
+            format_size(used, false),
+            volume
+                .total_bytes
+                .map(|bytes| format_size(bytes, false))
+                .unwrap_or_else(|| "-".to_owned())
+        )?;
     }
 
     Ok(())
@@ -438,13 +590,16 @@ fn run_ntfs_probe(volume: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+    use std::{
+        ffi::OsString,
+        path::{MAIN_SEPARATOR, Path, PathBuf},
+    };
 
     use diskloom_core::{FileGraphBuilder, FileKind};
 
     use super::{
-        ScanCommand, ScannerMode, drive_volume, query_filter, scan_needs_elevation,
-        volume_arg_is_drive_root, write_duplicate_candidates,
+        ScanCommand, ScannerMode, drive_volume, format_count, normalize_args, query_filter,
+        scan_needs_elevation, volume_arg_is_drive_root, write_duplicate_candidates,
     };
 
     #[test]
@@ -523,13 +678,46 @@ mod tests {
         let graph = builder.finish();
         let mut output = Vec::new();
 
-        write_duplicate_candidates(&mut output, &graph, 10).unwrap();
+        write_duplicate_candidates(&mut output, &graph, 10, false).unwrap();
         let output = String::from_utf8(output).unwrap();
         let left_path = format!("root{MAIN_SEPARATOR}left{MAIN_SEPARATOR}copy.bin");
         let right_path = format!("root{MAIN_SEPARATOR}right{MAIN_SEPARATOR}COPY.bin");
 
         assert!(output.contains(&left_path));
         assert!(output.contains(&right_path));
+    }
+
+    #[test]
+    fn normalize_args_should_default_to_scan_current_directory() {
+        let args = normalize_args([OsString::from("dlm")]);
+
+        assert_eq!(
+            args,
+            [
+                OsString::from("dlm"),
+                OsString::from("scan"),
+                OsString::from(".")
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_args_should_treat_bare_path_as_scan_path() {
+        let args = normalize_args([OsString::from("dlm"), OsString::from("C:\\Users\\heman")]);
+
+        assert_eq!(
+            args,
+            [
+                OsString::from("dlm"),
+                OsString::from("scan"),
+                OsString::from("C:\\Users\\heman")
+            ]
+        );
+    }
+
+    #[test]
+    fn format_count_should_group_thousands() {
+        assert_eq!(format_count(2_107_718), "2,107,718");
     }
 
     fn scan_command_with_path_filter(path_filter: &str) -> ScanCommand {
@@ -552,6 +740,8 @@ mod tests {
             duplicates: false,
             file_types: false,
             limit: 25,
+            summary_only: false,
+            raw: false,
         }
     }
 }

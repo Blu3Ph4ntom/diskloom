@@ -46,6 +46,7 @@ Early development. Implemented pieces include:
 - Duplicate candidate grouping by size/name/date.
 - File type statistics and initial treemap layout.
 - Tauri GUI with discovered drive shortcuts, background scans, live progress counts, scanner mode selection, cancellation, and a virtualized expandable file tree.
+- `dlm.exe` CLI entry point for fast terminal scans from the current directory.
 - Query filters, CSV export, duplicate grouping, shell actions, and rename remain implemented in shared crates and CLI paths; they are staged for the Tauri GUI after the analyzer tree is stable.
 - Benchmark harness for repeated scan timing, sampled process memory, foreground tick-gap responsiveness, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 
@@ -53,22 +54,28 @@ The direct NTFS scanner is an early fast path. It can require elevated access to
 
 ## Usage
 
+Run the CLI in the current directory:
+
+```powershell
+dlm
+```
+
 Run a fallback scan:
 
 ```powershell
-cargo run -p diskloom-cli -- scan . --scanner fallback --limit 25
+dlm . --scanner fallback --limit 25
 ```
 
 Run auto mode, which uses direct NTFS MFT scanning for drive roots and fallback traversal for folders:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\ --scanner auto --limit 25
+dlm C:\ --scanner auto --limit 25
 ```
 
 Force direct NTFS MFT scanning:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\ --scanner ntfs --limit 25
+dlm C:\ --scanner ntfs --limit 25
 ```
 
 Direct NTFS drive scans require administrator access on Windows. If DiskLoom is not already elevated, the CLI, GUI, and benchmark harness request UAC elevation and relaunch the same command instead of silently falling back to traversal.
@@ -76,37 +83,37 @@ Direct NTFS drive scans require administrator access on Windows. If DiskLoom is 
 Export CSV:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\Users --csv target/users.csv
+dlm C:\Users --csv target/users.csv
 ```
 
 Show file type statistics:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --file-types
+dlm C:\Users --scanner fallback --file-types
 ```
 
 Filter by full path:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --path AppData --limit 25
+dlm C:\Users --scanner fallback --path AppData --limit 25
 ```
 
 Show duplicate candidates:
 
 ```powershell
-cargo run -p diskloom-cli -- scan C:\Users --scanner fallback --duplicates --limit 25
+dlm C:\Users --scanner fallback --duplicates --limit 25
 ```
 
 List Windows volumes:
 
 ```powershell
-cargo run -p diskloom-cli -- volumes
+dlm volumes
 ```
 
 Probe the NTFS fast-path boundary:
 
 ```powershell
-cargo run -p diskloom-cli -- ntfs-probe C:
+dlm ntfs-probe C:
 ```
 
 Launch the GUI app:
@@ -148,9 +155,16 @@ Build a portable Windows zip:
 .\scripts\package-portable.ps1
 ```
 
+Build an installer package:
+
+```powershell
+.\scripts\package-installer.ps1
+```
+
 The portable package includes:
 
 - `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
+- `dlm.exe`: CLI analyzer. The installer package installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
 
 ## License
 
