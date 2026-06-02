@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_dupes::find_duplicate_candidates;
-use diskloom_export::{CsvExportOptions, export_csv};
+use diskloom_export::{CsvExportOptions, export_csv, import_snapshot};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
     CompiledFilter, FileTypeStat, NameMatcher, QueryFilter, file_type_stats,
@@ -23,9 +23,12 @@ use diskloom_query::{
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
-    spawn_current_process_elevated_hidden,
+    ElevatedScanRequest, VolumeKind, discover_volumes, is_process_elevated,
+    relaunch_current_process_elevated, remove_elevated_scan_request, run_elevated_scan_task,
+    spawn_current_process_elevated_hidden, write_elevated_scan_request,
 };
+
+const BROKER_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Parser)]
 #[command(name = "dlm")]
@@ -203,16 +206,26 @@ fn run_scan_to_writer(
         spinner.stop();
     }
     let elapsed = started.elapsed();
+    write_scan_result(&command, writer, &display_path, outcome, elapsed)
+}
+
+fn write_scan_result(
+    command: &ScanCommand,
+    writer: &mut impl Write,
+    display_path: &Path,
+    outcome: ScanOutcome,
+    elapsed: Duration,
+) -> Result<()> {
     let display_root = outcome.display_root.clone();
     let graph = outcome.graph;
     let summary = outcome.summary;
 
-    let filter = query_filter(&command)?.compile()?;
-    let ids = ranked_entry_ids(&graph, &filter, &command, display_root.as_deref());
+    let filter = query_filter(command)?.compile()?;
+    let ids = ranked_entry_ids(&graph, &filter, command, display_root.as_deref());
 
     write_scan_summary(
         writer,
-        &display_path,
+        display_path,
         outcome.scanner_label,
         &summary,
         elapsed,
@@ -235,8 +248,8 @@ fn run_scan_to_writer(
         write_file_type_stats(writer, &file_type_stats(&graph, command.limit), command.raw)?;
     }
 
-    if let Some(csv_path) = command.csv {
-        let mut file = File::create(&csv_path)
+    if let Some(csv_path) = &command.csv {
+        let mut file = File::create(csv_path)
             .with_context(|| format!("failed to create {}", csv_path.display()))?;
         export_csv(
             &graph,
@@ -355,6 +368,10 @@ fn maybe_run_scan_elevated_and_print(command: &ScanCommand) -> Result<bool> {
         return Ok(false);
     }
 
+    if maybe_run_scan_with_broker_and_print(command)? {
+        return Ok(true);
+    }
+
     let output_path = elevated_output_path();
     let mut args = std::env::args_os().skip(1).collect::<Vec<_>>();
     args.push(OsString::from("--elevated-output"));
@@ -394,6 +411,70 @@ fn maybe_run_scan_elevated_and_print(command: &ScanCommand) -> Result<bool> {
     Ok(true)
 }
 
+fn maybe_run_scan_with_broker_and_print(command: &ScanCommand) -> Result<bool> {
+    let mut scan_spinner = StatusSpinner::start_if_terminal(
+        "Scanning disk via installed administrator task".to_owned(),
+    );
+    let result = run_broker_scan(command);
+    if let Some(spinner) = scan_spinner.as_mut() {
+        spinner.stop();
+    }
+
+    let (outcome, elapsed) = match result {
+        Ok(result) => result,
+        Err(_) => return Ok(false),
+    };
+
+    let display_path = display_scan_path(&command.path);
+    let mut stdout = io::stdout().lock();
+    write_scan_result(command, &mut stdout, &display_path, outcome, elapsed)?;
+    Ok(true)
+}
+
+fn run_broker_scan(command: &ScanCommand) -> Result<(ScanOutcome, Duration)> {
+    let resolved_path = resolved_scan_path(&command.path);
+    let request = ElevatedScanRequest::new(&resolved_path)?;
+    write_elevated_scan_request(&request)?;
+
+    let started = Instant::now();
+    let result = (|| {
+        run_elevated_scan_task().context("failed to start installed elevated scan task")?;
+        wait_for_broker_snapshot(&request)?;
+        let file = File::open(&request.snapshot_path)
+            .with_context(|| format!("failed to open {}", request.snapshot_path.display()))?;
+        let graph = import_snapshot(file).context("failed to import elevated scan snapshot")?;
+        let summary = summary_from_graph(&graph);
+        Ok((
+            ScanOutcome {
+                graph,
+                summary,
+                scanner_label: "direct NTFS MFT",
+                fallback_reason: None,
+                display_root: display_root_for_direct_scan(&resolved_path),
+            },
+            started.elapsed(),
+        ))
+    })();
+    remove_elevated_scan_request(&request);
+    result
+}
+
+fn wait_for_broker_snapshot(request: &ElevatedScanRequest) -> Result<()> {
+    let started = Instant::now();
+    while started.elapsed() < BROKER_SCAN_TIMEOUT {
+        if request.snapshot_path.exists() {
+            return Ok(());
+        }
+        if request.error_path.exists() {
+            let error = fs::read_to_string(&request.error_path).unwrap_or_default();
+            bail!("elevated scan task failed: {}", error.trim());
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    bail!("elevated scan task timed out");
+}
+
 fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bool> {
     if volume_arg_is_drive_root(volume) {
         maybe_relaunch_current_command_elevated("direct NTFS volume probing")
@@ -403,7 +484,7 @@ fn maybe_relaunch_current_command_elevated_for_volume(volume: &str) -> Result<bo
 }
 
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner == ScannerMode::Ntfs && drive_for_path(&resolved_scan_path(path)).is_some()
+    scanner != ScannerMode::Fallback && drive_for_path(&resolved_scan_path(path)).is_some()
 }
 
 fn volume_arg_is_drive_root(volume: &str) -> bool {
@@ -952,13 +1033,13 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_drive_backed_scan_targets() {
-        assert!(!scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
+        assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("c:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("c:\\"),
             ScannerMode::Fallback
         ));
-        assert!(!scan_needs_elevation(
+        assert!(scan_needs_elevation(
             Path::new("c:\\Users"),
             ScannerMode::Auto
         ));

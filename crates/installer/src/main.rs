@@ -29,6 +29,10 @@ struct Args {
     #[arg(long)]
     no_shortcut: bool,
 
+    /// Do not register the on-demand elevated NTFS scan task.
+    #[arg(long)]
+    no_broker: bool,
+
     /// Remove the install directory from the machine PATH.
     #[arg(long)]
     remove_path: bool,
@@ -57,11 +61,18 @@ fn run() -> Result<()> {
 
     if args.remove_path {
         remove_install_path(&install_dir)?;
+        unregister_scan_broker_task()?;
         println!("DiskLoom PATH entry removed for {}", install_dir.display());
         return Ok(());
     }
 
-    install_bundle(&source_dir, &install_dir, !args.no_path, !args.no_shortcut)?;
+    install_bundle(
+        &source_dir,
+        &install_dir,
+        !args.no_path,
+        !args.no_shortcut,
+        !args.no_broker,
+    )?;
 
     println!("DiskLoom installed to {}", install_dir.display());
     if !args.no_path {
@@ -109,6 +120,7 @@ fn install_bundle(
     install_dir: &Path,
     add_path: bool,
     add_shortcut: bool,
+    add_broker: bool,
 ) -> Result<()> {
     let source_dir = source_dir.canonicalize().with_context(|| {
         format!(
@@ -117,10 +129,9 @@ fn install_bundle(
         )
     })?;
     let install_dir = absolutize(install_dir)?;
-    let gui_source = source_dir.join("diskloom.exe");
+    let gui_source = find_required_file(&source_dir, &["diskloom.exe", "DiskLoom.exe"])?;
     let cli_source = source_dir.join("dlm.exe");
 
-    ensure_file(&gui_source)?;
     ensure_file(&cli_source)?;
 
     fs::create_dir_all(&install_dir)
@@ -148,6 +159,10 @@ fn install_bundle(
         create_start_menu_shortcut(&install_dir)?;
     }
 
+    if add_broker {
+        register_scan_broker_task(&install_dir)?;
+    }
+
     Ok(())
 }
 
@@ -157,6 +172,31 @@ fn remove_install_path(install_dir: &Path) -> Result<()> {
         broadcast_environment_change();
     }
     Ok(())
+}
+
+fn register_scan_broker_task(install_dir: &Path) -> Result<()> {
+    let worker = install_dir.join("diskloom.exe");
+    diskloom_windows::register_elevated_scan_task(&worker)
+        .with_context(|| "failed to register elevated scan task")
+}
+
+fn unregister_scan_broker_task() -> Result<()> {
+    match diskloom_windows::unregister_elevated_scan_task() {
+        Ok(()) => Ok(()),
+        Err(diskloom_windows::ScanBrokerError::CommandFailed(message))
+            if task_missing_message(&message) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error).context("failed to unregister elevated scan task"),
+    }
+}
+
+fn task_missing_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("cannot find")
+        || message.contains("does not exist")
+        || message.contains("not found")
 }
 
 fn absolutize(path: &Path) -> Result<PathBuf> {
@@ -176,6 +216,20 @@ fn ensure_file(path: &Path) -> Result<()> {
         bail!("{} is not a file", path.display());
     }
     Ok(())
+}
+
+fn find_required_file(source_dir: &Path, names: &[&str]) -> Result<PathBuf> {
+    for name in names {
+        let path = source_dir.join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    bail!(
+        "missing required file in {}: {}",
+        source_dir.display(),
+        names.join(" or ")
+    )
 }
 
 fn copy_file(source: &Path, destination: &Path) -> Result<()> {
@@ -601,5 +655,12 @@ mod tests {
             remove_path_value(r"C:\Windows;C:\Tools", r"C:\Program Files\DiskLoom"),
             None
         );
+    }
+
+    #[test]
+    fn task_missing_message_should_match_schtasks_missing_task_text() {
+        assert!(super::task_missing_message(
+            "ERROR: The system cannot find the file specified."
+        ));
     }
 }

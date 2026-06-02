@@ -3,6 +3,8 @@
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::HashSet,
+    ffi::OsString,
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
@@ -13,11 +15,14 @@ use std::{
 };
 
 use diskloom_core::{EntryFlags, EntryId, FileGraph};
+use diskloom_export::{export_snapshot, import_snapshot};
 use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
-    show_properties,
+    ElevatedScanRequest, VolumeKind, discover_volumes, is_process_elevated, open_in_explorer,
+    read_elevated_scan_request, recycle_delete, remove_elevated_scan_request,
+    run_elevated_scan_task, show_properties, spawn_current_process_elevated_hidden,
+    validate_elevated_scan_output_paths, write_elevated_scan_request,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
@@ -28,7 +33,13 @@ const DEFAULT_ROW_LIMIT: usize = 120;
 const MAX_ROW_LIMIT: usize = 600;
 const MAX_SCAN_CACHE_ITEMS: usize = 1;
 const MAX_SCAN_CACHE_ENTRIES: usize = 400_000;
+const BROKER_SCAN_TIMEOUT: Duration = Duration::from_secs(600);
+
 fn main() {
+    if std::env::args_os().any(|arg| arg == "--broker-worker") {
+        std::process::exit(run_broker_worker());
+    }
+
     let startup = parse_startup_args(std::env::args().skip(1));
 
     tauri::Builder::default()
@@ -54,6 +65,42 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run DiskLoom");
+}
+
+fn run_broker_worker() -> i32 {
+    let request = match read_elevated_scan_request() {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("failed to read DiskLoom scan request: {error}");
+            return 1;
+        }
+    };
+
+    match run_broker_worker_inner(&request) {
+        Ok(()) => 0,
+        Err(error) => {
+            let _ = fs::write(&request.error_path, error.as_bytes());
+            1
+        }
+    }
+}
+
+fn run_broker_worker_inner(request: &ElevatedScanRequest) -> Result<(), String> {
+    validate_elevated_scan_output_paths(request).map_err(|error| error.to_string())?;
+    let path = PathBuf::from(&request.path);
+    let cancel = AtomicBool::new(false);
+    let mut on_progress = |_summary: ScanSummary| {};
+    let outcome = scan_ntfs(&path, &cancel, &mut on_progress)?;
+    let temp_path = request.snapshot_path.with_extension("dlsnap.tmp");
+    {
+        let mut file = File::create(&temp_path)
+            .map_err(|error| format!("failed to create broker snapshot: {error}"))?;
+        export_snapshot(&outcome.graph, &mut file)
+            .map_err(|error| format!("failed to write broker snapshot: {error}"))?;
+    }
+    fs::rename(&temp_path, &request.snapshot_path)
+        .map_err(|error| format!("failed to publish broker snapshot: {error}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1033,9 +1080,22 @@ fn scan_path(
 ) -> Result<ScanOutcome, String> {
     match mode {
         ScannerMode::Fallback => scan_fallback(path, None, cancel, on_progress),
-        ScannerMode::Ntfs => scan_ntfs(&path, cancel, on_progress),
+        ScannerMode::Ntfs => {
+            if drive_for_path(&path).is_some()
+                && !is_process_elevated().unwrap_or(false)
+                && let Ok(outcome) = scan_via_broker(&path, cancel)
+            {
+                return Ok(outcome);
+            }
+            scan_ntfs(&path, cancel, on_progress)
+        }
         ScannerMode::Auto => {
             if let Some(volume) = drive_for_path(&path) {
+                if !is_process_elevated().unwrap_or(false)
+                    && let Ok(outcome) = scan_via_broker(&path, cancel)
+                {
+                    return Ok(outcome);
+                }
                 match scan_ntfs_volume(
                     &volume,
                     display_root_for_direct_scan(&path),
@@ -1050,6 +1110,64 @@ fn scan_path(
             }
         }
     }
+}
+
+fn scan_via_broker(path: &Path, cancel: &AtomicBool) -> Result<ScanOutcome, String> {
+    let request = ElevatedScanRequest::new(path).map_err(|error| error.to_string())?;
+    write_elevated_scan_request(&request).map_err(|error| error.to_string())?;
+
+    let result = (|| {
+        let elevated_child = match run_elevated_scan_task() {
+            Ok(()) => None,
+            Err(_) => Some(
+                spawn_current_process_elevated_hidden([OsString::from("--broker-worker")])
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        wait_for_broker_snapshot(&request, cancel)?;
+        if let Some(child) = elevated_child {
+            let exit_code = child.wait().map_err(|error| error.to_string())?;
+            if exit_code != 0 && !request.snapshot_path.exists() {
+                return Err(format!("elevated broker exited with code {exit_code}"));
+            }
+        }
+        let file = File::open(&request.snapshot_path)
+            .map_err(|error| format!("failed to open broker snapshot: {error}"))?;
+        let graph = import_snapshot(file)
+            .map_err(|error| format!("failed to import broker snapshot: {error}"))?;
+        let summary = summary_from_graph(&graph);
+        Ok(ScanOutcome {
+            graph,
+            summary,
+            scanner_label: "direct NTFS MFT",
+            fallback_reason: None,
+            display_root: display_root_for_direct_scan(path),
+        })
+    })();
+    remove_elevated_scan_request(&request);
+    result
+}
+
+fn wait_for_broker_snapshot(
+    request: &ElevatedScanRequest,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let started = Instant::now();
+    while started.elapsed() < BROKER_SCAN_TIMEOUT {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("scan cancelled".to_owned());
+        }
+        if request.snapshot_path.exists() {
+            return Ok(());
+        }
+        if request.error_path.exists() {
+            let error = fs::read_to_string(&request.error_path).unwrap_or_default();
+            return Err(format!("elevated scan task failed: {}", error.trim()));
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    Err("elevated scan task timed out".to_owned())
 }
 
 fn scan_fallback(
@@ -1169,7 +1287,7 @@ fn totals_for_roots(graph: &FileGraph, roots: &[EntryId]) -> (u64, u64) {
 
 #[cfg(test)]
 fn scan_needs_elevation(path: &Path, scanner: ScannerMode) -> bool {
-    scanner == ScannerMode::Ntfs && drive_volume(path).is_some()
+    scanner != ScannerMode::Fallback && drive_for_path(path).is_some()
 }
 
 fn default_startup_path() -> Option<String> {
@@ -1450,13 +1568,13 @@ mod tests {
 
     #[test]
     fn scan_needs_elevation_should_match_direct_drive_scans_only() {
-        assert!(!scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
+        assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Auto));
         assert!(scan_needs_elevation(Path::new("C:\\"), ScannerMode::Ntfs));
         assert!(!scan_needs_elevation(
             Path::new("C:\\"),
             ScannerMode::Fallback
         ));
-        assert!(!scan_needs_elevation(
+        assert!(scan_needs_elevation(
             Path::new("C:\\Users"),
             ScannerMode::Auto
         ));
