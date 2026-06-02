@@ -37,7 +37,7 @@ function Save-ResizedPng {
         $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
         $graphics.Clear([System.Drawing.Color]::Transparent)
 
-        $scale = [Math]::Max($Size / [double]$Source.Width, $Size / [double]$Source.Height)
+        $scale = [Math]::Min($Size / [double]$Source.Width, $Size / [double]$Source.Height)
         $drawWidth = [int][Math]::Round($Source.Width * $scale)
         $drawHeight = [int][Math]::Round($Source.Height * $scale)
         $x = [int][Math]::Floor(($Size - $drawWidth) / 2)
@@ -114,11 +114,12 @@ function Write-IconFile {
 $source = [System.Drawing.Image]::FromFile($sourcePath)
 try {
     Save-ResizedPng -Source $source -Size 256 -Path (Join-Path $iconDirPath "icon.png")
-    Save-ResizedPng -Source $source -Size 256 -Path (Join-Path $frontendPublicPath "icon.png")
     Write-IconFile -Source $source -Path (Join-Path $iconDirPath "icon.ico")
 }
 finally {
     $source.Dispose()
 }
+
+Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $frontendPublicPath "icon.png") -Force
 
 Write-Host "Generated DiskLoom icons from $sourcePath"

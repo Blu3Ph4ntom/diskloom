@@ -119,37 +119,34 @@ button:not(:disabled) {
 .rail-title {
   position: relative;
   z-index: 1;
-  height: 50px;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 10px 18px;
+  gap: 16px;
+  padding: 12px 18px 10px;
 }
 
 .product-mark {
-  width: 36px;
-  height: 36px;
+  width: 52px;
+  height: 52px;
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  border: 1px solid oklch(0.38 0.025 220);
-  border-radius: 10px;
-  background:
-    linear-gradient(145deg, oklch(0.24 0.014 220), oklch(0.14 0.008 220)),
-    oklch(0.18 0.006 220);
-  box-shadow:
-    inset 0 1px 0 oklch(0.74 0.02 220 / 0.16),
-    0 10px 24px oklch(0.05 0.006 220 / 0.32);
-  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
 }
 
 .logo-mark {
-  width: 30px;
-  height: 30px;
+  width: 46px;
+  height: 46px;
   display: block;
-  border-radius: 8px;
-  object-fit: cover;
+  border-radius: 0;
+  object-fit: contain;
+  filter: drop-shadow(0 8px 18px oklch(0.05 0.006 220 / 0.42));
 }
 
 .product-lockup {
