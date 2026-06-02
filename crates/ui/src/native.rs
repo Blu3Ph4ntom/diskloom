@@ -21,7 +21,8 @@ use diskloom_query::{
 };
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
+    VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
+    relaunch_current_process_elevated, show_properties,
 };
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, TRUE, WPARAM},
@@ -42,8 +43,8 @@ use windows_sys::Win32::{
             LoadCursorW, MSG, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOW,
             SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP,
             WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-            WM_ERASEBKGND, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_SETFONT, WM_SIZE, WNDCLASSW,
-            WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+            WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_SETFONT,
+            WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
         },
     },
 };
@@ -59,6 +60,7 @@ const RAIL_WIDTH: i32 = 312;
 const ROW_HEIGHT: i32 = 27;
 const WM_SCAN_MESSAGE: u32 = WM_APP + 1;
 const WM_START_SCAN: u32 = WM_APP + 2;
+const WM_ACTION_MESSAGE: u32 = WM_APP + 3;
 
 const IDC_PATH: u16 = 1001;
 const IDC_SCAN: u16 = 1002;
@@ -70,6 +72,9 @@ const IDC_TAB_TREE: u16 = 1101;
 const IDC_TAB_FILES: u16 = 1102;
 const IDC_TAB_TYPES: u16 = 1103;
 const IDC_TAB_TREEMAP: u16 = 1104;
+const IDC_OPEN: u16 = 1201;
+const IDC_PROPERTIES: u16 = 1202;
+const IDC_RECYCLE: u16 = 1203;
 const IDC_DRIVE_BASE: u16 = 2000;
 
 const COLOR_BG: u32 = rgb(18, 20, 22);
@@ -81,6 +86,7 @@ const COLOR_CONTROL: u32 = rgb(17, 19, 21);
 const COLOR_LINE: u32 = rgb(52, 56, 60);
 const COLOR_TEXT: u32 = rgb(232, 235, 236);
 const COLOR_MUTED: u32 = rgb(154, 158, 162);
+const COLOR_SELECTED: u32 = rgb(55, 84, 75);
 const COLOR_WARN: u32 = rgb(224, 164, 82);
 const COLOR_ERROR: u32 = rgb(238, 112, 104);
 
@@ -152,6 +158,46 @@ enum ScanMessage {
     Error(String),
 }
 
+#[derive(Debug)]
+struct ActionMessage {
+    kind: ActionKind,
+    path: PathBuf,
+    result: std::result::Result<(), String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionKind {
+    Open,
+    Properties,
+    Recycle,
+}
+
+impl ActionKind {
+    fn started_message(self, path: &Path) -> String {
+        match self {
+            Self::Open => format!("Opening {}", path.display()),
+            Self::Properties => format!("Opening properties for {}", path.display()),
+            Self::Recycle => format!("Moving to Recycle Bin: {}", path.display()),
+        }
+    }
+
+    fn success_message(self, path: &Path) -> String {
+        match self {
+            Self::Open => format!("Opened {}", path.display()),
+            Self::Properties => format!("Properties opened for {}", path.display()),
+            Self::Recycle => format!("Moved to Recycle Bin: {}", path.display()),
+        }
+    }
+
+    fn failure_prefix(self) -> &'static str {
+        match self {
+            Self::Open => "Open failed",
+            Self::Properties => "Properties failed",
+            Self::Recycle => "Recycle failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct UiScanProgress {
     summary: ScanSummary,
@@ -218,15 +264,21 @@ struct NativeApp {
     tab_files_button: HWND,
     tab_types_button: HWND,
     tab_treemap_button: HWND,
+    open_button: HWND,
+    properties_button: HWND,
+    recycle_button: HWND,
     drive_buttons: Vec<HWND>,
     volumes: Vec<VolumeShortcut>,
     scanner_mode: UiScannerMode,
     active_tab: ActiveTab,
     state: UiState,
     receiver: Option<Receiver<ScanMessage>>,
+    action_receiver: Option<Receiver<ActionMessage>>,
+    action_running: bool,
     scan_cancel: Option<Arc<AtomicBool>>,
     status: String,
     scroll_top: usize,
+    selected_id: Option<EntryId>,
     start_on_launch: bool,
     initial_path: String,
 }
@@ -306,15 +358,21 @@ impl NativeApp {
             tab_files_button: null_mut(),
             tab_types_button: null_mut(),
             tab_treemap_button: null_mut(),
+            open_button: null_mut(),
+            properties_button: null_mut(),
+            recycle_button: null_mut(),
             drive_buttons: Vec::new(),
             volumes,
             scanner_mode: UiScannerMode::Auto,
             active_tab: ActiveTab::Tree,
             state: UiState::Idle,
             receiver: None,
+            action_receiver: None,
+            action_running: false,
             scan_cancel: None,
             status: "Ready".to_owned(),
             scroll_top: 0,
+            selected_id: None,
             start_on_launch: false,
             initial_path,
         })
@@ -422,6 +480,11 @@ impl NativeApp {
             self.create_control("BUTTON", "Types", button_style(), IDC_TAB_TYPES)?;
         self.tab_treemap_button =
             self.create_control("BUTTON", "Treemap", button_style(), IDC_TAB_TREEMAP)?;
+        self.open_button = self.create_control("BUTTON", "Open", button_style(), IDC_OPEN)?;
+        self.properties_button =
+            self.create_control("BUTTON", "Properties", button_style(), IDC_PROPERTIES)?;
+        self.recycle_button =
+            self.create_control("BUTTON", "Recycle", button_style(), IDC_RECYCLE)?;
 
         for (idx, volume) in self.volumes.iter().enumerate() {
             let id = IDC_DRIVE_BASE.saturating_add(idx as u16);
@@ -430,6 +493,7 @@ impl NativeApp {
         }
 
         self.set_running_controls(false);
+        self.refresh_action_controls();
         self.layout_controls();
         if self.start_on_launch {
             // SAFETY: Posting to our own valid window handle schedules scan startup after
@@ -505,6 +569,10 @@ impl NativeApp {
         move_window(self.tab_types_button, main_left + 184, tab_y, 74, 30);
         move_window(self.tab_treemap_button, main_left + 264, tab_y, 104, 30);
 
+        move_window(self.open_button, width - 348, tab_y, 84, 30);
+        move_window(self.properties_button, width - 256, tab_y, 112, 30);
+        move_window(self.recycle_button, width - 136, tab_y, 94, 30);
+
         let _ = main_width;
     }
 
@@ -519,6 +587,9 @@ impl NativeApp {
             IDC_TAB_FILES => self.set_active_tab(ActiveTab::Files),
             IDC_TAB_TYPES => self.set_active_tab(ActiveTab::Types),
             IDC_TAB_TREEMAP => self.set_active_tab(ActiveTab::Treemap),
+            IDC_OPEN => self.open_selected(),
+            IDC_PROPERTIES => self.show_selected_properties(),
+            IDC_RECYCLE => self.recycle_selected(),
             id if id >= IDC_DRIVE_BASE => {
                 let index = usize::from(id - IDC_DRIVE_BASE);
                 if let Some(volume) = self.volumes.get(index) {
@@ -545,6 +616,11 @@ impl NativeApp {
 
     fn start_scan(&mut self) {
         if matches!(self.state, UiState::Scanning(_)) {
+            return;
+        }
+        if self.action_running {
+            self.status = "Wait for the current file action to finish".to_owned();
+            self.invalidate();
             return;
         }
 
@@ -574,7 +650,9 @@ impl NativeApp {
         self.state = UiState::Scanning(None);
         self.status = format!("Scanning {}", path.display());
         self.scroll_top = 0;
+        self.selected_id = None;
         self.set_running_controls(true);
+        self.refresh_action_controls();
         self.invalidate();
 
         let hwnd = self.hwnd as isize;
@@ -649,7 +727,9 @@ impl NativeApp {
                     self.state = UiState::Complete(result);
                     self.scan_cancel = None;
                     self.scroll_top = 0;
+                    self.selected_id = None;
                     self.set_running_controls(false);
+                    self.refresh_action_controls();
                     keep_receiver = false;
                     break;
                 }
@@ -658,6 +738,7 @@ impl NativeApp {
                     self.status = "Scan failed".to_owned();
                     self.scan_cancel = None;
                     self.set_running_controls(false);
+                    self.refresh_action_controls();
                     keep_receiver = false;
                     break;
                 }
@@ -665,6 +746,7 @@ impl NativeApp {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.scan_cancel = None;
                     self.set_running_controls(false);
+                    self.refresh_action_controls();
                     keep_receiver = false;
                     break;
                 }
@@ -687,6 +769,19 @@ impl NativeApp {
         for button in &self.drive_buttons {
             enable_window(*button, !running);
         }
+        self.refresh_action_controls();
+    }
+
+    fn refresh_action_controls(&self) {
+        let has_selection = self.selected_path().is_some()
+            && !self.action_running
+            && !matches!(self.state, UiState::Scanning(_));
+        enable_window(self.open_button, has_selection);
+        enable_window(self.properties_button, has_selection);
+        enable_window(
+            self.recycle_button,
+            has_selection && self.selected_can_recycle(),
+        );
     }
 
     fn paint(&self) {
@@ -919,6 +1014,15 @@ impl NativeApp {
                 COLOR_WARN,
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER,
             );
+        } else if let Some(selected) = self.selected_path_text() {
+            let selected = format!("Selected: {selected}");
+            draw_text(
+                hdc,
+                rect_xy(left, TOP_HEIGHT + 116, right, TOP_HEIGHT + 142),
+                &selected,
+                COLOR_MUTED,
+                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_VCENTER,
+            );
         }
 
         match self.active_tab {
@@ -941,7 +1045,14 @@ impl NativeApp {
             .enumerate()
         {
             let top = table.top + ROW_HEIGHT * (screen_idx as i32 + 1);
-            draw_row_bg(hdc, table.left, table.right, top, screen_idx);
+            draw_row_bg(
+                hdc,
+                table.left,
+                table.right,
+                top,
+                screen_idx,
+                self.selected_id == Some(row.id),
+            );
             let name = result.graph.name(row.id).unwrap_or_default();
             let indented = format!("{}{}", "  ".repeat(row.depth.min(8)), name);
             draw_text(
@@ -987,7 +1098,14 @@ impl NativeApp {
             .enumerate()
         {
             let top = table.top + ROW_HEIGHT * (screen_idx as i32 + 1);
-            draw_row_bg(hdc, table.left, table.right, top, screen_idx);
+            draw_row_bg(
+                hdc,
+                table.left,
+                table.right,
+                top,
+                screen_idx,
+                self.selected_id == Some(row.id),
+            );
             let path = result
                 .graph
                 .reconstruct_path(row.id)
@@ -1029,7 +1147,7 @@ impl NativeApp {
             .enumerate()
         {
             let top = table.top + ROW_HEIGHT * (screen_idx as i32 + 1);
-            draw_row_bg(hdc, table.left, table.right, top, screen_idx);
+            draw_row_bg(hdc, table.left, table.right, top, screen_idx, false);
             draw_text(
                 hdc,
                 rect_xy(table.left + 10, top, table.right - 360, top + ROW_HEIGHT),
@@ -1117,6 +1235,149 @@ impl NativeApp {
             self.scroll_top = self.scroll_top.saturating_sub(step);
         }
         self.invalidate();
+    }
+
+    fn receive_action(&mut self) {
+        let Some(receiver) = self.action_receiver.take() else {
+            return;
+        };
+
+        let keep_receiver = match receiver.try_recv() {
+            Ok(message) => {
+                self.action_running = false;
+                match message.result {
+                    Ok(()) => {
+                        self.status = message.kind.success_message(&message.path);
+                        if message.kind == ActionKind::Recycle {
+                            self.selected_id = None;
+                        }
+                    }
+                    Err(error) => {
+                        self.status = format!("{}: {error}", message.kind.failure_prefix());
+                    }
+                }
+                self.refresh_action_controls();
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.action_running = false;
+                self.status = "File action did not finish cleanly".to_owned();
+                self.refresh_action_controls();
+                false
+            }
+        };
+
+        if keep_receiver {
+            self.action_receiver = Some(receiver);
+        }
+        self.invalidate();
+    }
+
+    fn on_left_button_down(&mut self, lparam: LPARAM) {
+        let (_x, y) = point_from_lparam(lparam);
+        let Some(id) = self.hit_test_result_row(y) else {
+            return;
+        };
+        self.selected_id = Some(id);
+        self.status = self
+            .selected_path_text()
+            .map(|path| format!("Selected {path}"))
+            .unwrap_or_else(|| "Selected item".to_owned());
+        self.refresh_action_controls();
+        self.invalidate();
+    }
+
+    fn hit_test_result_row(&self, y: i32) -> Option<EntryId> {
+        let result = self.completed_result()?;
+        let table = table_rect(self.client_rect());
+        if y <= table.top + ROW_HEIGHT || y >= table.bottom {
+            return None;
+        }
+        let screen_idx = ((y - table.top) / ROW_HEIGHT - 1) as usize;
+        let row_idx = self.scroll_top.saturating_add(screen_idx);
+        match self.active_tab {
+            ActiveTab::Tree => result.tree_rows.get(row_idx).map(|row| row.id),
+            ActiveTab::Files => result.file_rows.get(row_idx).map(|row| row.id),
+            ActiveTab::Types | ActiveTab::Treemap => None,
+        }
+    }
+
+    fn open_selected(&mut self) {
+        let Some(path) = self.selected_path() else {
+            self.status = "Select an item first".to_owned();
+            self.invalidate();
+            return;
+        };
+        self.start_path_action(ActionKind::Open, path);
+    }
+
+    fn show_selected_properties(&mut self) {
+        let Some(path) = self.selected_path() else {
+            self.status = "Select an item first".to_owned();
+            self.invalidate();
+            return;
+        };
+        self.start_path_action(ActionKind::Properties, path);
+    }
+
+    fn recycle_selected(&mut self) {
+        if !self.selected_can_recycle() {
+            self.status = "Root items are protected from Recycle".to_owned();
+            self.invalidate();
+            return;
+        }
+        let Some(path) = self.selected_path() else {
+            self.status = "Select an item first".to_owned();
+            self.invalidate();
+            return;
+        };
+        self.start_path_action(ActionKind::Recycle, path);
+    }
+
+    fn start_path_action(&mut self, kind: ActionKind, path: PathBuf) {
+        if self.action_running {
+            self.status = "Wait for the current file action to finish".to_owned();
+            self.invalidate();
+            return;
+        }
+        self.status = kind.started_message(&path);
+        let (sender, receiver) = mpsc::channel();
+        self.action_receiver = Some(receiver);
+        self.action_running = true;
+        self.refresh_action_controls();
+        let hwnd = self.hwnd as isize;
+        thread::spawn(move || {
+            let result = run_path_action(kind, &path).map_err(|error| error.to_string());
+            let _ = sender.send(ActionMessage { kind, path, result });
+            post_action_message(hwnd);
+        });
+        self.invalidate();
+    }
+
+    fn selected_path(&self) -> Option<PathBuf> {
+        let id = self.selected_id?;
+        self.completed_result()?.graph.reconstruct_path(id)
+    }
+
+    fn selected_path_text(&self) -> Option<String> {
+        self.selected_path().map(|path| path.display().to_string())
+    }
+
+    fn selected_can_recycle(&self) -> bool {
+        let Some(id) = self.selected_id else {
+            return false;
+        };
+        self.completed_result()
+            .is_some_and(|result| entry_can_recycle(&result.graph, id))
+    }
+
+    fn completed_result(&self) -> Option<&ScanResult> {
+        if let UiState::Complete(result) = &self.state {
+            Some(result)
+        } else {
+            None
+        }
     }
 
     fn path_text(&self) -> String {
@@ -1217,12 +1478,20 @@ unsafe extern "system" fn wnd_proc(
                 app.receive_scan();
                 0
             }
+            WM_ACTION_MESSAGE => {
+                app.receive_action();
+                0
+            }
             WM_START_SCAN => {
                 app.start_scan();
                 0
             }
             WM_MOUSEWHEEL => {
                 app.on_mouse_wheel(wparam);
+                0
+            }
+            WM_LBUTTONDOWN => {
+                app.on_left_button_down(lparam);
                 0
             }
             WM_ERASEBKGND => 1,
@@ -1275,6 +1544,25 @@ fn post_scan_message(hwnd: isize) {
     // PostMessageW fails harmlessly and the result is ignored.
     unsafe {
         let _ = PostMessageW(hwnd as HWND, WM_SCAN_MESSAGE, 0, 0);
+    }
+}
+
+fn post_action_message(hwnd: isize) {
+    // SAFETY: The HWND value was captured from the UI thread. If the window is already gone,
+    // PostMessageW fails harmlessly and the result is ignored.
+    unsafe {
+        let _ = PostMessageW(hwnd as HWND, WM_ACTION_MESSAGE, 0, 0);
+    }
+}
+
+fn run_path_action(
+    kind: ActionKind,
+    path: &Path,
+) -> std::result::Result<(), diskloom_windows::ShellActionError> {
+    match kind {
+        ActionKind::Open => open_in_explorer(path),
+        ActionKind::Properties => show_properties(path),
+        ActionKind::Recycle => recycle_delete(path),
     }
 }
 
@@ -1508,8 +1796,10 @@ fn draw_table_header(hdc: HDC, rect: RECT, labels: [&str; 4]) {
     );
 }
 
-fn draw_row_bg(hdc: HDC, left: i32, right: i32, top: i32, idx: usize) {
-    let color = if idx.is_multiple_of(2) {
+fn draw_row_bg(hdc: HDC, left: i32, right: i32, top: i32, idx: usize, selected: bool) {
+    let color = if selected {
+        COLOR_SELECTED
+    } else if idx.is_multiple_of(2) {
         COLOR_PANEL
     } else {
         COLOR_BG
@@ -1528,6 +1818,13 @@ fn draw_row_bg(hdc: HDC, left: i32, right: i32, top: i32, idx: usize) {
 
 fn visible_rows(rect: RECT) -> usize {
     ((rect.bottom - rect.top - ROW_HEIGHT).max(0) / ROW_HEIGHT) as usize
+}
+
+fn point_from_lparam(lparam: LPARAM) -> (i32, i32) {
+    let value = lparam as u32;
+    let x = (value & 0xffff) as i16 as i32;
+    let y = ((value >> 16) & 0xffff) as i16 as i32;
+    (x, y)
 }
 
 fn rect_xy(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
@@ -1568,6 +1865,10 @@ fn graph_totals(graph: &FileGraph) -> (u64, u64) {
                 )
             },
         )
+}
+
+fn entry_can_recycle(graph: &FileGraph, id: EntryId) -> bool {
+    graph.entry(id).is_some_and(|entry| entry.parent.is_some())
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -2001,8 +2302,9 @@ mod tests {
     use diskloom_core::{FileGraph, FileGraphBuilder, FileKind};
 
     use super::{
-        VolumeShortcut, default_scan_path_from, file_rows_from_graph, format_bytes, format_count,
-        normalize_drive_root, tree_rows_from_graph, ui_scan_needs_elevation,
+        VolumeShortcut, default_scan_path_from, entry_can_recycle, file_rows_from_graph,
+        format_bytes, format_count, normalize_drive_root, point_from_lparam, tree_rows_from_graph,
+        ui_scan_needs_elevation,
     };
 
     fn sample_graph() -> FileGraph {
@@ -2090,6 +2392,23 @@ mod tests {
         let rows = file_rows_from_graph(&graph, 10);
 
         assert_eq!(graph.name(rows[0].id), Some("large.bin"));
+    }
+
+    #[test]
+    fn entry_can_recycle_should_protect_root_entries() {
+        let graph = sample_graph();
+        let root = graph.ids().next().unwrap();
+        let child = graph.children_of(root).next().unwrap();
+
+        assert!(!entry_can_recycle(&graph, root));
+        assert!(entry_can_recycle(&graph, child));
+    }
+
+    #[test]
+    fn point_from_lparam_should_unpack_signed_coordinates() {
+        let lparam = ((20_i16 as u16 as u32) << 16) | (10_i16 as u16 as u32);
+
+        assert_eq!(point_from_lparam(lparam as isize), (10, 20));
     }
 
     fn volume(root: &str, is_ntfs: bool) -> VolumeShortcut {
