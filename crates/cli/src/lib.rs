@@ -13,7 +13,8 @@ use diskloom_dupes::find_duplicate_candidates;
 use diskloom_export::{CsvExportOptions, export_csv};
 use diskloom_ntfs::NtfsScanner;
 use diskloom_query::{
-    FileTypeStat, NameMatcher, QueryFilter, file_type_stats, top_entries_by_total_size,
+    CompiledFilter, FileTypeStat, NameMatcher, QueryFilter, file_type_stats,
+    top_entries_by_total_size,
 };
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{
@@ -91,7 +92,10 @@ struct ScanCommand {
     #[arg(long)]
     file_types: bool,
 
-    #[arg(long, default_value_t = 25)]
+    #[arg(long)]
+    deep: bool,
+
+    #[arg(long, default_value_t = 15)]
     limit: usize,
 
     #[arg(long)]
@@ -170,7 +174,7 @@ fn run_scan(command: ScanCommand) -> Result<()> {
     let summary = outcome.summary;
 
     let filter = query_filter(&command)?.compile()?;
-    let ids = top_entries_by_total_size(&graph, filter.matching_ids(&graph), command.limit);
+    let ids = ranked_entry_ids(&graph, &filter, &command);
 
     let mut stdout = io::stdout().lock();
     write_scan_summary(
@@ -370,6 +374,47 @@ fn matcher_from_pattern(pattern: Option<&str>, regex: bool) -> Result<Option<Nam
     })
 }
 
+fn ranked_entry_ids(
+    graph: &FileGraph,
+    filter: &CompiledFilter,
+    command: &ScanCommand,
+) -> Vec<EntryId> {
+    let use_deep_ranking = command.deep || command_has_filters(command);
+    let ids: Vec<_> = if use_deep_ranking {
+        graph
+            .ids()
+            .filter(|id| entry_has_parent(graph, *id))
+            .filter(|id| filter.matches(graph, *id))
+            .collect()
+    } else {
+        graph
+            .ids()
+            .filter(|id| !entry_has_parent(graph, *id))
+            .flat_map(|root| graph.children_of(root))
+            .filter(|id| filter.matches(graph, *id))
+            .collect()
+    };
+    top_entries_by_total_size(graph, ids, command.limit)
+}
+
+fn entry_has_parent(graph: &FileGraph, id: EntryId) -> bool {
+    graph.entry(id).is_some_and(|entry| entry.parent.is_some())
+}
+
+fn command_has_filters(command: &ScanCommand) -> bool {
+    command.name.is_some()
+        || command.path_filter.is_some()
+        || command.regex
+        || command.extension.is_some()
+        || command.min_size.is_some()
+        || command.max_size.is_some()
+        || command.min_allocated.is_some()
+        || command.max_allocated.is_some()
+        || command.modified_after.is_some()
+        || command.modified_before.is_some()
+        || command.files_only
+}
+
 fn write_top_entries(
     writer: &mut impl Write,
     graph: &FileGraph,
@@ -377,7 +422,7 @@ fn write_top_entries(
     limit: usize,
     raw: bool,
 ) -> Result<()> {
-    writeln!(writer, "Top entries")?;
+    writeln!(writer, "Largest entries")?;
     writeln!(
         writer,
         "{:<12} {:<12} {:<5} Path",
@@ -599,7 +644,8 @@ mod tests {
 
     use super::{
         ScanCommand, ScannerMode, drive_volume, format_count, normalize_args, query_filter,
-        scan_needs_elevation, volume_arg_is_drive_root, write_duplicate_candidates,
+        ranked_entry_ids, scan_needs_elevation, volume_arg_is_drive_root,
+        write_duplicate_candidates,
     };
 
     #[test]
@@ -655,6 +701,56 @@ mod tests {
         let matches: Vec<_> = filter.matching_ids(&graph).collect();
 
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn default_ranking_should_show_direct_children_without_scan_root() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, ".", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let target = builder
+            .add_entry(Some(root), "target", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let src = builder
+            .add_entry(Some(root), "src", FileKind::Directory, 120, 120, 0)
+            .unwrap();
+        let nested = builder
+            .add_entry(Some(target), "deps", FileKind::Directory, 900, 900, 0)
+            .unwrap();
+        let graph = builder.finish();
+        let command = scan_command();
+        let filter = query_filter(&command).unwrap().compile().unwrap();
+
+        let ids = ranked_entry_ids(&graph, &filter, &command);
+
+        assert_eq!(ids, vec![target, src]);
+        assert!(!ids.contains(&root));
+        assert!(!ids.contains(&nested));
+    }
+
+    #[test]
+    fn deep_ranking_should_include_descendants_without_scan_root() {
+        let mut builder = FileGraphBuilder::new();
+        let root = builder
+            .add_entry(None, ".", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let target = builder
+            .add_entry(Some(root), "target", FileKind::Directory, 0, 0, 0)
+            .unwrap();
+        let nested = builder
+            .add_entry(Some(target), "deps", FileKind::Directory, 900, 900, 0)
+            .unwrap();
+        let graph = builder.finish();
+        let mut command = scan_command();
+        command.deep = true;
+        let filter = query_filter(&command).unwrap().compile().unwrap();
+
+        let ids = ranked_entry_ids(&graph, &filter, &command);
+
+        assert!(ids.contains(&target));
+        assert!(ids.contains(&nested));
+        assert!(!ids.contains(&root));
     }
 
     #[test]
@@ -720,13 +816,13 @@ mod tests {
         assert_eq!(format_count(2_107_718), "2,107,718");
     }
 
-    fn scan_command_with_path_filter(path_filter: &str) -> ScanCommand {
+    fn scan_command() -> ScanCommand {
         ScanCommand {
             path: PathBuf::from("."),
             scanner: ScannerMode::Fallback,
             csv: None,
             name: None,
-            path_filter: Some(path_filter.to_owned()),
+            path_filter: None,
             regex: false,
             extension: None,
             min_size: None,
@@ -739,9 +835,16 @@ mod tests {
             follow_symlinks: false,
             duplicates: false,
             file_types: false,
-            limit: 25,
+            deep: false,
+            limit: 15,
             summary_only: false,
             raw: false,
         }
+    }
+
+    fn scan_command_with_path_filter(path_filter: &str) -> ScanCommand {
+        let mut command = scan_command();
+        command.path_filter = Some(path_filter.to_owned());
+        command
     }
 }
