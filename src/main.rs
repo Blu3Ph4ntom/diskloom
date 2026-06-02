@@ -16,8 +16,8 @@ use diskloom_core::{EntryFlags, EntryId, FileGraph};
 use diskloom_ntfs::{NtfsScanControl, NtfsScanProgress, NtfsScanner};
 use diskloom_scan::{FallbackScanner, ScanControl, ScanOptions, ScanSummary};
 use diskloom_windows::{
-    VolumeKind, discover_volumes, is_process_elevated, recycle_delete,
-    relaunch_current_process_elevated,
+    VolumeKind, discover_volumes, is_process_elevated, open_in_explorer, recycle_delete,
+    relaunch_current_process_elevated, show_properties,
 };
 use serde::Serialize;
 use tauri::{Emitter, Manager, State, Window};
@@ -47,6 +47,8 @@ fn main() {
             toggle_entry,
             select_entry,
             delete_entry,
+            open_path,
+            show_path_properties,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -102,6 +104,8 @@ struct SharedState {
 struct AppState {
     graph: Option<Arc<FileGraph>>,
     index: Option<TreeIndex>,
+    sort: SortSpec,
+    visible_roots: Vec<EntryId>,
     expanded: HashSet<EntryId>,
     selected: Option<EntryId>,
     cancel: Option<Arc<AtomicBool>>,
@@ -119,10 +123,11 @@ struct TreeIndex {
     roots: Vec<EntryId>,
     child_ids: Vec<EntryId>,
     child_ranges: Vec<ChildRange>,
+    sort: SortSpec,
 }
 
 impl TreeIndex {
-    fn build(graph: &FileGraph) -> Self {
+    fn build(graph: &FileGraph, sort: SortSpec) -> Self {
         let mut child_pairs = Vec::with_capacity(graph.len().saturating_sub(1));
         let mut roots = Vec::new();
 
@@ -137,12 +142,12 @@ impl TreeIndex {
             }
         }
 
-        sort_entry_ids_by_total_size(graph, &mut roots);
+        sort_entry_ids(graph, &mut roots, sort);
         child_pairs.sort_by(|(left_parent, left_child), (right_parent, right_child)| {
             left_parent
                 .0
                 .cmp(&right_parent.0)
-                .then_with(|| compare_entry_ids_by_total_size(graph, left_child, right_child))
+                .then_with(|| compare_entry_ids(graph, left_child, right_child, sort))
         });
 
         let mut child_ids = Vec::with_capacity(child_pairs.len());
@@ -165,6 +170,7 @@ impl TreeIndex {
             roots,
             child_ids,
             child_ranges,
+            sort,
         }
     }
 
@@ -186,12 +192,56 @@ impl TreeIndex {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SortSpec {
+    key: SortKey,
+    descending: bool,
+}
+
+impl Default for SortSpec {
+    fn default() -> Self {
+        Self {
+            key: SortKey::Size,
+            descending: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortKey {
+    Name,
+    Size,
+    Allocated,
+    Modified,
+}
+
+impl SortKey {
+    fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or_default().to_ascii_lowercase().as_str() {
+            "name" => Self::Name,
+            "allocated" => Self::Allocated,
+            "modified" => Self::Modified,
+            _ => Self::Size,
+        }
+    }
+}
+
+impl SortSpec {
+    fn from_parts(key: Option<&str>, descending: Option<bool>) -> Self {
+        Self {
+            key: SortKey::parse(key),
+            descending: descending.unwrap_or_else(|| SortKey::parse(key) != SortKey::Name),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ScanOutcome {
     graph: FileGraph,
     summary: ScanSummary,
     scanner_label: &'static str,
     fallback_reason: Option<String>,
+    display_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -308,6 +358,7 @@ fn start_scan(
         }
         state.graph = None;
         state.index = None;
+        state.visible_roots.clear();
         state.expanded.clear();
         state.selected = None;
         state.cancel = Some(Arc::clone(&cancel));
@@ -360,9 +411,15 @@ fn get_visible_rows(
     offset: usize,
     limit: Option<usize>,
     query: Option<String>,
+    sort_key: Option<String>,
+    sort_descending: Option<bool>,
     state: State<'_, SharedState>,
 ) -> TreeViewportDto {
-    let state = lock_state(&state.inner);
+    let mut state = lock_state(&state.inner);
+    ensure_sort(
+        &mut state,
+        SortSpec::from_parts(sort_key.as_deref(), sort_descending),
+    );
     viewport_from_state(&state, offset, normalized_limit(limit), query.as_deref())
 }
 
@@ -372,9 +429,15 @@ fn toggle_entry(
     offset: usize,
     limit: Option<usize>,
     query: Option<String>,
+    sort_key: Option<String>,
+    sort_descending: Option<bool>,
     state: State<'_, SharedState>,
 ) -> TreeViewportDto {
     let mut state = lock_state(&state.inner);
+    ensure_sort(
+        &mut state,
+        SortSpec::from_parts(sort_key.as_deref(), sort_descending),
+    );
     let id = EntryId(id);
     let can_expand = state
         .index
@@ -395,26 +458,87 @@ fn select_entry(id: u32, state: State<'_, SharedState>) -> Option<String> {
 }
 
 #[tauri::command]
-fn delete_entry(id: u32, state: State<'_, SharedState>) -> Result<(), String> {
-    let path = {
-        let state = lock_state(&state.inner);
-        let graph = state
-            .graph
-            .as_deref()
-            .ok_or_else(|| "scan results are not loaded".to_owned())?;
-        let id = EntryId(id);
-        let entry = graph
-            .entry(id)
-            .ok_or_else(|| "selected entry no longer exists".to_owned())?;
-        if entry.parent.is_none() {
-            return Err("DiskLoom will not delete the scan root".to_owned());
-        }
-        graph
-            .reconstruct_path(id)
-            .ok_or_else(|| "failed to reconstruct selected path".to_owned())?
-    };
+fn delete_entry(
+    id: u32,
+    permanently: Option<bool>,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let path = selected_entry_path(id, &state)?;
+    if permanently.unwrap_or(false) {
+        delete_permanently(&path)
+            .map_err(|error| format!("failed to permanently delete path: {error}"))
+    } else {
+        recycle_delete(&path).map_err(|error| format!("failed to move to Recycle Bin: {error}"))
+    }
+}
 
-    recycle_delete(&path).map_err(|error| format!("failed to move to Recycle Bin: {error}"))
+#[tauri::command]
+fn open_path(
+    path: Option<String>,
+    id: Option<u32>,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let path = command_target_path(path, id, &state)?;
+    open_in_explorer(&path).map_err(|error| format!("failed to open Explorer: {error}"))
+}
+
+#[tauri::command]
+fn show_path_properties(
+    path: Option<String>,
+    id: Option<u32>,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let path = command_target_path(path, id, &state)?;
+    show_properties(&path).map_err(|error| format!("failed to open Properties: {error}"))
+}
+
+fn selected_entry_path(id: u32, state: &State<'_, SharedState>) -> Result<PathBuf, String> {
+    let state = lock_state(&state.inner);
+    selected_entry_path_from_locked_state(EntryId(id), &state)
+}
+
+fn selected_entry_path_from_locked_state(id: EntryId, state: &AppState) -> Result<PathBuf, String> {
+    let graph = state
+        .graph
+        .as_deref()
+        .ok_or_else(|| "scan results are not loaded".to_owned())?;
+    let entry = graph
+        .entry(id)
+        .ok_or_else(|| "selected entry no longer exists".to_owned())?;
+    if entry.parent.is_none() {
+        return Err("DiskLoom will not delete the scan root".to_owned());
+    }
+    graph
+        .reconstruct_path(id)
+        .ok_or_else(|| "failed to reconstruct selected path".to_owned())
+}
+
+fn command_target_path(
+    path: Option<String>,
+    id: Option<u32>,
+    state: &State<'_, SharedState>,
+) -> Result<PathBuf, String> {
+    if let Some(id) = id {
+        let state = lock_state(&state.inner);
+        if let Ok(path) = selected_entry_path_from_locked_state(EntryId(id), &state) {
+            return Ok(path);
+        }
+    }
+
+    let path = path
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "select an entry or enter a path".to_owned())?;
+    Ok(PathBuf::from(path))
+}
+
+fn delete_permanently(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 fn apply_scan_complete(
@@ -424,8 +548,14 @@ fn apply_scan_complete(
     elapsed_ms: u128,
 ) {
     let graph = Arc::new(outcome.graph);
-    let index = TreeIndex::build(&graph);
-    let (size_bytes, allocated_bytes) = graph_totals(&graph);
+    let mut index = TreeIndex::build(&graph, SortSpec::default());
+    if let Some(display_root) = outcome.display_root.as_deref()
+        && let Some(root) = find_graph_path(&graph, display_root)
+    {
+        index.roots = vec![root];
+    }
+    let visible_roots = index.roots.clone();
+    let (size_bytes, allocated_bytes) = totals_for_roots(&graph, &visible_roots);
     let dto = ScanCompleteDto {
         scanner_label: outcome.scanner_label,
         fallback_reason: outcome.fallback_reason,
@@ -444,6 +574,8 @@ fn apply_scan_complete(
         for root in &index.roots {
             state.expanded.insert(*root);
         }
+        state.sort = index.sort;
+        state.visible_roots = visible_roots;
         state.graph = Some(graph);
         state.index = Some(index);
         state.selected = None;
@@ -452,6 +584,22 @@ fn apply_scan_complete(
     }
 
     emit_or_log(window, "scan-complete", dto);
+}
+
+fn ensure_sort(state: &mut AppState, sort: SortSpec) {
+    if state.sort == sort {
+        return;
+    }
+    let Some(graph) = state.graph.as_deref() else {
+        state.sort = sort;
+        return;
+    };
+    let mut index = TreeIndex::build(graph, sort);
+    if !state.visible_roots.is_empty() {
+        index.roots = state.visible_roots.clone();
+    }
+    state.index = Some(index);
+    state.sort = sort;
 }
 
 fn apply_scan_error(shared: &Arc<Mutex<AppState>>, window: &Window, error: String) {
@@ -586,6 +734,22 @@ fn selected_path_from_state(state: &AppState) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+fn find_graph_path(graph: &FileGraph, target: &Path) -> Option<EntryId> {
+    let target = normalized_path_key(target);
+    graph.ids().find(|id| {
+        graph
+            .reconstruct_path(*id)
+            .is_some_and(|path| normalized_path_key(&path) == target)
+    })
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
 fn normalized_query(query: Option<&str>) -> Option<String> {
     let query = query?.trim();
     if query.is_empty() {
@@ -633,8 +797,13 @@ fn scan_path(
         ScannerMode::Fallback => scan_fallback(path, None, cancel, on_progress),
         ScannerMode::Ntfs => scan_ntfs(&path, cancel, on_progress),
         ScannerMode::Auto => {
-            if drive_volume(&path).is_some() {
-                match scan_ntfs(&path, cancel, on_progress) {
+            if let Some(volume) = drive_for_path(&path) {
+                match scan_ntfs_volume(
+                    &volume,
+                    display_root_for_direct_scan(&path),
+                    cancel,
+                    on_progress,
+                ) {
                     Ok(outcome) => Ok(outcome),
                     Err(error) => scan_fallback(path, Some(error), cancel, on_progress),
                 }
@@ -673,6 +842,7 @@ fn scan_fallback(
         summary,
         scanner_label: "fallback traversal",
         fallback_reason,
+        display_root: None,
     })
 }
 
@@ -682,7 +852,16 @@ fn scan_ntfs(
     on_progress: &mut impl FnMut(ScanSummary),
 ) -> Result<ScanOutcome, String> {
     let volume = drive_volume(path).unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let graph = NtfsScanner::scan_volume_with_control(&volume, UI_PROGRESS_EVERY, |progress| {
+    scan_ntfs_volume(&volume, None, cancel, on_progress)
+}
+
+fn scan_ntfs_volume(
+    volume: &str,
+    display_root: Option<PathBuf>,
+    cancel: &AtomicBool,
+    on_progress: &mut impl FnMut(ScanSummary),
+) -> Result<ScanOutcome, String> {
+    let graph = NtfsScanner::scan_volume_with_control(volume, UI_PROGRESS_EVERY, |progress| {
         on_progress(scan_summary_from_ntfs_progress(progress));
         if cancel.load(Ordering::Relaxed) {
             NtfsScanControl::Cancel
@@ -698,6 +877,7 @@ fn scan_ntfs(
         summary,
         scanner_label: "direct NTFS MFT",
         fallback_reason: None,
+        display_root,
     })
 }
 
@@ -730,15 +910,11 @@ fn summary_from_graph(graph: &FileGraph) -> ScanSummary {
     summary
 }
 
-fn graph_totals(graph: &FileGraph) -> (u64, u64) {
-    graph
-        .ids()
+fn totals_for_roots(graph: &FileGraph, roots: &[EntryId]) -> (u64, u64) {
+    roots
+        .iter()
         .filter_map(|id| {
-            let entry = graph.entry(id)?;
-            if entry.parent.is_some() {
-                return None;
-            }
-            let stats = graph.stats(id)?;
+            let stats = graph.stats(*id)?;
             Some((stats.total_size.bytes(), stats.total_allocated.bytes()))
         })
         .fold(
@@ -825,6 +1001,23 @@ fn drive_volume(path: &Path) -> Option<String> {
     Some(format!("{}:", letter.to_ascii_uppercase()))
 }
 
+fn drive_for_path(path: &Path) -> Option<String> {
+    if let Some(volume) = drive_volume(path) {
+        return Some(volume);
+    }
+    let value = path.to_string_lossy();
+    let mut chars = value.chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' {
+        return None;
+    }
+    Some(format!("{}:", letter.to_ascii_uppercase()))
+}
+
+fn display_root_for_direct_scan(path: &Path) -> Option<PathBuf> {
+    drive_volume(path).is_none().then(|| path.to_path_buf())
+}
+
 fn discover_volume_shortcuts() -> Vec<VolumeShortcut> {
     discover_volumes()
         .unwrap_or_default()
@@ -857,26 +1050,59 @@ struct VolumeShortcut {
     free_bytes: Option<u64>,
 }
 
-fn sort_entry_ids_by_total_size(graph: &FileGraph, ids: &mut [EntryId]) {
-    ids.sort_by(|left, right| compare_entry_ids_by_total_size(graph, left, right));
+fn sort_entry_ids(graph: &FileGraph, ids: &mut [EntryId], sort: SortSpec) {
+    ids.sort_by(|left, right| compare_entry_ids(graph, left, right, sort));
 }
 
-fn compare_entry_ids_by_total_size(
+fn compare_entry_ids(
     graph: &FileGraph,
     left: &EntryId,
     right: &EntryId,
+    sort: SortSpec,
 ) -> CmpOrdering {
-    let left_size = graph
-        .stats(*left)
-        .map_or(0, |stats| stats.total_size.bytes());
-    let right_size = graph
-        .stats(*right)
-        .map_or(0, |stats| stats.total_size.bytes());
-    right_size.cmp(&left_size).then_with(|| {
+    let ordering = match sort.key {
+        SortKey::Name => {
+            let left_name = graph.name(*left).unwrap_or_default();
+            let right_name = graph.name(*right).unwrap_or_default();
+            left_name
+                .to_ascii_lowercase()
+                .cmp(&right_name.to_ascii_lowercase())
+        }
+        SortKey::Size => {
+            compare_entry_numeric(graph, left, right, |stats| stats.total_size.bytes())
+        }
+        SortKey::Allocated => {
+            compare_entry_numeric(graph, left, right, |stats| stats.total_allocated.bytes())
+        }
+        SortKey::Modified => {
+            let left_modified = graph.entry(*left).map_or(0, |entry| entry.modified_unix);
+            let right_modified = graph.entry(*right).map_or(0, |entry| entry.modified_unix);
+            left_modified.cmp(&right_modified)
+        }
+    };
+
+    let ordering = if sort.descending {
+        ordering.reverse()
+    } else {
+        ordering
+    };
+
+    ordering.then_with(|| {
         let left_name = graph.name(*left).unwrap_or_default();
         let right_name = graph.name(*right).unwrap_or_default();
         left_name.cmp(right_name)
     })
+}
+
+fn compare_entry_numeric(
+    graph: &FileGraph,
+    left: &EntryId,
+    right: &EntryId,
+    value: impl Fn(diskloom_core::NodeStats) -> u64,
+) -> CmpOrdering {
+    let left_value = graph.stats(*left).map_or(0, &value);
+    let right_value = graph.stats(*right).map_or(0, value);
+    left_value.cmp(&right_value)
 }
 
 fn progress_dto(summary: ScanSummary, elapsed_ms: u128) -> ScanProgressDto {
@@ -1001,7 +1227,7 @@ mod tests {
     #[test]
     fn viewport_should_return_visible_slice_from_expanded_tree() {
         let graph = Arc::new(sample_graph());
-        let index = TreeIndex::build(&graph);
+        let index = TreeIndex::build(&graph, super::SortSpec::default());
         let root = index.roots[0];
         let mut state = AppState {
             graph: Some(Arc::clone(&graph)),
@@ -1020,7 +1246,7 @@ mod tests {
     #[test]
     fn viewport_query_should_search_all_descendants() {
         let graph = Arc::new(sample_graph());
-        let index = TreeIndex::build(&graph);
+        let index = TreeIndex::build(&graph, super::SortSpec::default());
         let state = AppState {
             graph: Some(Arc::clone(&graph)),
             index: Some(index),

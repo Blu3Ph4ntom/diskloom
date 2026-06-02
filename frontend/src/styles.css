@@ -50,6 +50,10 @@ button {
   border: 0;
 }
 
+button:not(:disabled) {
+  cursor: pointer;
+}
+
 .app-shell {
   width: 100%;
   height: 100vh;
@@ -58,6 +62,10 @@ button {
   background:
     linear-gradient(180deg, oklch(0.185 0.006 220), var(--bg) 45%),
     var(--bg);
+}
+
+.app-shell[data-rail-collapsed="true"] {
+  grid-template-columns: 56px minmax(0, 1fr);
 }
 
 .drive-rail {
@@ -209,6 +217,22 @@ button:disabled {
   cursor: pointer;
 }
 
+.app-shell[data-rail-collapsed="true"] .drive-card {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  min-height: 56px;
+  padding: 8px;
+}
+
+.app-shell[data-rail-collapsed="true"] .drive-copy {
+  display: none;
+}
+
+.app-shell[data-rail-collapsed="true"] .drive-rail::before,
+.app-shell[data-rail-collapsed="true"] .drive-rail::after {
+  opacity: 0;
+}
+
 .drive-card::before {
   content: "";
   position: absolute;
@@ -297,10 +321,10 @@ button:disabled {
   min-width: 0;
   height: 86px;
   display: grid;
-  grid-template-columns: minmax(320px, 796px) auto;
+  grid-template-columns: minmax(320px, 796px) minmax(120px, auto) auto;
   justify-content: center;
   align-items: center;
-  gap: 18px;
+  gap: 16px;
   padding: 14px 22px 10px;
   border-bottom: 1px solid var(--line-soft);
   background: oklch(0.18 0.006 220);
@@ -345,11 +369,67 @@ button:disabled {
   pointer-events: none;
 }
 
+.scan-timer {
+  min-width: 120px;
+  max-width: 240px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.scan-timer span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scan-timer[data-active="true"] {
+  color: oklch(0.82 0.026 205);
+}
+
 .command-actions {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.settings-popover {
+  position: absolute;
+  right: 0;
+  top: 44px;
+  z-index: 10;
+  width: 190px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: oklch(0.18 0.007 220);
+  box-shadow: 0 18px 42px oklch(0.05 0.006 220 / 0.42);
+}
+
+.settings-popover strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-popover button {
+  height: 32px;
+  border-radius: 7px;
+  color: var(--muted);
+  background: oklch(0.235 0.008 220);
+  cursor: pointer;
+}
+
+.settings-popover button:hover {
+  color: var(--text);
+  background: oklch(0.28 0.01 220);
 }
 
 .scan-readout {
@@ -461,6 +541,7 @@ button:disabled {
   color: var(--text);
   background: transparent;
   text-align: left;
+  cursor: pointer;
 }
 
 .table-header button:first-child {
@@ -469,6 +550,10 @@ button:disabled {
 
 .table-header button:hover {
   background: oklch(0.225 0.008 220);
+}
+
+.table-header button[data-active="true"] {
+  color: oklch(0.86 0.04 222);
 }
 
 .table-header svg {
@@ -513,7 +598,7 @@ button:disabled {
   color: var(--muted);
   background: var(--row);
   text-align: left;
-  cursor: default;
+  cursor: pointer;
   transition:
     background 140ms ease-out,
     color 140ms ease-out;
@@ -556,6 +641,7 @@ button:disabled {
 
 .disclosure[data-visible="true"] {
   color: var(--muted);
+  cursor: pointer;
 }
 
 .disclosure[data-visible="true"]:hover {
@@ -641,6 +727,68 @@ button:disabled {
   inset: 0;
   padding-top: 54px;
   pointer-events: none;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: oklch(0.05 0.006 220 / 0.54);
+  cursor: pointer;
+}
+
+.delete-dialog {
+  width: min(520px, calc(100vw - 48px));
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: oklch(0.17 0.007 220);
+  box-shadow: 0 24px 72px oklch(0.04 0.006 220 / 0.58);
+  cursor: default;
+}
+
+.delete-dialog h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  letter-spacing: 0;
+}
+
+.delete-dialog p {
+  max-height: 96px;
+  margin: 0;
+  overflow: auto;
+  color: var(--muted);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.dialog-actions button {
+  min-height: 36px;
+  border-radius: 8px;
+  padding: 0 13px;
+  color: var(--text);
+  background: oklch(0.25 0.008 220);
+  cursor: pointer;
+}
+
+.dialog-actions button:hover {
+  background: oklch(0.29 0.01 220);
+}
+
+.dialog-actions button.danger {
+  color: oklch(0.88 0.08 30);
+  background: oklch(0.25 0.04 30);
 }
 
 .stream-message {
@@ -736,6 +884,11 @@ button:disabled {
     grid-template-columns: 1fr;
     height: auto;
     justify-content: stretch;
+  }
+
+  .scan-timer {
+    min-width: 0;
+    max-width: none;
   }
 
   .command-actions {

@@ -69,6 +69,9 @@ type TreeViewportDto = {
   rows: TreeRowDto[];
 };
 
+type SortKey = "name" | "size" | "modified";
+type DeleteMode = "recycle" | "permanent";
+
 const ROW_HEIGHT = 38;
 const OVERSCAN_ROWS = 28;
 const EMPTY_PROGRESS: ScanProgressDto = {
@@ -97,21 +100,28 @@ function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedPath, setSelectedPath] = useState("");
   const [error, setError] = useState("");
+  const [loadedPath, setLoadedPath] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("size");
+  const [sortDescending, setSortDescending] = useState(true);
+  const [railCollapsed, setRailCollapsed] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const treeRef = useRef<HTMLDivElement>(null);
   const scanningRef = useRef(false);
   const queuedScanPath = useRef("");
   const lastStartedPath = useRef("");
+  const loadedPathRef = useRef("");
 
   const rowLimit = useMemo(
     () => Math.max(90, Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2),
     [viewportHeight],
   );
 
-  const activeDrive = normalizeScanTarget(path).toLowerCase();
+  const activeDriveRoot = driveRootFromTarget(path);
   const activeDriveInfo = useMemo(
-    () => drives.find((drive) => normalizeScanTarget(drive.path).toLowerCase() === activeDrive),
-    [activeDrive, drives],
+    () => drives.find((drive) => normalizeScanTarget(drive.path).toLowerCase() === activeDriveRoot),
+    [activeDriveRoot, drives],
   );
   const largestVisibleRow = useMemo(
     () => rows.reduce((largest, row) => Math.max(largest, row.sizeBytes), 0),
@@ -125,17 +135,35 @@ function App() {
         offset: Math.max(0, offset),
         limit: rowLimit,
         query,
+        sortKey,
+        sortDescending,
       });
       setRows(viewport.rows);
       setRowOffset(viewport.offset);
       setVisibleTotal(viewport.total);
     },
-    [query, rowLimit],
+    [query, rowLimit, sortDescending, sortKey],
   );
 
-  const startScanFor = useCallback(async (rawPath: string) => {
+  const startScanFor = useCallback(async (rawPath: string, options?: { force?: boolean }) => {
     const target = normalizeScanTarget(rawPath);
     if (!target) {
+      return;
+    }
+    if (
+      !options?.force &&
+      scanningRef.current &&
+      lastStartedPath.current.toLowerCase() === target.toLowerCase()
+    ) {
+      setStatus("Scanning");
+      return;
+    }
+    if (
+      !options?.force &&
+      loadedPathRef.current.toLowerCase() === target.toLowerCase() &&
+      !scanningRef.current
+    ) {
+      setStatus("Complete");
       return;
     }
 
@@ -201,12 +229,14 @@ function App() {
         offset: rowOffset,
         limit: rowLimit,
         query,
+        sortKey,
+        sortDescending,
       });
       setRows(viewport.rows);
       setRowOffset(viewport.offset);
       setVisibleTotal(viewport.total);
     },
-    [query, rowLimit, rowOffset],
+    [query, rowLimit, rowOffset, sortDescending, sortKey],
   );
 
   const selectRow = useCallback(async (row: TreeRowDto) => {
@@ -215,25 +245,54 @@ function App() {
     setSelectedPath(selected ?? "");
   }, []);
 
-  const deleteSelected = useCallback(async () => {
+  const deleteSelected = useCallback(async (mode: DeleteMode) => {
     if (selectedId === null || !selectedPath) {
       return;
     }
-    const confirmed = window.confirm(`Move to Recycle Bin?\n\n${selectedPath}`);
-    if (!confirmed) {
-      return;
-    }
     setError("");
+    setDeleteDialogOpen(false);
     try {
-      await invoke("delete_entry", { id: selectedId });
+      await invoke("delete_entry", { id: selectedId, permanently: mode === "permanent" });
       setSelectedId(null);
       setSelectedPath("");
-      await startScanFor(path);
+      await startScanFor(path, { force: true });
     } catch (deleteError) {
       setStatus("Delete failed");
       setError(String(deleteError));
     }
   }, [path, selectedId, selectedPath, startScanFor]);
+
+  const openExplorer = useCallback(async () => {
+    setError("");
+    try {
+      await invoke("open_path", { path, id: selectedId });
+    } catch (openError) {
+      setError(String(openError));
+    }
+  }, [path, selectedId]);
+
+  const showProperties = useCallback(async () => {
+    setError("");
+    try {
+      await invoke("show_path_properties", { path, id: selectedId });
+    } catch (propertiesError) {
+      setError(String(propertiesError));
+    }
+  }, [path, selectedId]);
+
+  const refreshDrives = useCallback(async () => {
+    const items = await invoke<DriveDto[]>("discover_drives");
+    setDrives(items);
+  }, []);
+
+  const changeSort = useCallback((nextKey: SortKey) => {
+    if (nextKey === sortKey) {
+      setSortDescending((value) => !value);
+      return;
+    }
+    setSortKey(nextKey);
+    setSortDescending(nextKey !== "name");
+  }, [sortKey]);
 
   const handleCommandInput = useCallback((value: string) => {
     setCommandText(value);
@@ -265,6 +324,10 @@ function App() {
   useEffect(() => {
     scanningRef.current = scanning;
   }, [scanning]);
+
+  useEffect(() => {
+    loadedPathRef.current = loadedPath;
+  }, [loadedPath]);
 
   useEffect(() => {
     let cleanup = false;
@@ -306,12 +369,12 @@ function App() {
       setStatus("Ready");
       return;
     }
-    const delay = isDriveRoot(target) ? 180 : 650;
+    const delay = isDriveRoot(target) ? 180 : 1100;
     const timer = window.setTimeout(() => {
       if (
         !scanningRef.current &&
         complete &&
-        lastStartedPath.current.toLowerCase() === target.toLowerCase()
+        loadedPathRef.current.toLowerCase() === target.toLowerCase()
       ) {
         return;
       }
@@ -319,6 +382,20 @@ function App() {
     }, delay);
     return () => window.clearTimeout(timer);
   }, [complete, path, ready, startScanFor]);
+
+  useEffect(() => {
+    if (!complete || scanning) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const element = treeRef.current;
+      if (element) {
+        element.scrollTop = 0;
+      }
+      void loadRows(0);
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [complete, loadRows, query, scanning, sortDescending, sortKey]);
 
   useEffect(() => {
     const element = treeRef.current;
@@ -370,6 +447,7 @@ function App() {
         setStatus("Complete");
         setComplete(event.payload);
         setProgress(event.payload);
+        setLoadedPath(lastStartedPath.current);
         setDetail(event.payload.fallbackReason ?? event.payload.scannerLabel);
         void loadRows(0);
         runQueuedScan();
@@ -402,10 +480,15 @@ function App() {
   const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
 
   return (
-    <main className="app-shell" data-scanning={scanning}>
+    <main className="app-shell" data-scanning={scanning} data-rail-collapsed={railCollapsed}>
       <aside className="drive-rail">
         <div className="rail-title">
-          <button className="icon-button" type="button" aria-label="Menu">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Toggle drives"
+            onClick={() => setRailCollapsed((value) => !value)}
+          >
             <Menu size={21} strokeWidth={1.8} />
           </button>
         </div>
@@ -418,7 +501,7 @@ function App() {
               <button
                 key={drive.path}
                 className="drive-card"
-                data-active={drivePath === activeDrive}
+                data-active={drivePath === activeDriveRoot}
                 onClick={() => chooseDrive(drive)}
                 type="button"
               >
@@ -450,14 +533,29 @@ function App() {
               onInput={(event) => handleCommandInput(event.currentTarget.value)}
             />
           </label>
+          <div className="scan-timer" data-active={scanning}>
+            <span className="live-dot" data-active={scanning} />
+            <span>
+              {scanning
+                ? `${formatElapsed(totals.elapsedMs)} · ${formatCount(totals.entries)} scanned`
+                : complete
+                  ? `${formatElapsed(complete.elapsedMs)} scan`
+                  : status}
+            </span>
+          </div>
           <div className="command-actions">
-            <button className="icon-button" type="button" aria-label="Open folder">
+            <button className="icon-button" type="button" aria-label="Open in Explorer" onClick={openExplorer}>
               <FolderOpen size={21} strokeWidth={1.7} />
             </button>
-            <button className="icon-button" type="button" aria-label="Info">
+            <button className="icon-button" type="button" aria-label="Properties" onClick={showProperties}>
               <Info size={21} strokeWidth={1.7} />
             </button>
-            <button className="icon-button" type="button" aria-label="Settings">
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen((value) => !value)}
+            >
               <Settings size={21} strokeWidth={1.7} />
             </button>
             {scanning ? (
@@ -468,13 +566,24 @@ function App() {
               <button
                 className="text-action danger"
                 disabled={selectedId === null}
-                onClick={deleteSelected}
+                onClick={() => setDeleteDialogOpen(true)}
                 type="button"
               >
                 <Trash2 size={17} strokeWidth={1.8} />
                 Recycle
               </button>
             )}
+            {settingsOpen ? (
+              <div className="settings-popover">
+                <strong>DiskLoom</strong>
+                <button type="button" onClick={() => void refreshDrives()}>
+                  Refresh drives
+                </button>
+                <button type="button" onClick={() => setRailCollapsed((value) => !value)}>
+                  {railCollapsed ? "Show drive rail" : "Hide drive rail"}
+                </button>
+              </div>
+            ) : null}
           </div>
         </header>
 
@@ -503,18 +612,30 @@ function App() {
 
         <section className="table-shell">
           <div className="table-header">
-            <button type="button">
+            <button type="button" onClick={() => changeSort("name")} data-active={sortKey === "name"}>
               Name
-              <ChevronUp size={15} strokeWidth={1.8} />
+              {sortKey === "name" && sortDescending ? (
+                <ChevronDown size={15} strokeWidth={1.8} />
+              ) : (
+                <ChevronUp size={15} strokeWidth={1.8} />
+              )}
             </button>
-            <button type="button">
+            <button type="button" onClick={() => changeSort("size")} data-active={sortKey === "size"}>
               Size
-              <ChevronDown size={15} strokeWidth={1.8} />
+              {sortKey === "size" && !sortDescending ? (
+                <ChevronUp size={15} strokeWidth={1.8} />
+              ) : (
+                <ChevronDown size={15} strokeWidth={1.8} />
+              )}
               <Filter size={17} strokeWidth={1.7} />
             </button>
-            <button type="button">
+            <button type="button" onClick={() => changeSort("modified")} data-active={sortKey === "modified"}>
               Last Modified
-              <ChevronDown size={15} strokeWidth={1.8} />
+              {sortKey === "modified" && !sortDescending ? (
+                <ChevronUp size={15} strokeWidth={1.8} />
+              ) : (
+                <ChevronDown size={15} strokeWidth={1.8} />
+              )}
               <Filter size={17} strokeWidth={1.7} />
             </button>
           </div>
@@ -582,6 +703,25 @@ function App() {
           </div>
         </section>
       </section>
+      {deleteDialogOpen ? (
+        <div className="dialog-backdrop" role="presentation" onClick={() => setDeleteDialogOpen(false)}>
+          <section className="delete-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <h2>Delete selected item?</h2>
+            <p>{selectedPath}</p>
+            <div className="dialog-actions">
+              <button type="button" onClick={() => setDeleteDialogOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" onClick={() => void deleteSelected("recycle")}>
+                Move to Recycle Bin
+              </button>
+              <button className="danger" type="button" onClick={() => void deleteSelected("permanent")}>
+                Permanently delete
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -627,6 +767,15 @@ function isDriveRoot(value: string) {
   return /^[a-zA-Z]:[\\/]*$/.test(value.trim());
 }
 
+function driveRootFromTarget(value: string) {
+  const target = normalizeScanTarget(value).toLowerCase();
+  const match = /^([a-z]):/.exec(target);
+  if (!match) {
+    return target;
+  }
+  return `${match[1]}:\\`;
+}
+
 function driveTitle(drive: DriveDto) {
   const driveRoot = drive.path.replace("\\", "");
   return `${driveRoot} ${drive.isNtfs ? "Local Disk" : drive.label.replace(driveRoot, "").trim() || "Drive"}`;
@@ -670,6 +819,19 @@ function formatBytes(bytes: number) {
 
 function formatCount(value: number) {
   return Math.trunc(value).toLocaleString("en-US");
+}
+
+function formatElapsed(ms: number) {
+  if (ms < 1000) {
+    return `${formatCount(ms)} ms`;
+  }
+  if (ms < 60_000) {
+    const seconds = ms / 1000;
+    return `${seconds < 10 ? seconds.toFixed(1) : seconds.toFixed(0)} s`;
+  }
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
 }
 
 function formatModified(unix: number) {
