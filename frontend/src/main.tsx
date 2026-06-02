@@ -3,6 +3,22 @@ import type { JSX } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  File,
+  FileText,
+  Filter,
+  Folder,
+  FolderOpen,
+  HardDrive,
+  Info,
+  Menu,
+  Search,
+  Settings,
+  Trash2,
+} from "lucide-preact";
 import "./styles.css";
 
 type StartupDto = {
@@ -390,12 +406,8 @@ function App() {
       <aside className="drive-rail">
         <div className="rail-title">
           <button className="icon-button" type="button" aria-label="Menu">
-            =
+            <Menu size={21} strokeWidth={1.8} />
           </button>
-          <div className="product-lockup">
-            <span className="app-icon">DL</span>
-            <span>DiskLoom</span>
-          </div>
         </div>
 
         <div className="drive-list">
@@ -410,7 +422,9 @@ function App() {
                 onClick={() => chooseDrive(drive)}
                 type="button"
               >
-                <span className="drive-icon" />
+                <span className="drive-icon">
+                  <HardDrive size={29} strokeWidth={1.45} />
+                </span>
                 <span className="drive-copy">
                   <span className="drive-name">{driveTitle(drive)}</span>
                   <span className="rail-meter">
@@ -427,7 +441,7 @@ function App() {
       <section className="main-surface">
         <header className="command-bar">
           <label className="command-field">
-            <span className="search-glyph" />
+            <Search className="search-glyph" size={22} strokeWidth={1.75} />
             <input
               autoFocus
               spellcheck={false}
@@ -438,10 +452,13 @@ function App() {
           </label>
           <div className="command-actions">
             <button className="icon-button" type="button" aria-label="Open folder">
-              []
+              <FolderOpen size={21} strokeWidth={1.7} />
             </button>
             <button className="icon-button" type="button" aria-label="Info">
-              i
+              <Info size={21} strokeWidth={1.7} />
+            </button>
+            <button className="icon-button" type="button" aria-label="Settings">
+              <Settings size={21} strokeWidth={1.7} />
             </button>
             {scanning ? (
               <button className="text-action" onClick={cancelScan} type="button">
@@ -454,6 +471,7 @@ function App() {
                 onClick={deleteSelected}
                 type="button"
               >
+                <Trash2 size={17} strokeWidth={1.8} />
                 Recycle
               </button>
             )}
@@ -487,19 +505,17 @@ function App() {
           <div className="table-header">
             <button type="button">
               Name
-              <span>^</span>
+              <ChevronUp size={15} strokeWidth={1.8} />
             </button>
             <button type="button">
               Size
-              <span>v</span>
-            </button>
-            <button type="button">
-              Allocated
-              <span>v</span>
+              <ChevronDown size={15} strokeWidth={1.8} />
+              <Filter size={17} strokeWidth={1.7} />
             </button>
             <button type="button">
               Last Modified
-              <span>v</span>
+              <ChevronDown size={15} strokeWidth={1.8} />
+              <Filter size={17} strokeWidth={1.7} />
             </button>
           </div>
 
@@ -507,6 +523,7 @@ function App() {
             <div style={{ height: topSpacer }} />
             {rows.map((row) => {
               const share = Math.max(2, Math.min(100, (row.sizeBytes / rowBarBase) * 100));
+              const shareLabel = Math.round(Math.min(100, (row.sizeBytes / rowBarBase) * 100));
               return (
                 <button
                   key={row.id}
@@ -526,9 +543,21 @@ function App() {
                         void toggleRow(row);
                       }}
                     >
-                      {row.childCount === 0 ? "" : row.expanded ? "v" : ">"}
+                      {row.childCount === 0 ? null : row.expanded ? (
+                        <ChevronDown size={14} strokeWidth={1.8} />
+                      ) : (
+                        <ChevronRight size={14} strokeWidth={1.8} />
+                      )}
                     </span>
-                    <span className="item-icon" data-kind={row.isDir ? "dir" : "file"} />
+                    <span className="item-icon" data-kind={row.isDir ? "dir" : "file"}>
+                      {row.isDir ? (
+                        <Folder size={23} strokeWidth={1.35} />
+                      ) : row.name.includes(".") ? (
+                        <FileText size={22} strokeWidth={1.35} />
+                      ) : (
+                        <File size={22} strokeWidth={1.35} />
+                      )}
+                    </span>
                     <span className="name-text">{row.name}</span>
                   </span>
                   <span className="size-cell">
@@ -536,8 +565,8 @@ function App() {
                     <span className="row-meter">
                       <span style={{ width: `${share}%` }} />
                     </span>
+                    <span className="percent-cell">{shareLabel}%</span>
                   </span>
-                  <span className="numeric-cell">{formatBytes(row.allocatedBytes)}</span>
                   <span className="date-cell">{formatModified(row.modifiedUnix)}</span>
                 </button>
               );

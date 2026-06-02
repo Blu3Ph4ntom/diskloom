@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
+    "lucide-preact": "^1.17.0",
     "preact": "^10.27.2"
   },
   "devDependencies": {
