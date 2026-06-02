@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=frontend/package-lock.json");
     rerun_if_changed_recursive(Path::new("frontend/src"));
     rerun_if_changed_recursive(Path::new("frontend/public"));
+    rerun_if_changed_recursive(Path::new("icons"));
 
     if env::var_os("DISKLOOM_SKIP_FRONTEND_BUILD").is_none() {
         ensure_frontend_assets();

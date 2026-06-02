@@ -36,29 +36,33 @@ pub fn rename_path(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), S
 #[cfg(windows)]
 pub fn show_properties(path: impl AsRef<Path>) -> Result<(), ShellActionError> {
     use windows::{
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOW},
+        Win32::{
+            Foundation::HWND,
+            UI::{
+                Shell::{
+                    SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW,
+                },
+                WindowsAndMessaging::SW_SHOW,
+            },
+        },
         core::PCWSTR,
     };
 
     let verb = to_wide("properties");
     let file = to_wide_path(path.as_ref());
-
-    // SAFETY: The verb and file buffers are null-terminated and remain valid for the call.
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOW,
-        )
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_INVOKEIDLIST | SEE_MASK_NOASYNC,
+        hwnd: HWND::default(),
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOW.0,
+        ..Default::default()
     };
 
-    let code = result.0 as isize;
-    if code <= 32 {
-        return Err(ShellActionError::ShellExecuteFailed(code));
-    }
+    // SAFETY: The verb and file buffers are null-terminated and live for the call.
+    unsafe { ShellExecuteExW(&mut info) }
+        .map_err(|error| ShellActionError::ShellExecuteFailed(error.code().0 as isize))?;
 
     Ok(())
 }
