@@ -3,7 +3,6 @@ import type { JSX } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ChevronDown,
   ChevronRight,
@@ -16,12 +15,9 @@ import {
   HardDrive,
   Info,
   Menu,
-  Minus,
   RefreshCw,
   Search,
-  Square,
   Trash2,
-  X,
 } from "lucide-preact";
 import "./styles.css";
 
@@ -102,7 +98,6 @@ const EMPTY_PROGRESS: ScanProgressDto = {
   inaccessible: 0,
   elapsedMs: 0,
 };
-const appWindow = getCurrentWindow();
 
 function App() {
   const [ready, setReady] = useState(false);
@@ -154,8 +149,8 @@ function App() {
     [activeDriveRoot, drives],
   );
   const largestVisibleRow = useMemo(
-    () => rows.reduce((largest, row) => Math.max(largest, row.allocatedBytes), 0),
-    [rows],
+    () => rows.reduce((largest, row) => Math.max(largest, displayAllocatedBytes(row, activeDriveInfo)), 0),
+    [activeDriveInfo, rows],
   );
   const rowBarBase = Math.max(largestVisibleRow, complete?.allocatedBytes ?? 0, 1);
 
@@ -650,31 +645,9 @@ function App() {
   const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
   const selectedRow = rows.find((row) => row.id === selectedId) ?? null;
   const infoPath = selectedPath || path;
-  const startWindowDrag = useCallback((event: JSX.TargetedPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) {
-      return;
-    }
-    void appWindow.startDragging();
-  }, []);
-  const minimizeWindow = useCallback(() => {
-    void appWindow.minimize();
-  }, []);
-  const toggleMaximizeWindow = useCallback(() => {
-    void appWindow.toggleMaximize();
-  }, []);
-  const closeWindow = useCallback(() => {
-    void appWindow.close();
-  }, []);
 
   return (
-    <main className="app-frame" data-scanning={scanning || deleting}>
-      <TitleBar
-        onClose={closeWindow}
-        onDragStart={startWindowDrag}
-        onMinimize={minimizeWindow}
-        onToggleMaximize={toggleMaximizeWindow}
-      />
-      <div className="app-shell" data-rail-collapsed={railCollapsed}>
+    <main className="app-shell" data-scanning={scanning || deleting} data-rail-collapsed={railCollapsed}>
         <aside className="drive-rail">
         <div className="rail-title">
           <div className="product-mark" aria-hidden="true">
@@ -916,8 +889,10 @@ function App() {
           <div className="tree-viewport" ref={treeRef} onScroll={handleScroll}>
             <div style={{ height: topSpacer }} />
             {rows.map((row) => {
-              const share = Math.max(2, Math.min(100, (row.allocatedBytes / rowBarBase) * 100));
-              const shareLabel = Math.round(Math.min(100, (row.allocatedBytes / rowBarBase) * 100));
+              const displaySize = displaySizeBytes(row, activeDriveInfo);
+              const displayAllocated = displayAllocatedBytes(row, activeDriveInfo);
+              const share = Math.max(2, Math.min(100, (displayAllocated / rowBarBase) * 100));
+              const shareLabel = Math.round(Math.min(100, (displayAllocated / rowBarBase) * 100));
               return (
                 <div
                   key={row.id}
@@ -969,10 +944,10 @@ function App() {
                     </button>
                   </span>
                   <span className="size-cell">
-                    <span>{formatBytes(row.sizeBytes)}</span>
+                    <span>{formatBytes(displaySize)}</span>
                   </span>
                   <span className="size-cell allocated-cell">
-                    <span>{formatBytes(row.allocatedBytes)}</span>
+                    <span>{formatBytes(displayAllocated)}</span>
                     <span className="row-meter">
                       <span style={{ width: `${share}%` }} />
                     </span>
@@ -992,8 +967,7 @@ function App() {
             <div style={{ height: bottomSpacer }} />
           </div>
         </section>
-        </section>
-      </div>
+      </section>
       {deleteDialogOpen ? (
         <div className="dialog-backdrop" role="presentation" onClick={() => setDeleteDialogOpen(false)}>
           <section className="delete-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
@@ -1027,35 +1001,8 @@ function App() {
   );
 }
 
-function TitleBar(props: {
-  onClose: () => void;
-  onDragStart: (event: JSX.TargetedPointerEvent<HTMLDivElement>) => void;
-  onMinimize: () => void;
-  onToggleMaximize: () => void;
-}) {
-  return (
-    <header className="window-titlebar">
-      <div className="window-drag-region" onPointerDown={props.onDragStart} onDblClick={props.onToggleMaximize}>
-        <img className="window-icon" src="/icon-small.png" alt="" draggable={false} />
-        <span>DiskLoom</span>
-      </div>
-      <div className="window-controls">
-        <button type="button" aria-label="Minimize" onClick={props.onMinimize}>
-          <Minus size={14} strokeWidth={1.9} />
-        </button>
-        <button type="button" aria-label="Maximize" onClick={props.onToggleMaximize}>
-          <Square size={12} strokeWidth={1.75} />
-        </button>
-        <button className="window-close" type="button" aria-label="Close" onClick={props.onClose}>
-          <X size={15} strokeWidth={1.8} />
-        </button>
-      </div>
-    </header>
-  );
-}
-
 function LogoMark() {
-  return <img className="logo-mark" src="/icon-small.png" alt="" draggable={false} />;
+  return <img className="logo-mark" src="/icon.png" alt="" draggable={false} />;
 }
 
 function TooltipLayer(props: { tooltip: TooltipState }) {
@@ -1167,6 +1114,27 @@ function driveCapacityLine(drive: DriveDto) {
     return drive.label;
   }
   return `${Math.round(usedPercent)}% full of ${formatBytes(drive.totalBytes)}`;
+}
+
+function displaySizeBytes(row: TreeRowDto, activeDrive: DriveDto | undefined) {
+  if (!isActiveDriveRootRow(row, activeDrive) || !activeDrive?.totalBytes || activeDrive.freeBytes === null) {
+    return row.sizeBytes;
+  }
+  return Math.max(0, activeDrive.totalBytes - activeDrive.freeBytes);
+}
+
+function displayAllocatedBytes(row: TreeRowDto, activeDrive: DriveDto | undefined) {
+  if (!isActiveDriveRootRow(row, activeDrive) || !activeDrive?.totalBytes) {
+    return row.allocatedBytes;
+  }
+  return activeDrive.totalBytes;
+}
+
+function isActiveDriveRootRow(row: TreeRowDto, activeDrive: DriveDto | undefined) {
+  if (!activeDrive) {
+    return false;
+  }
+  return normalizeScanTarget(row.path).toLowerCase() === normalizeScanTarget(activeDrive.path).toLowerCase();
 }
 
 function formatBytes(bytes: number) {

@@ -22,7 +22,6 @@
   --row: oklch(0.16 0.006 220);
   --row-hover: oklch(0.22 0.008 220);
   --row-selected: oklch(0.31 0.045 222);
-  --titlebar-height: 32px;
 }
 
 * {
@@ -55,78 +54,9 @@ button:not(:disabled) {
   cursor: pointer;
 }
 
-.app-frame {
-  width: 100%;
-  height: 100vh;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
-  overflow: hidden;
-  background: var(--bg);
-}
-
-.window-titlebar {
-  height: var(--titlebar-height);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  border-bottom: 1px solid oklch(0.255 0.008 220);
-  background:
-    linear-gradient(180deg, oklch(0.18 0.006 220), oklch(0.155 0.006 220)),
-    var(--bg);
-  user-select: none;
-}
-
-.window-drag-region {
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 12px;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 560;
-  letter-spacing: 0;
-  cursor: default;
-}
-
-.window-icon {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  border-radius: 4px;
-  object-fit: contain;
-}
-
-.window-controls {
-  height: 100%;
-  display: flex;
-  align-items: stretch;
-}
-
-.window-controls button {
-  width: 44px;
-  height: 100%;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  background: transparent;
-}
-
-.window-controls button:hover {
-  color: var(--text);
-  background: oklch(0.25 0.008 220);
-}
-
-.window-controls .window-close:hover {
-  color: oklch(0.97 0.006 20);
-  background: oklch(0.55 0.16 25);
-}
-
 .app-shell {
   width: 100%;
-  height: 100%;
+  height: 100vh;
   min-height: 0;
   display: grid;
   grid-template-columns: 306px minmax(0, 1fr);
@@ -738,7 +668,7 @@ button:disabled {
 
 .tree-viewport {
   position: relative;
-  height: calc(100vh - var(--titlebar-height) - 132px);
+  height: calc(100vh - 132px);
   min-height: 0;
   overflow: auto;
   background: oklch(0.13 0.005 220);
@@ -1128,6 +1058,6 @@ button:disabled {
   }
 
   .tree-viewport {
-    height: calc(100vh - var(--titlebar-height) - 170px);
+    height: calc(100vh - 170px);
   }
 }
