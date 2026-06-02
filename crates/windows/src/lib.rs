@@ -7,6 +7,7 @@ pub mod volume;
 pub use elevation::{
     ElevationError, is_process_elevated, relaunch_current_process_elevated,
     run_current_process_elevated_and_wait, run_current_process_elevated_hidden_and_wait,
+    spawn_current_process_elevated_hidden,
 };
 pub use shell::{ShellActionError, open_in_explorer, recycle_delete, rename_path, show_properties};
 pub use volume::{VolumeInfo, VolumeKind, WindowsVolumeError, discover_volumes};

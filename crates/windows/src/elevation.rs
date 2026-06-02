@@ -111,10 +111,11 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_current_process_elevated_and_wait_with_show(
+    spawn_current_process_elevated_with_show(
         args,
         windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
     )
+    .and_then(ElevatedChild::wait)
 }
 
 #[cfg(windows)]
@@ -123,27 +124,34 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_current_process_elevated_and_wait_with_show(
+    spawn_current_process_elevated_hidden(args).and_then(ElevatedChild::wait)
+}
+
+#[cfg(windows)]
+pub fn spawn_current_process_elevated_hidden<I, S>(args: I) -> Result<ElevatedChild, ElevationError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    spawn_current_process_elevated_with_show(
         args,
         windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE,
     )
 }
 
 #[cfg(windows)]
-fn run_current_process_elevated_and_wait_with_show<I, S>(
+fn spawn_current_process_elevated_with_show<I, S>(
     args: I,
     show_command: i32,
-) -> Result<u32, ElevationError>
+) -> Result<ElevatedChild, ElevationError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     use std::{mem::size_of, os::windows::ffi::OsStrExt};
 
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, WAIT_OBJECT_0},
-        System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
-        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
     };
 
     let exe = std::env::current_exe()?;
@@ -175,30 +183,86 @@ where
         return Err(ElevationError::Io(io::Error::last_os_error()));
     }
 
-    // SAFETY: ShellExecuteExW succeeded and hProcess is owned by this process when
-    // SEE_MASK_NOCLOSEPROCESS is set.
-    let wait_result = unsafe { WaitForSingleObject(execute_info.hProcess, INFINITE) };
-    if wait_result != WAIT_OBJECT_0 {
-        // SAFETY: hProcess is owned by this process.
-        let _ = unsafe { CloseHandle(execute_info.hProcess) };
-        return Err(ElevationError::WaitFailed(wait_result));
-    }
+    Ok(ElevatedChild {
+        process: Some(execute_info.hProcess),
+    })
+}
 
-    let mut exit_code = 0_u32;
-    // SAFETY: hProcess is valid until CloseHandle and exit_code points to writable storage.
-    if unsafe { GetExitCodeProcess(execute_info.hProcess, &mut exit_code) } == 0 {
-        // SAFETY: hProcess is owned by this process.
-        let _ = unsafe { CloseHandle(execute_info.hProcess) };
-        return Err(ElevationError::Io(io::Error::last_os_error()));
-    }
-    // SAFETY: hProcess is owned by this process.
-    let _ = unsafe { CloseHandle(execute_info.hProcess) };
+#[cfg(windows)]
+pub struct ElevatedChild {
+    process: Option<windows_sys::Win32::Foundation::HANDLE>,
+}
 
-    Ok(exit_code)
+#[cfg(windows)]
+impl ElevatedChild {
+    pub fn wait(mut self) -> Result<u32, ElevationError> {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject},
+        };
+
+        let Some(process) = self.process.take() else {
+            return Err(ElevationError::Io(io::Error::other(
+                "elevated process handle already consumed",
+            )));
+        };
+
+        // SAFETY: ShellExecuteExW succeeded and hProcess is owned by this process when
+        // SEE_MASK_NOCLOSEPROCESS is set.
+        let wait_result = unsafe { WaitForSingleObject(process, INFINITE) };
+        if wait_result != WAIT_OBJECT_0 {
+            // SAFETY: hProcess is owned by this process.
+            let _ = unsafe { CloseHandle(process) };
+            return Err(ElevationError::WaitFailed(wait_result));
+        }
+
+        let mut exit_code = 0_u32;
+        // SAFETY: hProcess is valid until CloseHandle and exit_code points to writable storage.
+        if unsafe { GetExitCodeProcess(process, &mut exit_code) } == 0 {
+            // SAFETY: hProcess is owned by this process.
+            let _ = unsafe { CloseHandle(process) };
+            return Err(ElevationError::Io(io::Error::last_os_error()));
+        }
+        // SAFETY: hProcess is owned by this process.
+        let _ = unsafe { CloseHandle(process) };
+
+        Ok(exit_code)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ElevatedChild {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        if let Some(process) = self.process.take() {
+            // SAFETY: `process` is an owned handle returned by ShellExecuteExW.
+            let _ = unsafe { CloseHandle(process) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub struct ElevatedChild;
+
+#[cfg(not(windows))]
+impl ElevatedChild {
+    pub fn wait(self) -> Result<u32, ElevationError> {
+        Err(ElevationError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(not(windows))]
 pub fn run_current_process_elevated_hidden_and_wait<I, S>(_: I) -> Result<u32, ElevationError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Err(ElevationError::UnsupportedPlatform)
+}
+
+#[cfg(not(windows))]
+pub fn spawn_current_process_elevated_hidden<I, S>(_: I) -> Result<ElevatedChild, ElevationError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

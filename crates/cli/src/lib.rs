@@ -24,7 +24,7 @@ use diskloom_query::{
 use diskloom_scan::{FallbackScanner, ScanOptions, ScanSummary};
 use diskloom_windows::{
     VolumeKind, discover_volumes, is_process_elevated, relaunch_current_process_elevated,
-    run_current_process_elevated_hidden_and_wait,
+    spawn_current_process_elevated_hidden,
 };
 
 #[derive(Debug, Parser)]
@@ -360,10 +360,20 @@ fn maybe_run_scan_elevated_and_print(command: &ScanCommand) -> Result<bool> {
     args.push(output_path.as_os_str().to_os_string());
 
     eprintln!("DiskLoom requested administrator access for direct NTFS scanning.");
-    let mut spinner = StatusSpinner::start_if_terminal("Waiting for administrator scan".to_owned());
-    let exit_code = run_current_process_elevated_hidden_and_wait(&args)
-        .context("failed to run elevated DiskLoom scan")?;
-    if let Some(spinner) = spinner.as_mut() {
+    let mut approval_spinner =
+        StatusSpinner::start_if_terminal("Waiting for administrator approval".to_owned());
+    let child = spawn_current_process_elevated_hidden(&args)
+        .context("failed to start elevated DiskLoom scan")?;
+    if let Some(spinner) = approval_spinner.as_mut() {
+        spinner.stop();
+    }
+
+    let mut scan_spinner =
+        StatusSpinner::start_if_terminal("Scanning disk as administrator".to_owned());
+    let exit_code = child
+        .wait()
+        .context("elevated DiskLoom scan did not finish")?;
+    if let Some(spinner) = scan_spinner.as_mut() {
         spinner.stop();
     }
 
