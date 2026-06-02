@@ -692,7 +692,6 @@ name = "diskloom-app"
 version = "0.1.0"
 dependencies = [
  "diskloom-core",
- "diskloom-export",
  "diskloom-ntfs",
  "diskloom-scan",
  "diskloom-windows",
@@ -801,8 +800,6 @@ dependencies = [
 name = "diskloom-windows"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "windows",

@@ -50,7 +50,7 @@ Early development. Implemented pieces include:
 - Query filters, CSV export, duplicate grouping, shell actions, and rename remain implemented in shared crates and CLI paths; they are staged for the Tauri GUI after the analyzer tree is stable.
 - Benchmark harness for repeated scan timing, sampled process memory, foreground tick-gap responsiveness, synthetic dataset creation, same-machine competitor comparisons, suite manifests, and audit outputs.
 
-The direct NTFS scanner is an early fast path. It requires elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. Installed builds register an on-demand elevated scan task so normal app and CLI launches can still use direct NTFS by default without a UAC prompt every scan. Portable and development builds can request one-shot UAC elevation when needed. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
+The direct NTFS scanner is an early fast path. It can require elevated access to open raw volumes, and it currently focuses on primary file records with resident names and non-resident data runs. DiskLoom falls back to directory traversal when raw volume access is unavailable. This README will not claim DiskLoom is faster than WizTree until benchmark data proves it.
 
 ## Usage
 
@@ -66,7 +66,7 @@ Run a fallback scan:
 dlm . --scanner fallback --limit 25
 ```
 
-Run auto mode, which prefers direct NTFS MFT scanning for NTFS drive-backed paths:
+Run auto mode, which uses direct NTFS MFT scanning for drive roots and fallback traversal for folders:
 
 ```powershell
 dlm C:\ --scanner auto --limit 25
@@ -78,7 +78,7 @@ Force direct NTFS MFT scanning:
 dlm C:\ --scanner ntfs --limit 25
 ```
 
-Direct NTFS scans require administrator access on Windows. The native installer registers an on-demand elevated scan task for installed builds, so `diskloom.exe` and `dlm.exe` can stay normal unelevated foreground processes while scan work runs with the privileges needed for raw-volume access. If that task is not installed, portable and development builds request one-shot UAC elevation for direct NTFS scans.
+Direct NTFS drive scans require administrator access on Windows. If DiskLoom is not already elevated, the CLI, GUI, and benchmark harness request UAC elevation and relaunch the same command instead of silently falling back to traversal.
 
 Export CSV:
 
@@ -163,9 +163,9 @@ Build an installer package:
 
 The Windows packages include:
 
-- `diskloom.exe`: product GUI. The foreground UI stays unelevated; installed direct NTFS scans can run through the on-demand elevated worker and load back into the same file tree.
+- `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
 - `dlm.exe`: CLI analyzer. The native Windows installer installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
-- `DiskLoomSetup-x64.exe`: native NSIS wizard installer for the GUI, CLI, PATH entry, and on-demand elevated scan task.
+- `DiskLoomSetup-x64.exe`: native NSIS wizard installer for the GUI and CLI.
 
 ## License
 

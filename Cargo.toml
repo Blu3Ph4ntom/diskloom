@@ -65,7 +65,6 @@ diskloom-windows = { path = "crates/windows" }
 
 [dependencies]
 diskloom-core.workspace = true
-diskloom-export.workspace = true
 diskloom-ntfs.workspace = true
 diskloom-scan.workspace = true
 diskloom-windows.workspace = true
