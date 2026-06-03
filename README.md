@@ -1,4 +1,4 @@
-# DiskLoom
+# DiskLoom <img src="assets/icon.png" align="right" alt="Inval" width="30%"/>
 
 See your disk clearly.
 
