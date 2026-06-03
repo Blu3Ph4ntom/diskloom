@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DiskLoom: See your disk clearly.</title>
+    <meta
+      name="description"
+      content="DiskLoom is an open-source Windows disk space analyzer built for extreme scan speed, low memory use, and a clean file deletion workflow."
+    />
+    <meta name="theme-color" content="#101418" />
+    <meta property="og:title" content="DiskLoom" />
+    <meta property="og:description" content="Open-source Windows disk analyzer built to challenge WizTree." />
+    <meta property="og:image" content="assets/icon.png" />
+    <link rel="icon" href="assets/icon.png" />
+    <link rel="stylesheet" href="site.css" />
+  </head>
+  <body>
+    <div class="page">
+      <nav class="nav" aria-label="Main">
+        <a class="brand" href="#">
+          <img src="assets/icon.png" alt="" />
+          <span>DiskLoom</span>
+        </a>
+        <div class="nav-links">
+          <a href="#features">Features</a>
+          <a href="#interface">Interface</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/Blu3Ph4ntom/diskloom">GitHub</a>
+        </div>
+      </nav>
+
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Open-source Windows disk analyzer</p>
+          <h1>See your disk clearly.</h1>
+          <p class="lede">
+            DiskLoom is a Rust-native disk space analyzer for Windows, built for direct NTFS MFT scanning,
+            low memory use, responsive browsing, and fast cleanup decisions.
+          </p>
+          <div class="hero-actions">
+            <a class="button" href="https://github.com/Blu3Ph4ntom/diskloom/releases/latest">Download for Windows</a>
+            <a class="button secondary" href="https://github.com/Blu3Ph4ntom/diskloom">View source</a>
+          </div>
+          <p class="hero-note">
+            Built to challenge WizTree. DiskLoom will not claim benchmark wins until reproducible public data proves them.
+            No telemetry. No background service.
+          </p>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <img src="assets/icon.png" alt="" />
+        </div>
+      </header>
+
+      <section id="features" class="section">
+        <h2>Fast where it matters.</h2>
+        <div class="grid">
+          <div class="tile">
+            <strong>Direct NTFS path</strong>
+            <p>Reads NTFS metadata directly for drive scans when Windows allows raw volume access.</p>
+          </div>
+          <div class="tile">
+            <strong>Fallback traversal</strong>
+            <p>Scans folders and non-NTFS locations without admin access, with allocated size reporting on Windows.</p>
+          </div>
+          <div class="tile">
+            <strong>Compact graph</strong>
+            <p>Uses integer IDs, string interning, parent links, and lazy paths instead of storing full paths per file.</p>
+          </div>
+          <div class="tile">
+            <strong>Clean deletion flow</strong>
+            <p>Find large files quickly, inspect the tree, open in Explorer, and delete to Recycle Bin from the app.</p>
+          </div>
+          <div class="tile">
+            <strong>CLI included</strong>
+            <p>Run <code>dlm</code> from a terminal to scan the current folder, export CSV, or list largest entries.</p>
+          </div>
+          <div class="tile">
+            <strong>Benchmark-ready</strong>
+            <p>Includes benchmark harnesses for scan time, memory, responsiveness, export speed, and public claim comparison.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="interface" class="section">
+        <h2>One screen. No noise.</h2>
+        <div class="screen" aria-label="DiskLoom app preview">
+          <div class="rail">
+            <div class="drive"><b>C: Local Disk</b><div class="bar"><span style="width: 75%"></span></div></div>
+            <div class="drive"><b>D: Data</b><div class="bar"><span style="width: 60%"></span></div></div>
+            <div class="drive"><b>A: Projects</b><div class="bar"><span style="width: 92%"></span></div></div>
+          </div>
+          <div class="table">
+            <div class="toolbar"><span>Name</span><span>Size</span><span>Allocated</span><span>Last modified</span></div>
+            <div class="row"><span class="folder">C:\Users</span><span>55.2 GB</span><span>57.7 GB</span><span>May 28, 2026</span></div>
+            <div class="row"><span class="folder">C:\Windows</span><span>36.4 GB</span><span>36.5 GB</span><span>June 2, 2026</span></div>
+            <div class="row"><span class="folder">C:\Program Files</span><span>28.5 GB</span><span>28.7 GB</span><span>June 2, 2026</span></div>
+            <div class="row"><span class="folder">C:\ProgramData</span><span>24.1 GB</span><span>39.8 GB</span><span>April 30, 2026</span></div>
+            <div class="row"><span>hiberfil.sys</span><span>3.09 GB</span><span>3.09 GB</span><span>June 2, 2026</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="install" class="section">
+        <h2>Install once. Use app or CLI.</h2>
+        <div class="steps">
+          <div class="step">
+            <span>01</span>
+            <p>Download <strong>DiskLoomSetup-x64.exe</strong> from the latest GitHub release.</p>
+          </div>
+          <div class="step">
+            <span>02</span>
+            <p>Run the Windows installer. It installs the GUI and adds <code>dlm</code> to PATH.</p>
+          </div>
+          <div class="step">
+            <span>03</span>
+            <p>Open DiskLoom for cleanup, or run <code>dlm</code> in any terminal for quick scans and CSV export.</p>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>DiskLoom is licensed under MIT or Apache-2.0.</span>
+        <a href="https://github.com/Blu3Ph4ntom/diskloom">github.com/Blu3Ph4ntom/diskloom</a>
+      </footer>
+    </div>
+  </body>
+</html>

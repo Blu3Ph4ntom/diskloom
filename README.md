@@ -6,6 +6,13 @@ DiskLoom is a Rust-native Windows disk space analyzer built to challenge WizTree
 
 The project is Windows-first for v1. Future macOS and Linux support may arrive through scanner boundaries, but those platforms do not shape the first release.
 
+## Download
+
+- Website: <https://blu3ph4ntom.github.io/diskloom/>
+- Latest release: <https://github.com/Blu3Ph4ntom/diskloom/releases/latest>
+
+Use `DiskLoomSetup-x64.exe` for the Windows installer. It installs the GUI app and the `dlm` CLI. Use `diskloom-portable-windows-x64.zip` for a no-install build.
+
 ## Goals
 
 - Direct NTFS MFT scanning fast path.
@@ -166,6 +173,22 @@ The Windows packages include:
 - `diskloom.exe`: product GUI. Direct NTFS scans, fallback scans, and the file tree run inside this process.
 - `dlm.exe`: CLI analyzer. The native Windows installer installs this into `Program Files\DiskLoom` and adds that directory to the machine PATH.
 - `DiskLoomSetup-x64.exe`: native NSIS wizard installer for the GUI and CLI.
+
+## Publishing
+
+GitHub Actions builds releases from version tags:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow attaches:
+
+- `DiskLoomSetup-x64.exe`
+- `diskloom-portable-windows-x64.zip`
+
+The website is published from `docs/` by the Pages workflow.
 
 ## License
 

@@ -33,7 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create $env:GITHUB_REF_NAME `
-            dist/diskloom-installer-windows-x64.zip `
+            dist/DiskLoomSetup-x64.exe `
             dist/diskloom-portable-windows-x64.zip `
             --title "DiskLoom $env:GITHUB_REF_NAME" `
-            --notes "Windows release. Use the installer package for DiskLoom plus dlm CLI PATH installation, or the portable package for a no-install build."
+            --notes-file docs/RELEASE.md
