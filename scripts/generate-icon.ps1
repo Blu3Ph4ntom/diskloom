@@ -24,7 +24,8 @@ Add-Type -AssemblyName System.Drawing
 function New-ResizedBitmap {
     param(
         [System.Drawing.Image]$Source,
-        [int]$Size
+        [int]$Size,
+        [switch]$Transparent
     )
 
     $bitmap = [System.Drawing.Bitmap]::new($Size, $Size, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -35,6 +36,10 @@ function New-ResizedBitmap {
         $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
         $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
         $graphics.Clear([System.Drawing.Color]::Transparent)
+
+        if ($Transparent) {
+            return $bitmap
+        }
 
         $scale = [Math]::Min($Size / [double]$Source.Width, $Size / [double]$Source.Height)
         $drawWidth = [int][Math]::Round($Source.Width * $scale)
@@ -69,10 +74,11 @@ function Save-ResizedPng {
 function New-IconDibBytes {
     param(
         [System.Drawing.Image]$Source,
-        [int]$Size
+        [int]$Size,
+        [switch]$Transparent
     )
 
-    $bitmap = New-ResizedBitmap -Source $Source -Size $Size
+    $bitmap = New-ResizedBitmap -Source $Source -Size $Size -Transparent:$Transparent
     $stream = [System.IO.MemoryStream]::new()
     $writer = [System.IO.BinaryWriter]::new($stream)
     try {
@@ -135,7 +141,7 @@ function Write-IconFile {
     foreach ($size in $sizes) {
         $entries += [pscustomobject]@{
             Size = $size
-            Bytes = [byte[]](New-IconDibBytes -Source $Source -Size $size)
+            Bytes = [byte[]](New-IconDibBytes -Source $Source -Size $size -Transparent:($size -eq 16))
         }
     }
 
