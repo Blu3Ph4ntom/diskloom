@@ -44,7 +44,6 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot "target\release\dlm.exe") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $packageDir
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-MIT") -Destination $packageDir
-    Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE-APACHE") -Destination $packageDir
 
     $docsDir = Join-Path $packageDir "docs"
     New-Item -ItemType Directory -Path $docsDir | Out-Null

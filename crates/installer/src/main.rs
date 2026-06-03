@@ -128,7 +128,7 @@ fn install_bundle(
 
     copy_file(&gui_source, &install_dir.join("diskloom.exe"))?;
     copy_file(&cli_source, &install_dir.join("dlm.exe"))?;
-    for name in ["README.md", "LICENSE-MIT", "LICENSE-APACHE"] {
+    for name in ["README.md", "LICENSE-MIT"] {
         copy_optional_file(&source_dir.join(name), &install_dir.join(name))?;
     }
     copy_docs(

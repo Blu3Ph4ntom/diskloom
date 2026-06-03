@@ -1,54 +1,26 @@
 # Roadmap
 
-## Milestone 1: CLI Prototype
+DiskLoom is a Windows-first disk analyzer focused on fast scans, low memory use, and clean file cleanup workflows.
 
-- Rust workspace. Done.
-- Compact file graph. Done.
-- Fallback scanner. Done.
-- Aggregation. Done.
-- Query/filter engine. Initial implementation done.
-- CSV export. Done.
-- CLI scan/export mode. Done.
-- Unit tests and benchmark harness. Initial implementation done.
+## Now
 
-## Milestone 2: Windows Fast Path
+- Stabilize direct NTFS scanning.
+- Improve fallback traversal performance.
+- Keep app memory low on large drives.
+- Polish folder expansion, sorting, filtering, and delete flows.
+- Improve CLI output and CSV export.
 
-- Volume discovery. Done.
-- Direct NTFS volume access. Probe implemented.
-- On-demand UAC elevation for direct drive scans. Initial CLI, GUI, and benchmark relaunch support done.
-- MFT record parsing. Header, fixup, file-name, data-run parsing implemented.
-- Raw MFT scan and graph construction. Initial implementation done.
-- Hard link handling where possible. Initial file-record count flagging done.
-- Fallback behavior when fast path is unavailable. Initial CLI auto mode done.
-- Extend NTFS support for attribute-list records, additional namespaces, reparse points, and richer metadata.
+## Next
 
-## Milestone 3: GUI
-
-- Tree view sorted by size. Initial bounded hierarchy tab done.
-- File view sorted by size. Initial implementation done.
-- Treemap. Initial implementation done.
-- File type stats. Initial implementation done.
-- Duplicate candidate view. Initial size/name/date grouping tab done.
-- Background scan worker. Initial implementation with fallback progress counts done.
-- App shell polish. Initial top bar, control rail, status metrics, and formatted size display done.
-- Drive picker polish. Initial system-drive default and discovered drive shortcuts done.
-- Scanner mode selection. Initial implementation done.
-- Search/filter UI. Initial name, regex, extension, path, size, allocated-size, and modified-date filters done.
-- GUI CSV export. Initial non-blocking export done.
-- Scan cancellation. Initial GUI cancel control with fallback and NTFS progress checkpoints done.
-- Shell actions. Initial Explorer, properties, recycle delete, and rename controls done.
-- Dark mode. Initial implementation done.
-- High-DPI polish.
-
-## Milestone 4: Packaging and Benchmarks
-
-- Portable release build. Initial package script and CI check done.
-- Installer support.
-- Reproducible public benchmark suite. Initial DiskLoom harness and WizTree public-claims baseline done.
-- Screenshots and release notes.
+- Better duplicate candidate workflow.
+- More file type summaries.
+- Stronger benchmark reports.
+- Portable and installer release improvements.
+- More shell actions from the app.
 
 ## Later
 
 - Snapshot and delta scans.
-- Content-hash duplicate verification.
-- macOS and Linux scanner implementations behind existing boundaries.
+- Additional visualization modes.
+- Optional import/export of scan snapshots.
+- macOS and Linux scanner boundaries after Windows v1 is solid.

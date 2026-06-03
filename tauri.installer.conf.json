@@ -16,7 +16,6 @@
       "target/release/diskloom-setup.exe": "diskloom-setup.exe",
       "README.md": "README.md",
       "LICENSE-MIT": "LICENSE-MIT",
-      "LICENSE-APACHE": "LICENSE-APACHE",
       "docs/BENCHMARKS.md": "docs/BENCHMARKS.md",
       "docs/ROADMAP.md": "docs/ROADMAP.md"
     },

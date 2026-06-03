@@ -6,11 +6,11 @@
     <title>DiskLoom: See your disk clearly.</title>
     <meta
       name="description"
-      content="DiskLoom is an open-source Windows disk space analyzer built for extreme scan speed, low memory use, and a clean file deletion workflow."
+      content="DiskLoom is an open-source Windows disk analyzer with a fast desktop app and a clean dlm command-line scanner."
     />
     <meta name="theme-color" content="#101418" />
     <meta property="og:title" content="DiskLoom" />
-    <meta property="og:description" content="Open-source Windows disk analyzer built to challenge WizTree." />
+    <meta property="og:description" content="Open-source Windows disk analyzer with a fast desktop app and CLI." />
     <meta property="og:image" content="assets/icon.png" />
     <link rel="icon" href="assets/icon.png" />
     <link rel="stylesheet" href="site.css" />
@@ -23,104 +23,136 @@
           <span>DiskLoom</span>
         </a>
         <div class="nav-links">
-          <a href="#features">Features</a>
-          <a href="#interface">Interface</a>
+          <a href="#app">App</a>
+          <a href="#cli">CLI</a>
           <a href="#install">Install</a>
           <a href="https://github.com/Blu3Ph4ntom/diskloom">GitHub</a>
         </div>
       </nav>
 
       <header class="hero">
-        <div>
+        <div class="hero-copy">
           <p class="eyebrow">Open-source Windows disk analyzer</p>
           <h1>See your disk clearly.</h1>
           <p class="lede">
-            DiskLoom is a Rust-native disk space analyzer for Windows, built for direct NTFS MFT scanning,
-            low memory use, responsive browsing, and fast cleanup decisions.
+            DiskLoom helps you find the files and folders eating your storage, then clean them up from one focused desktop app or a fast terminal command.
           </p>
           <div class="hero-actions">
-            <a class="button" href="https://github.com/Blu3Ph4ntom/diskloom/releases/latest">Download for Windows</a>
+            <a class="button" href="https://github.com/Blu3Ph4ntom/diskloom/releases/latest">Download DiskLoom</a>
             <a class="button secondary" href="https://github.com/Blu3Ph4ntom/diskloom">View source</a>
           </div>
-          <p class="hero-note">
-            Built to challenge WizTree. DiskLoom will not claim benchmark wins until reproducible public data proves them.
-            No telemetry. No background service.
-          </p>
+          <div class="hero-points" aria-label="Highlights">
+            <span>Direct NTFS scans</span>
+            <span>Recycle Bin delete</span>
+            <span>No telemetry</span>
+          </div>
         </div>
-        <div class="hero-art" aria-hidden="true">
-          <img src="assets/icon.png" alt="" />
+
+        <div class="product-frame" aria-label="DiskLoom app preview">
+          <div class="window-bar">
+            <img src="assets/icon.png" alt="" />
+            <span>DiskLoom</span>
+            <i></i><i></i><i></i>
+          </div>
+          <div class="app-preview">
+            <aside class="preview-rail">
+              <div class="preview-logo"><img src="assets/icon.png" alt="" /></div>
+              <div class="preview-drive active">
+                <b>C: Local Disk</b>
+                <span>75% full of 306 GB</span>
+                <div class="bar"><span style="width: 75%"></span></div>
+              </div>
+              <div class="preview-drive">
+                <b>D: Data</b>
+                <span>60% full of 80.4 GB</span>
+                <div class="bar"><span style="width: 60%"></span></div>
+              </div>
+              <div class="preview-drive">
+                <b>A: Projects</b>
+                <span>91% full of 66.1 GB</span>
+                <div class="bar"><span style="width: 91%"></span></div>
+              </div>
+            </aside>
+            <main class="preview-main">
+              <div class="search-row">
+                <span>C:\</span>
+                <small>1.8 s scan</small>
+                <button>Recycle</button>
+              </div>
+              <div class="table-head">
+                <span>Name</span>
+                <span>Size</span>
+                <span>Allocated</span>
+                <span>Last modified</span>
+              </div>
+              <div class="file-row folder"><span>Users</span><span>55.2 GB</span><span>57.7 GB</span><span>May 28, 2026</span></div>
+              <div class="file-row folder"><span>Windows</span><span>36.4 GB</span><span>36.5 GB</span><span>June 2, 2026</span></div>
+              <div class="file-row folder"><span>Program Files</span><span>28.5 GB</span><span>28.7 GB</span><span>June 2, 2026</span></div>
+              <div class="file-row folder"><span>ProgramData</span><span>24.1 GB</span><span>39.8 GB</span><span>April 30, 2026</span></div>
+              <div class="file-row"><span>hiberfil.sys</span><span>3.09 GB</span><span>3.09 GB</span><span>June 2, 2026</span></div>
+              <div class="file-row folder"><span>src</span><span>1.96 GB</span><span>3.47 GB</span><span>April 20, 2026</span></div>
+            </main>
+          </div>
         </div>
       </header>
 
-      <section id="features" class="section">
-        <h2>Fast where it matters.</h2>
-        <div class="grid">
-          <div class="tile">
-            <strong>Direct NTFS path</strong>
-            <p>Reads NTFS metadata directly for drive scans when Windows allows raw volume access.</p>
-          </div>
-          <div class="tile">
-            <strong>Fallback traversal</strong>
-            <p>Scans folders and non-NTFS locations without admin access, with allocated size reporting on Windows.</p>
-          </div>
-          <div class="tile">
-            <strong>Compact graph</strong>
-            <p>Uses integer IDs, string interning, parent links, and lazy paths instead of storing full paths per file.</p>
-          </div>
-          <div class="tile">
-            <strong>Clean deletion flow</strong>
-            <p>Find large files quickly, inspect the tree, open in Explorer, and delete to Recycle Bin from the app.</p>
-          </div>
-          <div class="tile">
-            <strong>CLI included</strong>
-            <p>Run <code>dlm</code> from a terminal to scan the current folder, export CSV, or list largest entries.</p>
-          </div>
-          <div class="tile">
-            <strong>Benchmark-ready</strong>
-            <p>Includes benchmark harnesses for scan time, memory, responsiveness, export speed, and public claim comparison.</p>
-          </div>
+      <section id="app" class="section split">
+        <div>
+          <p class="eyebrow">Desktop app</p>
+          <h2>Scan, sort, inspect, delete.</h2>
+        </div>
+        <div class="copy">
+          <p>
+            The DiskLoom app keeps cleanup work on one screen: drive shortcuts, path search, expandable folders, size and allocated-size columns, and Recycle Bin deletion.
+          </p>
+          <p>
+            It uses direct NTFS metadata scanning for supported Windows volumes and fallback traversal for folders or locations that need normal directory walking.
+          </p>
         </div>
       </section>
 
-      <section id="interface" class="section">
-        <h2>One screen. No noise.</h2>
-        <div class="screen" aria-label="DiskLoom app preview">
-          <div class="rail">
-            <div class="drive"><b>C: Local Disk</b><div class="bar"><span style="width: 75%"></span></div></div>
-            <div class="drive"><b>D: Data</b><div class="bar"><span style="width: 60%"></span></div></div>
-            <div class="drive"><b>A: Projects</b><div class="bar"><span style="width: 92%"></span></div></div>
-          </div>
-          <div class="table">
-            <div class="toolbar"><span>Name</span><span>Size</span><span>Allocated</span><span>Last modified</span></div>
-            <div class="row"><span class="folder">C:\Users</span><span>55.2 GB</span><span>57.7 GB</span><span>May 28, 2026</span></div>
-            <div class="row"><span class="folder">C:\Windows</span><span>36.4 GB</span><span>36.5 GB</span><span>June 2, 2026</span></div>
-            <div class="row"><span class="folder">C:\Program Files</span><span>28.5 GB</span><span>28.7 GB</span><span>June 2, 2026</span></div>
-            <div class="row"><span class="folder">C:\ProgramData</span><span>24.1 GB</span><span>39.8 GB</span><span>April 30, 2026</span></div>
-            <div class="row"><span>hiberfil.sys</span><span>3.09 GB</span><span>3.09 GB</span><span>June 2, 2026</span></div>
-          </div>
+      <section id="cli" class="section terminal-section">
+        <div>
+          <p class="eyebrow">Command line</p>
+          <h2>Run <code>dlm</code> anywhere.</h2>
+        </div>
+        <div class="terminal">
+          <div class="term-line muted">PS C:\Users\heman&gt; dlm</div>
+          <div class="term-line">DiskLoom scan</div>
+          <div class="term-line"><span>Path</span><b>.</b></div>
+          <div class="term-line"><span>Scanner</span><b>direct NTFS MFT</b></div>
+          <div class="term-line"><span>Entries</span><b>2,051,750</b></div>
+          <div class="term-line"><span>Elapsed</span><b>7.13 s</b></div>
+          <div class="term-gap"></div>
+          <div class="term-line"><span>55.2 GB</span><b>C:\Users</b></div>
+          <div class="term-line"><span>36.4 GB</span><b>C:\Windows</b></div>
+          <div class="term-line"><span>28.5 GB</span><b>C:\Program Files</b></div>
         </div>
       </section>
 
-      <section id="install" class="section">
-        <h2>Install once. Use app or CLI.</h2>
+      <section id="install" class="section install">
+        <div>
+          <p class="eyebrow">Install</p>
+          <h2>One installer for the app and CLI.</h2>
+        </div>
         <div class="steps">
           <div class="step">
             <span>01</span>
-            <p>Download <strong>DiskLoomSetup-x64.exe</strong> from the latest GitHub release.</p>
+            <p>Download <strong>DiskLoomSetup-x64.exe</strong> from the latest release.</p>
           </div>
           <div class="step">
             <span>02</span>
-            <p>Run the Windows installer. It installs the GUI and adds <code>dlm</code> to PATH.</p>
+            <p>Run the Windows installer. It installs the desktop app and adds <code>dlm</code> to PATH.</p>
           </div>
           <div class="step">
             <span>03</span>
-            <p>Open DiskLoom for cleanup, or run <code>dlm</code> in any terminal for quick scans and CSV export.</p>
+            <p>Use DiskLoom visually, or run <code>dlm C:\Users --csv users.csv</code> from a terminal.</p>
           </div>
         </div>
       </section>
 
       <footer class="footer">
-        <span>DiskLoom is licensed under MIT or Apache-2.0.</span>
+        <span>DiskLoom is open source under the MIT license.</span>
         <a href="https://github.com/Blu3Ph4ntom/diskloom">github.com/Blu3Ph4ntom/diskloom</a>
       </footer>
     </div>

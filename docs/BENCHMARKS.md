@@ -1,121 +1,57 @@
 # Benchmark Methodology
 
-DiskLoom benchmark claims must be reproducible and conservative.
+DiskLoom benchmarks measure the app and CLI on reproducible local datasets. Results should include hardware, Windows version, drive type, cache state, scanner mode, and dataset shape.
 
 ## Metrics
 
-- Time to first visible result.
+- Time to first result.
 - Full scan time.
+- Peak private bytes.
 - Peak working set.
-- Private bytes.
+- Memory per million entries.
 - UI responsiveness during scan.
 - CSV export time.
-- Memory use per million files.
-- Behavior on 1M, 5M, and 10M file datasets.
+- Repeated scan behavior.
 
-## Comparisons
+## Scanner Modes
 
-Compare against:
+- `ntfs`: direct NTFS metadata scan for supported Windows volumes.
+- `fallback`: normal directory traversal.
+- `auto`: direct NTFS when available, fallback otherwise.
 
-- WizTree.
-- TreeSize.
-- WinDirStat.
-- Windows Explorer search or traversal behavior where relevant.
-
-Use [WizTree Public Claims Baseline](benchmarks/wiztree-public-claims.md) to map vendor-published WizTree claims to DiskLoom benchmark runs.
-
-## Rules
-
-- Run release builds.
-- Record hardware, Windows version, filesystem, drive type, dataset label, dataset shape, and cache state.
-- Repeat runs and report median and range.
-- Separate cold-cache and warm-cache results.
-- Avoid claims that are not backed by published data.
-- Publish commands, dataset generator settings, raw output, and analysis scripts.
-
-## Current Harness
-
-Repeated fallback scan timing:
+## CLI Examples
 
 ```powershell
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner fallback
+cargo run -p diskloom-bench -- scan . --iterations 5 --sample-ms 10 --scanner fallback --output target\bench.csv
+cargo run -p diskloom-bench -- export . --iterations 5 --sample-ms 10 --scanner fallback --output target\export-bench.csv
+cargo run -p diskloom-bench -- responsiveness . --iterations 5 --tick-ms 16 --scanner fallback --output target\responsiveness-bench.csv
+cargo run -p diskloom-bench -- summarize target\bench.csv
 ```
 
-Benchmark scanner modes:
+Create a synthetic dataset:
 
 ```powershell
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner auto
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner ntfs
-cargo run --release -p diskloom-bench -- scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner fallback
+cargo run -p diskloom-bench -- dataset target\bench-tree --dirs 100 --files-per-dir 100 --bytes-per-file 0
 ```
 
-Summarize a captured CSV run:
+Run a suite:
 
 ```powershell
-target\release\diskloom-bench.exe scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner ntfs > target\bench-ntfs.csv
-target\release\diskloom-bench.exe summarize target\bench-ntfs.csv
+cargo run -p diskloom-bench -- suite . target\bench-suite --dataset-label repo-smoke --cache-state warm --hardware-label workstation-a --dataset-shape repo-tree --iterations 5 --sample-ms 10 --ui-tick-ms 16 --scanner fallback
+.\scripts\run-bench-suite.ps1 -Path . -Scanner fallback -Iterations 5 -DatasetLabel repo-smoke -CacheState warm -HardwareLabel workstation-a -DatasetShape repo-tree -UiTickMs 16
 ```
 
-When the shell is not already elevated, direct NTFS drive benchmarks request UAC. Use `--output` for scan benchmarks so the elevated process writes the CSV and the original process waits for completion:
+## Reporting Rules
 
-```powershell
-target\release\diskloom-bench.exe scan C:\ --iterations 5 --sample-ms 10 --progress-every 1024 --scanner ntfs --output target\bench-ntfs.csv
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-500gb-typical
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
-```
+When publishing results, include:
 
-Measure CSV export time after scanning:
+- DiskLoom version or commit hash.
+- Windows version.
+- CPU and memory.
+- Drive model and file system.
+- Dataset size and file count.
+- Cache state, cold or warm.
+- Scanner mode.
+- Raw CSV output.
 
-```powershell
-target\release\diskloom-bench.exe export C:\ --iterations 5 --sample-ms 10 --scanner ntfs > target\bench-export-ntfs.csv
-target\release\diskloom-bench.exe export C:\ --iterations 5 --sample-ms 10 --scanner fallback --output-dir target\exports > target\bench-export-fallback.csv
-```
-
-Measure foreground-loop responsiveness while a scan runs on a worker thread:
-
-```powershell
-target\release\diskloom-bench.exe responsiveness C:\ --iterations 5 --tick-ms 16 --progress-every 1024 --scanner ntfs > target\bench-responsive-ntfs.csv
-target\release\diskloom-bench.exe responsiveness C:\ --iterations 5 --tick-ms 16 --progress-every 1024 --scanner fallback > target\bench-responsive-fallback.csv
-```
-
-Compare a captured run to a source-labeled WizTree public claim:
-
-```powershell
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-460gb
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-hdd-25gb
-target\release\diskloom-bench.exe compare-public target\bench-ntfs.csv --claim wiztree-ssd-500gb-typical
-```
-
-Compare a captured DiskLoom run to same-machine competitor measurements:
-
-```powershell
-target\release\diskloom-bench.exe competitor-template > target\competitors.csv
-target\release\diskloom-bench.exe competitor-template --examples > target\competitors.example.csv
-target\release\diskloom-bench.exe compare-competitor target\bench-ntfs.csv target\competitors.csv --dataset-label workstation-c --cache-state warm
-```
-
-Competitor CSV input uses one row per measured run. Use `ntfs_mft` for direct MFT scanners and `traversal` for directory-walk scanners:
-
-```csv
-tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes
-WizTree,4.25,workstation-c,warm,ntfs_mft,5230,,
-TreeSize,9.0,workstation-c,warm,traversal,18000,,
-```
-
-Run a local suite that writes raw CSVs, summaries, public-claim reference rows, optional same-machine competitor rows, an audit CSV, a machine-readable manifest, and a Markdown report:
-
-```powershell
-target\release\diskloom-bench.exe suite C:\ target\bench-suite --dataset-label workstation-c --cache-state warm --hardware-label workstation-c --dataset-shape "system drive" --iterations 5 --sample-ms 10 --ui-tick-ms 16 --progress-every 1024 --scanner ntfs --competitor-csv target\competitors.csv
-target\release\diskloom-bench.exe suite C:\ target\bench-suite-fallback --dataset-label workstation-c --cache-state cold-after-reboot --hardware-label workstation-c --dataset-shape "system drive" --iterations 5 --sample-ms 10 --ui-tick-ms 16 --progress-every 1024 --scanner fallback --claim wiztree-ssd-460gb
-.\scripts\run-bench-suite.ps1 -Path C:\ -Scanner ntfs -Iterations 5 -DatasetLabel workstation-c -CacheState warm -HardwareLabel workstation-c -DatasetShape "system drive" -UiTickMs 16 -CompetitorCsv target\competitors.csv
-.\scripts\run-bench-suite.ps1 -Path C:\ -Scanner fallback -Iterations 5 -DatasetLabel workstation-c -CacheState warm -HardwareLabel workstation-c -DatasetShape "system drive" -UiTickMs 16 -Claim wiztree-ssd-500gb-typical
-```
-
-Synthetic dataset generation:
-
-```powershell
-cargo run --release -p diskloom-bench -- dataset D:\diskloom-bench --dirs 1000 --files-per-dir 1000 --bytes-per-file 0
-```
-
-The harness emits CSV rows for scanner mode, fallback behavior, elapsed time, first-result time, entry counts, sampled peak working set, sampled peak private bytes, final working set, final private bytes, and peak private bytes per million entries. The `scan` command uses `--progress-every` to enable fallback progress callbacks for first-result timing; non-streaming scanner paths report first-result time as full elapsed time. The `scan` command also accepts `--output` for writing measurement CSVs directly, which is the reliable path for UAC-elevated NTFS benchmarks. The `export` command reports scan elapsed time, CSV export elapsed time, total elapsed time, and exported byte count, writing the exported CSV to an in-memory sink by default or to `--output-dir` when disk output should be included. The `responsiveness` command simulates a foreground UI tick loop while scanning on a worker thread and records tick count, tick-gap median/max, and ticks that exceed the requested `--tick-ms` budget. The `summarize` command computes run count, scanner set, fallback count, elapsed median/range, first-result median/range, and peak memory maxima from captured CSV rows. The `compare-public` command emits source-labeled reference comparisons against WizTree's published exact and ranged public claims, records claim minimum and maximum milliseconds, compares DiskLoom's median against both ends of the range, defaults to all registered claims when no `--claim` is supplied, and marks every row as `reference_only_vendor_claim_not_same_machine`. Public comparison rows also include `claim_scan_scope`, `comparison_applicability`, and `diskloom_median_position`; current WizTree timing claims are scoped to `ntfs_mft`, so fallback DiskLoom runs are explicitly marked `not_aligned_requires_ntfs_mft`, while median position only says whether the DiskLoom median is below, within, or above the public range. The `compare-competitor` command ingests manually recorded same-machine competitor CSV rows, groups them by tool/version/dataset/cache/scope, compares each competitor median against DiskLoom's median, and labels dataset/cache or scanner-scope mismatches instead of treating them as valid local proof. The `suite` command runs scan, export, and responsiveness measurements, writes `scan.csv`, `scan-summary.csv`, `export.csv`, `responsiveness.csv`, `responsiveness-summary.csv`, `public-comparison.csv`, `same-machine-comparison.csv`, `audit.csv`, `metadata.txt`, `manifest.json`, and `report.md`, records `--dataset-label`, `--cache-state`, `--hardware-label`, `--dataset-shape`, and `--ui-tick-ms`, accepts optional `--competitor-csv` input, and defaults to all source-backed public WizTree claims when no `--claim` is supplied. `same-machine-comparison.csv`, `manifest.json`, and `report.md` include matched competitor rows when the supplied competitor CSV has the same dataset label and cache state as the suite, and `same_machine_user_supplied` validity additionally requires an aligned scanner scope. `audit.csv` flags missing context, missing hardware/dataset-shape labels, overly coarse UI tick intervals, missing or mismatched same-machine competitor evidence, too few iterations, dirty Git state, reference-only public claims, and scanner-scope mismatches before results are used publicly. `manifest.json` uses the `diskloom.benchmark-suite.v1` schema and captures run settings, Git state, environment fields, scan/export/responsiveness summary metrics, audit rows, same-machine competitor comparisons, public-claim references, and artifact names for machine ingestion. The `scripts/run-bench-suite.ps1` wrapper builds the release benchmark binary, creates a timestamped suite directory under `target\bench-suites`, forwards `-DatasetLabel`, `-CacheState`, `-HardwareLabel`, `-DatasetShape`, `-UiTickMs`, and `-CompetitorCsv`, runs the suite, and prints the report, audit, responsiveness, same-machine comparison, and public-comparison paths. `metadata.txt` includes command settings, dataset label, cache state, hardware label, dataset shape, UI tick interval, optional competitor CSV path, the exact benchmark command line, Git revision, Git dirty state, best-effort detected Windows environment fields, logical CPU count, physical memory, and blank publication-checklist fields that must be filled before publishing benchmark claims. Memory sampling is in-process and interval-based, so published runs must include the `--sample-ms` value. The responsiveness collector is a foreground-loop proxy; full GUI input-latency automation and competitor automation still need dedicated collectors before public claims are made.
+Do not publish vague speed claims without the raw benchmark data needed to reproduce them.

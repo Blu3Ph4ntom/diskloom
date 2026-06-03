@@ -45,7 +45,7 @@ New-Item -ItemType Directory -Path $installDirPath -Force | Out-Null
 Copy-Item -LiteralPath $diskloomExe -Destination $installDirPath -Force
 Copy-Item -LiteralPath $dlmExe -Destination $installDirPath -Force
 
-foreach ($name in @("README.md", "LICENSE-MIT", "LICENSE-APACHE")) {
+foreach ($name in @("README.md", "LICENSE-MIT")) {
     $source = Join-Path $sourceRootPath $name
     if (Test-Path -LiteralPath $source) {
         Copy-Item -LiteralPath $source -Destination $installDirPath -Force

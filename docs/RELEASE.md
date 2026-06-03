@@ -6,15 +6,9 @@ First public Windows preview.
 
 ### Included
 
-- `diskloom.exe`: Windows GUI disk analyzer.
+- `diskloom.exe`: Windows desktop disk analyzer.
 - `dlm.exe`: command-line analyzer.
 - `DiskLoomSetup-x64.exe`: native Windows installer that installs both binaries and adds DiskLoom to PATH.
-
-### Notes
-
-- Direct NTFS MFT scanning can require administrator access.
-- Fallback traversal works without elevation.
-- DiskLoom is built to challenge WizTree, but benchmark wins are not claimed until reproducible public results prove them.
 
 ### Install
 
@@ -27,3 +21,9 @@ dlm
 dlm C:\ --scanner auto --limit 25
 dlm C:\Users --csv users.csv
 ```
+
+### Notes
+
+- Direct NTFS scans can require administrator access.
+- Fallback traversal works without elevation.
+- DiskLoom has no telemetry and no background service.

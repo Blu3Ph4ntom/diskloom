@@ -100,7 +100,7 @@ enum Command {
         #[arg(long, default_value_t = true)]
         include_directories: bool,
         #[arg(long, value_enum)]
-        claim: Vec<PublicClaimId>,
+        claim: Vec<ReferenceClaimId>,
         #[arg(long)]
         competitor_csv: Option<PathBuf>,
     },
@@ -119,7 +119,7 @@ enum Command {
     ComparePublic {
         csv: PathBuf,
         #[arg(long, value_enum)]
-        claim: Vec<PublicClaimId>,
+        claim: Vec<ReferenceClaimId>,
     },
     CompareCompetitor {
         csv: PathBuf,
@@ -143,13 +143,13 @@ enum ScannerMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum PublicClaimId {
-    #[value(name = "wiztree-ssd-500gb-typical")]
-    WizTreeSsd500GbTypical,
-    #[value(name = "wiztree-hdd-25gb")]
-    WizTreeHdd25Gb,
-    #[value(name = "wiztree-ssd-460gb")]
-    WizTreeSsd460Gb,
+enum ReferenceClaimId {
+    #[value(name = "reference-ssd-500gb-typical")]
+    ReferenceSsd500GbTypical,
+    #[value(name = "reference-hdd-25gb")]
+    ReferenceHdd25Gb,
+    #[value(name = "reference-ssd-460gb")]
+    ReferenceSsd460Gb,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -341,7 +341,7 @@ struct MeasurementSummary {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PublicClaim {
+struct ReferenceClaim {
     id: &'static str,
     source_url: &'static str,
     context: &'static str,
@@ -542,7 +542,7 @@ struct SuiteOptions {
     progress_every: u64,
     scanner: ScannerMode,
     include_directories: bool,
-    claims: Vec<PublicClaimId>,
+    claims: Vec<ReferenceClaimId>,
     competitor_csv: Option<PathBuf>,
 }
 
@@ -649,7 +649,7 @@ fn main() -> Result<()> {
             bytes_per_file,
         } => create_dataset(root, dirs, files_per_dir, bytes_per_file),
         Command::Summarize { csv } => summarize_measurements(csv),
-        Command::ComparePublic { csv, claim } => compare_public_claims(csv, &claim),
+        Command::ComparePublic { csv, claim } => compare_reference_claims(csv, &claim),
         Command::CompareCompetitor {
             csv,
             competitor_csv,
@@ -851,7 +851,7 @@ fn run_suite(options: SuiteOptions) -> Result<()> {
     let claims = selected_claims(&options.claims);
     let comparisons: Vec<_> = claims
         .into_iter()
-        .map(|claim_id| compare_summary_to_claim(&scan_summary, public_claim(claim_id)))
+        .map(|claim_id| compare_summary_to_claim(&scan_summary, reference_claim(claim_id)))
         .collect();
     let selected_claim_ids: Vec<_> = comparisons
         .iter()
@@ -1618,14 +1618,14 @@ fn summarize_measurements(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn compare_public_claims(path: PathBuf, claims: &[PublicClaimId]) -> Result<()> {
+fn compare_reference_claims(path: PathBuf, claims: &[ReferenceClaimId]) -> Result<()> {
     let input =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let rows = parse_measurements(&input)?;
     let summary = summarize_rows(&rows)?;
     let comparisons: Vec<_> = selected_claims(claims)
         .into_iter()
-        .map(|claim_id| compare_summary_to_claim(&summary, public_claim(claim_id)))
+        .map(|claim_id| compare_summary_to_claim(&summary, reference_claim(claim_id)))
         .collect();
     write_public_comparisons(&mut io::stdout().lock(), &comparisons)?;
     Ok(())
@@ -1662,11 +1662,11 @@ fn write_competitor_template(writer: &mut impl Write, examples: bool) -> Result<
     if examples {
         writeln!(
             writer,
-            "WizTree,example,example-dataset,warm,ntfs_mft,5230,,manual timing"
+            "ReferenceTool,example,example-dataset,warm,ntfs_mft,5230,,manual timing"
         )?;
         writeln!(
             writer,
-            "TreeSize,example,example-dataset,warm,traversal,18000,,manual timing"
+            "DirectoryTool,example,example-dataset,warm,traversal,18000,,manual timing"
         )?;
     }
     Ok(())
@@ -1690,19 +1690,19 @@ fn suite_same_machine_comparisons(
     )
 }
 
-fn selected_claims(claims: &[PublicClaimId]) -> Vec<PublicClaimId> {
+fn selected_claims(claims: &[ReferenceClaimId]) -> Vec<ReferenceClaimId> {
     if claims.is_empty() {
-        all_public_claims().to_vec()
+        all_reference_claims().to_vec()
     } else {
         claims.to_vec()
     }
 }
 
-fn all_public_claims() -> [PublicClaimId; 3] {
+fn all_reference_claims() -> [ReferenceClaimId; 3] {
     [
-        PublicClaimId::WizTreeSsd500GbTypical,
-        PublicClaimId::WizTreeSsd460Gb,
-        PublicClaimId::WizTreeHdd25Gb,
+        ReferenceClaimId::ReferenceSsd500GbTypical,
+        ReferenceClaimId::ReferenceSsd460Gb,
+        ReferenceClaimId::ReferenceHdd25Gb,
     ]
 }
 
@@ -2265,27 +2265,27 @@ fn write_responsiveness_summary(
     Ok(())
 }
 
-fn public_claim(id: PublicClaimId) -> PublicClaim {
+fn reference_claim(id: ReferenceClaimId) -> ReferenceClaim {
     match id {
-        PublicClaimId::WizTreeSsd500GbTypical => PublicClaim {
-            id: "wiztree-ssd-500gb-typical",
-            source_url: "https://diskanalyzer.com/",
-            context: "500GB_NTFS_SSD_typical_current_public_homepage_claim",
+        ReferenceClaimId::ReferenceSsd500GbTypical => ReferenceClaim {
+            id: "reference-ssd-500gb-typical",
+            source_url: "https://example.invalid/reference-scan-claims",
+            context: "500GB_NTFS_SSD_typical_reference_claim",
             scan_scope: ClaimScanScope::NtfsMft,
             elapsed_ms_min: 3_000,
             elapsed_ms_max: 8_000,
         },
-        PublicClaimId::WizTreeHdd25Gb => PublicClaim {
-            id: "wiztree-hdd-25gb",
-            source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
+        ReferenceClaimId::ReferenceHdd25Gb => ReferenceClaim {
+            id: "reference-hdd-25gb",
+            source_url: "https://example.invalid/reference-scan-claims",
             context: "25GB_NTFS_HDD_Acer_laptop_Windows_XP_vendor_test",
             scan_scope: ClaimScanScope::NtfsMft,
             elapsed_ms_min: 4_340,
             elapsed_ms_max: 4_340,
         },
-        PublicClaimId::WizTreeSsd460Gb => PublicClaim {
-            id: "wiztree-ssd-460gb",
-            source_url: "https://diskanalyzer.com/wiztree-vs-windirstat",
+        ReferenceClaimId::ReferenceSsd460Gb => ReferenceClaim {
+            id: "reference-ssd-460gb",
+            source_url: "https://example.invalid/reference-scan-claims",
             context: "460GB_NTFS_SSD_ASUS_laptop_Windows_10_vendor_test",
             scan_scope: ClaimScanScope::NtfsMft,
             elapsed_ms_min: 5_230,
@@ -2294,7 +2294,10 @@ fn public_claim(id: PublicClaimId) -> PublicClaim {
     }
 }
 
-fn compare_summary_to_claim(summary: &MeasurementSummary, claim: PublicClaim) -> PublicComparison {
+fn compare_summary_to_claim(
+    summary: &MeasurementSummary,
+    claim: ReferenceClaim,
+) -> PublicComparison {
     PublicComparison {
         claim_id: claim.id,
         claim_source_url: claim.source_url,
@@ -2317,7 +2320,7 @@ fn compare_summary_to_claim(summary: &MeasurementSummary, claim: PublicClaim) ->
             claim.elapsed_ms_min,
             claim.elapsed_ms_max,
         ),
-        validity: "reference_only_vendor_claim_not_same_machine",
+        validity: "reference_only_reference_claim_not_same_machine",
     }
 }
 
@@ -2732,24 +2735,24 @@ fn suite_audit_rows(
 
     rows.push(if comparisons.is_empty() {
         SuiteAuditRow::new(
-            "public_claims",
+            "reference_claims",
             AuditStatus::Warning,
-            "No public claim reference rows were selected.",
+            "No reference claim reference rows were selected.",
         )
     } else if comparisons
         .iter()
-        .all(|comparison| comparison.validity == "reference_only_vendor_claim_not_same_machine")
+        .all(|comparison| comparison.validity == "reference_only_reference_claim_not_same_machine")
     {
         SuiteAuditRow::new(
-            "public_claims",
+            "reference_claims",
             AuditStatus::Warning,
-            "Public WizTree rows are reference-only; same-machine competitor runs are required for speed claims.",
+            "Reference rows are reference-only; same-machine competitor runs are required for speed claims.",
         )
     } else {
         SuiteAuditRow::new(
-            "public_claims",
+            "reference_claims",
             AuditStatus::Pass,
-            "Public claim validity includes stronger evidence than reference-only rows.",
+            "Reference claim validity includes stronger evidence than reference-only rows.",
         )
     });
 
@@ -2761,13 +2764,13 @@ fn suite_audit_rows(
             SuiteAuditRow::new(
                 "comparison_scope",
                 AuditStatus::Pass,
-                "DiskLoom scanner scope matches all selected public claims.",
+                "DiskLoom scanner scope matches all selected reference claims.",
             )
         } else {
             SuiteAuditRow::new(
                 "comparison_scope",
                 AuditStatus::Warning,
-                "At least one public claim is NTFS MFT scoped but this suite is fallback or mixed.",
+                "At least one reference claim is NTFS MFT scoped but this suite is fallback or mixed.",
             )
         },
     );
@@ -3021,7 +3024,7 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
         )?;
     }
     writeln!(writer)?;
-    writeln!(writer, "## Public WizTree Reference Claims")?;
+    writeln!(writer, "## Reference Scan Claims")?;
     writeln!(writer)?;
     writeln!(
         writer,
@@ -3051,7 +3054,7 @@ fn write_suite_report(writer: &mut impl Write, report: &SuiteReport<'_>) -> Resu
     writeln!(writer)?;
     writeln!(
         writer,
-        "Public claim rows are source-labeled historical reference points only. Applicability marks whether the DiskLoom run used the same scanner class as the public claim. They are not same-machine competitor benchmarks and must not be used to claim DiskLoom is faster than WizTree."
+        "Reference claim rows are source-labeled historical reference points only. Applicability marks whether the DiskLoom run used the same scanner class as the reference claim. They are not same-machine competitor benchmarks and must not be used to claim DiskLoom is faster than the reference tool."
     )?;
     Ok(())
 }
@@ -3117,10 +3120,10 @@ fn write_suite_metadata(
         "include_directories={}",
         options.include_directories
     )?;
-    writeln!(writer, "public_claims={}", selected_claim_ids.join(","))?;
+    writeln!(writer, "reference_claims={}", selected_claim_ids.join(","))?;
     writeln!(
         writer,
-        "public_claim_validity=reference_only_vendor_claim_not_same_machine"
+        "public_claim_validity=reference_only_reference_claim_not_same_machine"
     )?;
     writeln!(writer)?;
     writeln!(writer, "publication_checklist:")?;
@@ -3136,7 +3139,7 @@ fn write_suite_metadata(
     writeln!(writer, "- same_machine_competitor_runs=")?;
     writeln!(
         writer,
-        "- note=Do not publish faster-than-WizTree claims from public reference rows alone."
+        "- note=Do not publish faster-than-reference-tool claims from public reference rows alone."
     )?;
     Ok(())
 }
@@ -3531,7 +3534,7 @@ fn write_suite_manifest(writer: &mut impl Write, manifest: &SuiteManifest<'_>) -
         writeln!(writer, "    }}{suffix}")?;
     }
     writeln!(writer, "  ],")?;
-    writeln!(writer, "  \"public_claims\": [")?;
+    writeln!(writer, "  \"reference_claims\": [")?;
     for (idx, comparison) in comparisons.iter().enumerate() {
         let suffix = if idx + 1 == comparisons.len() {
             ""
@@ -3982,12 +3985,12 @@ fn scanner_label(scanner: ScannerMode) -> &'static str {
 mod tests {
     use super::{
         Args, AuditStatus, BenchmarkEnvironment, Command, CountingWriter, ExportMeasurement,
-        ExportSummary, MeasurementSummary, PublicClaimId, ResponsivenessMeasurement,
+        ExportSummary, MeasurementSummary, ReferenceClaimId, ResponsivenessMeasurement,
         ResponsivenessSummary, ScanGraphOutcome, ScanMeasurement, ScanSummary, ScannerMode,
         SuiteAuditRow, SuiteManifest, SuiteOptions, SuiteReport, SuiteRunContext,
         bench_scan_needs_elevation, compare_summary_to_claim, compare_summary_to_competitors,
-        json_string, parse_competitor_measurements, parse_measurements, per_million, public_claim,
-        ratio_decimal, scan_measurements_to_rows, selected_claims, shell_quote_arg,
+        json_string, parse_competitor_measurements, parse_measurements, per_million, ratio_decimal,
+        reference_claim, scan_measurements_to_rows, selected_claims, shell_quote_arg,
         single_line_value, suite_audit_rows, suite_audit_status, suite_same_machine_comparisons,
         summarize_export_measurements, summarize_responsiveness_measurements, summarize_rows,
         write_competitor_template, write_export_measurements, write_graph_inspection,
@@ -4284,8 +4287,10 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             peak_private_bytes_per_million_entries_max: 31_666_666,
         };
 
-        let comparison =
-            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
+        let comparison = compare_summary_to_claim(
+            &summary,
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
+        );
 
         assert_eq!(comparison.diskloom_vs_claim_min_ratio, "0.200");
         assert_eq!(comparison.diskloom_vs_claim_max_ratio, "0.200");
@@ -4297,7 +4302,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         );
         assert_eq!(
             comparison.validity,
-            "reference_only_vendor_claim_not_same_machine"
+            "reference_only_reference_claim_not_same_machine"
         );
     }
 
@@ -4322,7 +4327,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         let comparison = compare_summary_to_claim(
             &summary,
-            public_claim(PublicClaimId::WizTreeSsd500GbTypical),
+            reference_claim(ReferenceClaimId::ReferenceSsd500GbTypical),
         );
 
         assert_eq!(comparison.claim_elapsed_ms_min, 3_000);
@@ -4354,7 +4359,7 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
 
         let comparison = compare_summary_to_claim(
             &summary,
-            public_claim(PublicClaimId::WizTreeSsd500GbTypical),
+            reference_claim(ReferenceClaimId::ReferenceSsd500GbTypical),
         );
 
         assert_eq!(comparison.diskloom_median_position, "above_public_range");
@@ -4379,8 +4384,10 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             peak_private_bytes_per_million_entries_max: 31_666_666,
         };
 
-        let comparison =
-            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
+        let comparison = compare_summary_to_claim(
+            &summary,
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
+        );
 
         assert_eq!(
             comparison.comparison_applicability,
@@ -4406,8 +4413,10 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             peak_private_bytes_max: 95,
             peak_private_bytes_per_million_entries_max: 31_666_666,
         };
-        let comparison =
-            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb));
+        let comparison = compare_summary_to_claim(
+            &summary,
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
+        );
         let mut output = Vec::new();
 
         write_public_comparisons(&mut output, &[comparison]).unwrap();
@@ -4419,8 +4428,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert!(output.contains("diskloom_median_position"));
         assert!(output.contains("not_aligned_requires_ntfs_mft"));
         assert!(output.contains("below_public_range"));
-        assert!(output.contains("wiztree-ssd-460gb"));
-        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+        assert!(output.contains("reference-ssd-460gb"));
+        assert!(output.contains("reference_only_reference_claim_not_same_machine"));
     }
 
     #[test]
@@ -4444,31 +4453,37 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         let comparisons = [
             compare_summary_to_claim(
                 &summary,
-                public_claim(PublicClaimId::WizTreeSsd500GbTypical),
+                reference_claim(ReferenceClaimId::ReferenceSsd500GbTypical),
             ),
-            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeSsd460Gb)),
-            compare_summary_to_claim(&summary, public_claim(PublicClaimId::WizTreeHdd25Gb)),
+            compare_summary_to_claim(
+                &summary,
+                reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
+            ),
+            compare_summary_to_claim(
+                &summary,
+                reference_claim(ReferenceClaimId::ReferenceHdd25Gb),
+            ),
         ];
         let mut output = Vec::new();
 
         write_public_comparisons(&mut output, &comparisons).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("wiztree-ssd-460gb"));
-        assert!(output.contains("wiztree-hdd-25gb"));
-        assert!(output.contains("wiztree-ssd-500gb-typical"));
+        assert!(output.contains("reference-ssd-460gb"));
+        assert!(output.contains("reference-hdd-25gb"));
+        assert!(output.contains("reference-ssd-500gb-typical"));
     }
 
     #[test]
-    fn selected_claims_should_default_to_all_public_claims() {
+    fn selected_claims_should_default_to_all_reference_claims() {
         let claims = selected_claims(&[]);
 
         assert_eq!(
             claims,
             vec![
-                PublicClaimId::WizTreeSsd500GbTypical,
-                PublicClaimId::WizTreeSsd460Gb,
-                PublicClaimId::WizTreeHdd25Gb
+                ReferenceClaimId::ReferenceSsd500GbTypical,
+                ReferenceClaimId::ReferenceSsd460Gb,
+                ReferenceClaimId::ReferenceHdd25Gb
             ]
         );
     }
@@ -4491,9 +4506,9 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
             "compare-public",
             "target/bench.csv",
             "--claim",
-            "wiztree-ssd-500gb-typical",
+            "reference-ssd-500gb-typical",
             "--claim",
-            "wiztree-ssd-460gb",
+            "reference-ssd-460gb",
         ])
         .unwrap();
 
@@ -4503,8 +4518,8 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
         assert_eq!(
             claim,
             vec![
-                PublicClaimId::WizTreeSsd500GbTypical,
-                PublicClaimId::WizTreeSsd460Gb
+                ReferenceClaimId::ReferenceSsd500GbTypical,
+                ReferenceClaimId::ReferenceSsd460Gb
             ]
         );
     }
@@ -4602,14 +4617,14 @@ iteration,scanner,fallback,elapsed_ms,entries,files,directories,inaccessible,pea
     fn parse_competitor_measurements_should_parse_optional_memory() {
         let input = "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes,notes
-WizTree,4.25,workstation-c,warm,ntfs_mft,600,1000,manual run
-WizTree,4.25,workstation-c,warm,ntfs_mft,700,,
+ReferenceTool,4.25,workstation-c,warm,ntfs_mft,600,1000,manual run
+ReferenceTool,4.25,workstation-c,warm,ntfs_mft,700,,
 ";
 
         let rows = parse_competitor_measurements(input).unwrap();
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].tool, "WizTree");
+        assert_eq!(rows[0].tool, "ReferenceTool");
         assert_eq!(rows[0].peak_private_bytes, Some(1000));
         assert_eq!(rows[1].peak_private_bytes, None);
     }
@@ -4648,9 +4663,9 @@ tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_byt
         let rows = parse_competitor_measurements(
             "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
-WizTree,4.25,workstation-c,warm,ntfs_mft,500,40
-WizTree,4.25,workstation-c,warm,ntfs_mft,700,50
-TreeSize,9.0,other,warm,traversal,2000,
+ReferenceTool,4.25,workstation-c,warm,ntfs_mft,500,40
+ReferenceTool,4.25,workstation-c,warm,ntfs_mft,700,50
+DirectoryTool,9.0,other,warm,traversal,2000,
 ",
         )
         .unwrap();
@@ -4660,7 +4675,7 @@ TreeSize,9.0,other,warm,traversal,2000,
                 .unwrap();
 
         assert_eq!(comparisons.len(), 2);
-        assert_eq!(comparisons[1].tool, "WizTree");
+        assert_eq!(comparisons[1].tool, "ReferenceTool");
         assert_eq!(comparisons[1].competitor_elapsed_ms_median, 600);
         assert_eq!(comparisons[1].diskloom_vs_competitor_median_ratio, "1.666");
         assert_eq!(comparisons[1].context_match, "matched");
@@ -4678,7 +4693,9 @@ TreeSize,9.0,other,warm,traversal,2000,
         let output = String::from_utf8(output).unwrap();
 
         assert!(output.contains("tool,version,dataset_label,cache_state"));
-        assert!(output.contains("WizTree,4.25,repo-smoke,warm,ntfs_mft,matched,aligned_ntfs_mft"));
+        assert!(
+            output.contains("ReferenceTool,4.25,repo-smoke,warm,ntfs_mft,matched,aligned_ntfs_mft")
+        );
         assert!(output.contains("same_machine_user_supplied"));
     }
 
@@ -4702,8 +4719,8 @@ TreeSize,9.0,other,warm,traversal,2000,
         write_competitor_template(&mut output, true).unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("WizTree,example,example-dataset,warm,ntfs_mft"));
-        assert!(output.contains("TreeSize,example,example-dataset,warm,traversal"));
+        assert!(output.contains("ReferenceTool,example,example-dataset,warm,ntfs_mft"));
+        assert!(output.contains("DirectoryTool,example,example-dataset,warm,traversal"));
     }
 
     #[test]
@@ -4745,8 +4762,8 @@ TreeSize,9.0,other,warm,traversal,2000,
             &competitor_csv,
             "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
-WizTree,4.25,repo-smoke,warm,traversal,500,40
-WizTree,4.25,repo-smoke,warm,traversal,700,50
+ReferenceTool,4.25,repo-smoke,warm,traversal,500,40
+ReferenceTool,4.25,repo-smoke,warm,traversal,700,50
 ",
         )
         .unwrap();
@@ -4780,7 +4797,7 @@ WizTree,4.25,repo-smoke,warm,traversal,700,50
         let rows = parse_competitor_measurements(
             "\
 tool,version,dataset_label,cache_state,scanner_scope,elapsed_ms,peak_private_bytes
-WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
+ReferenceTool,4.25,repo-smoke,warm,ntfs_mft,500,40
 ",
         )
         .unwrap();
@@ -4820,7 +4837,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
     }
 
     #[test]
-    fn write_suite_report_should_mark_public_claims_reference_only() {
+    fn write_suite_report_should_mark_reference_claims_reference_only() {
         let scan_summary = MeasurementSummary {
             runs: 3,
             scanners: "fallback".to_owned(),
@@ -4856,15 +4873,15 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         };
         let comparisons = [compare_summary_to_claim(
             &scan_summary,
-            public_claim(PublicClaimId::WizTreeSsd460Gb),
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
         )];
         let run_context = sample_run_context();
         let environment = sample_environment();
         let responsiveness_summary = sample_responsiveness_summary();
         let audit_rows = [SuiteAuditRow::new(
-            "public_claims",
+            "reference_claims",
             AuditStatus::Warning,
-            "Public WizTree rows are reference-only; same-machine competitor runs are required for speed claims.",
+            "Reference rows are reference-only; same-machine competitor runs are required for speed claims.",
         )];
         let mut output = Vec::new();
 
@@ -4896,8 +4913,10 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         .unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
-        assert!(output.contains("must not be used to claim DiskLoom is faster than WizTree"));
+        assert!(output.contains("reference_only_reference_claim_not_same_machine"));
+        assert!(
+            output.contains("must not be used to claim DiskLoom is faster than the reference tool")
+        );
         assert!(output.contains("applicability"));
         assert!(output.contains("not_aligned_requires_ntfs_mft"));
         assert!(output.contains("position"));
@@ -4971,7 +4990,9 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         .unwrap();
         let output = String::from_utf8(output).unwrap();
 
-        assert!(output.contains("| WizTree | 4.25 | matched | ntfs_mft | aligned_ntfs_mft |"));
+        assert!(
+            output.contains("| ReferenceTool | 4.25 | matched | ntfs_mft | aligned_ntfs_mft |")
+        );
     }
 
     #[test]
@@ -5002,9 +5023,9 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
             &run_context,
             &environment,
             &[
-                "wiztree-ssd-500gb-typical",
-                "wiztree-ssd-460gb",
-                "wiztree-hdd-25gb",
+                "reference-ssd-500gb-typical",
+                "reference-ssd-460gb",
+                "reference-hdd-25gb",
             ],
         )
         .unwrap();
@@ -5023,10 +5044,10 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("detected_logical_cpus=8"));
         assert!(output.contains("detected_physical_memory_bytes=17179869184"));
         assert!(output.contains(
-            "public_claims=wiztree-ssd-500gb-typical,wiztree-ssd-460gb,wiztree-hdd-25gb"
+            "reference_claims=reference-ssd-500gb-typical,reference-ssd-460gb,reference-hdd-25gb"
         ));
         assert!(output.contains("same_machine_competitor_runs="));
-        assert!(output.contains("reference_only_vendor_claim_not_same_machine"));
+        assert!(output.contains("reference_only_reference_claim_not_same_machine"));
     }
 
     #[test]
@@ -5065,7 +5086,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         };
         let comparisons = [compare_summary_to_claim(
             &summary,
-            public_claim(PublicClaimId::WizTreeSsd460Gb),
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
         )];
         let same_machine_comparisons = [sample_same_machine_comparison()];
 
@@ -5081,8 +5102,9 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
                 .any(|row| { row.check == "dataset_label" && row.status == AuditStatus::Fail })
         );
         assert!(
-            rows.iter()
-                .any(|row| { row.check == "public_claims" && row.status == AuditStatus::Warning })
+            rows.iter().any(|row| {
+                row.check == "reference_claims" && row.status == AuditStatus::Warning
+            })
         );
         assert!(
             rows.iter()
@@ -5166,7 +5188,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         };
         let comparisons = [compare_summary_to_claim(
             &scan_summary,
-            public_claim(PublicClaimId::WizTreeSsd460Gb),
+            reference_claim(ReferenceClaimId::ReferenceSsd460Gb),
         )];
         let same_machine_comparisons = [sample_same_machine_comparison()];
         let run_context = sample_run_context();
@@ -5206,10 +5228,10 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
         assert!(output.contains("\"responsiveness-summary.csv\""));
         assert!(output.contains("\"responsiveness_summary\""));
         assert!(output.contains("\"manifest.json\""));
-        assert!(output.contains("\"claim_id\": \"wiztree-ssd-460gb\""));
+        assert!(output.contains("\"claim_id\": \"reference-ssd-460gb\""));
         assert!(output.contains("\"same-machine-comparison.csv\""));
         assert!(output.contains("\"same_machine_comparisons\""));
-        assert!(output.contains("\"tool\": \"WizTree\""));
+        assert!(output.contains("\"tool\": \"ReferenceTool\""));
         assert!(output.contains("\"scanner_scope_match\": \"aligned_ntfs_mft\""));
     }
 
@@ -5359,7 +5381,7 @@ WizTree,4.25,repo-smoke,warm,ntfs_mft,500,40
 
     fn sample_same_machine_comparison() -> super::SameMachineComparison {
         super::SameMachineComparison {
-            tool: "WizTree".to_owned(),
+            tool: "ReferenceTool".to_owned(),
             version: "4.25".to_owned(),
             dataset_label: "repo-smoke".to_owned(),
             cache_state: "warm".to_owned(),
