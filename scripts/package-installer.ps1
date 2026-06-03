@@ -33,6 +33,12 @@ Assert-UnderPath -Child $legacyPackageDir -Parent $outputRootPath
 Push-Location $repoRoot
 try {
     if (-not $SkipBuild) {
+        if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+            cargo install tauri-cli --locked
+        }
+
+        npm ci --prefix frontend
+
         cargo build --release --locked -p diskloom-cli --bin dlm
         cargo build --release --locked -p diskloom-installer --bin diskloom-setup
         cargo tauri build --bundles nsis --ci --config tauri.installer.conf.json

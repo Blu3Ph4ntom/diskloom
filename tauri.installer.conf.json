@@ -1,6 +1,7 @@
 {
   "build": {
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "npm run build --prefix frontend",
+    "frontendDist": "frontend/dist"
   },
   "bundle": {
     "active": true,
