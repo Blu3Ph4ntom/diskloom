@@ -140,6 +140,13 @@ struct CachedScan {
     summary: ScanSummary,
     size_bytes: u64,
     allocated_bytes: u64,
+    ledger: ScanLedger,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ScanLedger {
+    windows_used_bytes: Option<u64>,
+    unattributed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -315,6 +322,8 @@ struct ScanCompleteDto {
     elapsed_ms: u128,
     size_bytes: u64,
     allocated_bytes: u64,
+    windows_used_bytes: Option<u64>,
+    unattributed_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -683,6 +692,7 @@ fn apply_scan_complete(
     }
     let visible_roots = index.roots.clone();
     let (size_bytes, allocated_bytes) = totals_for_roots(&graph, &visible_roots);
+    let ledger = scan_ledger_for_path(&path_key, allocated_bytes);
     let dto = ScanCompleteDto {
         scanner_label: outcome.scanner_label,
         fallback_reason: outcome.fallback_reason,
@@ -693,6 +703,8 @@ fn apply_scan_complete(
         elapsed_ms,
         size_bytes,
         allocated_bytes,
+        windows_used_bytes: ledger.windows_used_bytes,
+        unattributed_bytes: ledger.unattributed_bytes,
     };
 
     {
@@ -750,6 +762,7 @@ fn cache_current_scan(state: &mut AppState) {
     };
     let (size_bytes, allocated_bytes) = totals_for_roots(&graph, &visible_roots);
     let summary = summary_from_graph(&graph);
+    let ledger = scan_ledger_for_path(&path_key, allocated_bytes);
     state.cache.retain(|cached| cached.path_key != path_key);
     state.cache.insert(
         0,
@@ -762,6 +775,7 @@ fn cache_current_scan(state: &mut AppState) {
             summary,
             size_bytes,
             allocated_bytes,
+            ledger,
         },
     );
     trim_scan_cache(state);
@@ -800,6 +814,8 @@ fn restore_cached_scan(state: &mut AppState, cached: CachedScan) -> ScanComplete
         elapsed_ms: 0,
         size_bytes: cached.size_bytes,
         allocated_bytes: cached.allocated_bytes,
+        windows_used_bytes: cached.ledger.windows_used_bytes,
+        unattributed_bytes: cached.ledger.unattributed_bytes,
     }
 }
 
@@ -1185,6 +1201,27 @@ fn totals_for_roots(graph: &FileGraph, roots: &[EntryId]) -> (u64, u64) {
                 )
             },
         )
+}
+
+fn scan_ledger_for_path(path_key: &str, scanned_allocated_bytes: u64) -> ScanLedger {
+    if drive_volume(Path::new(path_key)).is_none() {
+        return ScanLedger::default();
+    }
+
+    let Some(volume) = discover_volume_shortcuts().into_iter().find(|volume| {
+        normalized_path_key(Path::new(&volume.root)) == normalized_path_key(Path::new(path_key))
+    }) else {
+        return ScanLedger::default();
+    };
+    let (Some(total_bytes), Some(free_bytes)) = (volume.total_bytes, volume.free_bytes) else {
+        return ScanLedger::default();
+    };
+
+    let windows_used_bytes = total_bytes.saturating_sub(free_bytes);
+    ScanLedger {
+        windows_used_bytes: Some(windows_used_bytes),
+        unattributed_bytes: windows_used_bytes.saturating_sub(scanned_allocated_bytes),
+    }
 }
 
 #[cfg(test)]

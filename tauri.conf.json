@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DiskLoom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "com.diskloom.app",
   "build": {
-    "beforeBuildCommand": "npm run build --prefix frontend",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "frontend/dist"
   },
   "app": {

@@ -1,14 +1,21 @@
 # Release Notes
 
-## DiskLoom 0.1.1
+## DiskLoom 0.1.2
 
-First public Windows preview.
+Disk usage reconciliation update.
 
 ### Included
 
 - `diskloom.exe`: Windows desktop disk analyzer.
 - `dlm.exe`: command-line analyzer.
 - `DiskLoomSetup-x64.exe`: native Windows installer that installs both binaries and adds DiskLoom to PATH.
+
+### Changed
+
+- Whole-drive scans now reconcile scanned file-tree allocation against Windows reported used space.
+- The app shows an `Unattributed / system reserved` row when used space cannot be mapped to normal file entries.
+- Scan details include Windows used space and unattributed space.
+- Fixed Tauri installer build configuration for local release packaging.
 
 ### Install
 

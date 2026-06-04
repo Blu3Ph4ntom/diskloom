@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "npm run build --prefix frontend",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "frontend/dist"
   },
   "bundle": {

@@ -49,6 +49,8 @@ type ScanCompleteDto = ScanProgressDto & {
   fallbackReason: string | null;
   sizeBytes: number;
   allocatedBytes: number;
+  windowsUsedBytes: number | null;
+  unattributedBytes: number;
 };
 
 type DeleteEventDto = {
@@ -78,6 +80,8 @@ type TreeRowDto = {
   sizeBytes: number;
   allocatedBytes: number;
   modifiedUnix: number;
+  synthetic?: boolean;
+  detail?: string;
 };
 
 type TreeViewportDto = {
@@ -152,7 +156,21 @@ function App() {
     () => rows.reduce((largest, row) => Math.max(largest, displayAllocatedBytes(row, activeDriveInfo)), 0),
     [activeDriveInfo, rows],
   );
-  const rowBarBase = Math.max(largestVisibleRow, complete?.allocatedBytes ?? 0, 1);
+  const accountingRow = useMemo(
+    () => buildAccountingRow(complete, loadedPath || path),
+    [complete, loadedPath, path],
+  );
+  const displayRows = useMemo(
+    () => injectAccountingRow(rows, accountingRow, query),
+    [accountingRow, query, rows],
+  );
+  const rowBarBase = Math.max(
+    largestVisibleRow,
+    complete?.allocatedBytes ?? 0,
+    complete?.windowsUsedBytes ?? 0,
+    complete?.unattributedBytes ?? 0,
+    1,
+  );
 
   const loadRows = useCallback(
     async (offset: number) => {
@@ -265,6 +283,11 @@ function App() {
   );
 
   const selectRow = useCallback(async (row: TreeRowDto) => {
+    if (row.synthetic) {
+      setSelectedId(null);
+      setSelectedPath(row.detail ?? row.name);
+      return;
+    }
     const selected = await invoke<string | null>("select_entry", { id: row.id });
     setSelectedId(row.id);
     setSelectedPath(selected ?? "");
@@ -643,7 +666,7 @@ function App() {
   const bottomSpacer = Math.max(0, visibleTotal - rowOffset - rows.length) * ROW_HEIGHT;
   const subline = error || selectedPath || detail;
   const activeUsedPercent = activeDriveInfo ? driveUsedPercent(activeDriveInfo) : null;
-  const selectedRow = rows.find((row) => row.id === selectedId) ?? null;
+  const selectedRow = displayRows.find((row) => row.id === selectedId) ?? null;
   const infoPath = selectedPath || path;
 
   return (
@@ -798,6 +821,18 @@ function App() {
                     <dt>Allocated</dt>
                     <dd>{formatBytes(selectedRow?.allocatedBytes ?? complete?.allocatedBytes ?? 0)}</dd>
                   </div>
+                  {complete?.windowsUsedBytes !== null && complete?.windowsUsedBytes !== undefined ? (
+                    <div>
+                      <dt>Windows used</dt>
+                      <dd>{formatBytes(complete.windowsUsedBytes)}</dd>
+                    </div>
+                  ) : null}
+                  {complete?.unattributedBytes ? (
+                    <div>
+                      <dt>Unattributed</dt>
+                      <dd>{formatBytes(complete.unattributedBytes)}</dd>
+                    </div>
+                  ) : null}
                   <div>
                     <dt>Elapsed</dt>
                     <dd>{complete?.elapsedMs === 0 ? "cached" : formatElapsed(totals.elapsedMs)}</dd>
@@ -833,7 +868,9 @@ function App() {
           <div className="readout-capacity">
             <span>
               {complete
-                ? `${formatBytes(complete.sizeBytes)} size · ${formatBytes(complete.allocatedBytes)} allocated`
+                ? `${formatBytes(complete.sizeBytes)} size · ${formatBytes(complete.allocatedBytes)} allocated${
+                    complete.unattributedBytes ? ` · ${formatBytes(complete.unattributedBytes)} unattributed` : ""
+                  }`
                 : "Scanning"}
             </span>
             <div className="capacity-track" data-live={scanning || deleting}>
@@ -888,19 +925,24 @@ function App() {
 
           <div className="tree-viewport" ref={treeRef} onScroll={handleScroll}>
             <div style={{ height: topSpacer }} />
-            {rows.map((row) => {
+            {displayRows.map((row) => {
               const displaySize = displaySizeBytes(row, activeDriveInfo);
               const displayAllocated = displayAllocatedBytes(row, activeDriveInfo);
               const share = Math.max(2, Math.min(100, (displayAllocated / rowBarBase) * 100));
               const shareLabel = Math.round(Math.min(100, (displayAllocated / rowBarBase) * 100));
               return (
                 <div
-                  key={row.id}
+                  key={row.synthetic ? `synthetic-${row.path}` : row.id}
                   className="tree-row"
-                  data-selected={selectedId === row.id}
+                  data-selected={!row.synthetic && selectedId === row.id}
+                  data-synthetic={row.synthetic ? "true" : "false"}
                   style={{ "--depth": row.depth } as JSX.CSSProperties}
                   onClick={() => void selectRow(row)}
-                  onDblClick={() => void toggleRow(row)}
+                  onDblClick={() => {
+                    if (!row.synthetic) {
+                      void toggleRow(row);
+                    }
+                  }}
                   onKeyDown={(event) => handleRowKeyDown(event, row, selectRow, toggleRow)}
                   role="button"
                   tabIndex={0}
@@ -908,20 +950,24 @@ function App() {
                   <span className="row-name">
                     <span
                       className="disclosure"
-                      data-visible={row.childCount > 0}
+                      data-visible={!row.synthetic && row.childCount > 0}
                       onClick={(event) => {
                         event.stopPropagation();
-                        void toggleRow(row);
+                        if (!row.synthetic) {
+                          void toggleRow(row);
+                        }
                       }}
                     >
-                      {row.childCount === 0 ? null : row.expanded ? (
+                      {row.synthetic || row.childCount === 0 ? null : row.expanded ? (
                         <ChevronDown size={14} strokeWidth={1.8} />
                       ) : (
                         <ChevronRight size={14} strokeWidth={1.8} />
                       )}
                     </span>
-                    <span className="item-icon" data-kind={row.isDir ? "dir" : "file"}>
-                      {row.isDir ? (
+                    <span className="item-icon" data-kind={row.synthetic ? "system" : row.isDir ? "dir" : "file"}>
+                      {row.synthetic ? (
+                        <Info size={21} strokeWidth={1.45} />
+                      ) : row.isDir ? (
                         <Folder size={23} strokeWidth={1.35} />
                       ) : row.name.includes(".") ? (
                         <FileText size={22} strokeWidth={1.35} />
@@ -935,9 +981,12 @@ function App() {
                       type="button"
                       aria-label={row.isDir ? "Open folder" : "Show in folder"}
                       data-tooltip={row.isDir ? "Open folder" : "Show in folder"}
+                      disabled={row.synthetic}
                       onClick={(event) => {
                         event.stopPropagation();
-                        void openExplorer(row.path, row.id);
+                        if (!row.synthetic) {
+                          void openExplorer(row.path, row.id);
+                        }
                       }}
                     >
                       <FolderOpen size={16} strokeWidth={1.75} />
@@ -957,7 +1006,7 @@ function App() {
                 </div>
               );
             })}
-            {rows.length === 0 ? (
+            {displayRows.length === 0 ? (
               scanning ? (
                 <StreamingRows progress={progress} />
               ) : (
@@ -1086,6 +1135,43 @@ function isDriveRoot(value: string) {
   return /^[a-zA-Z]:[\\/]*$/.test(value.trim());
 }
 
+function buildAccountingRow(complete: ScanCompleteDto | null, targetPath: string): TreeRowDto | null {
+  if (!complete?.unattributedBytes || !isDriveRoot(targetPath)) {
+    return null;
+  }
+  const root = normalizeScanTarget(targetPath);
+  return {
+    id: -1,
+    name: "Unattributed / system reserved",
+    path: `${root}::diskloom-accounting-gap`,
+    depth: 1,
+    isDir: false,
+    expanded: false,
+    childCount: 0,
+    sizeBytes: complete.unattributedBytes,
+    allocatedBytes: complete.unattributedBytes,
+    modifiedUnix: 0,
+    synthetic: true,
+    detail:
+      "Windows reports this space as used, but it is not exposed as normal file-tree entries. It can include restore points, shadow copies, NTFS metadata, journals, reserved clusters, or protected system allocation.",
+  };
+}
+
+function injectAccountingRow(rows: TreeRowDto[], accountingRow: TreeRowDto | null, query: string) {
+  if (!accountingRow || query.trim()) {
+    return rows;
+  }
+  const rootIndex = rows.findIndex((row) => row.depth === 0);
+  if (rootIndex < 0) {
+    return rows;
+  }
+  return [
+    ...rows.slice(0, rootIndex + 1),
+    accountingRow,
+    ...rows.slice(rootIndex + 1),
+  ];
+}
+
 function driveRootFromTarget(value: string) {
   const target = normalizeScanTarget(value).toLowerCase();
   const match = /^([a-z]):/.exec(target);
@@ -1124,10 +1210,10 @@ function displaySizeBytes(row: TreeRowDto, activeDrive: DriveDto | undefined) {
 }
 
 function displayAllocatedBytes(row: TreeRowDto, activeDrive: DriveDto | undefined) {
-  if (!isActiveDriveRootRow(row, activeDrive) || !activeDrive?.totalBytes) {
+  if (!isActiveDriveRootRow(row, activeDrive) || !activeDrive?.totalBytes || activeDrive.freeBytes === null) {
     return row.allocatedBytes;
   }
-  return activeDrive.totalBytes;
+  return Math.max(0, activeDrive.totalBytes - activeDrive.freeBytes);
 }
 
 function isActiveDriveRootRow(row: TreeRowDto, activeDrive: DriveDto | undefined) {
