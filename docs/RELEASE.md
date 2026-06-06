@@ -1,8 +1,8 @@
 # Release Notes
 
-## DiskLoom 0.1.2
+## DiskLoom 0.1.3
 
-Disk usage reconciliation update.
+NTFS deleted-file visibility update.
 
 ### Included
 
@@ -12,10 +12,9 @@ Disk usage reconciliation update.
 
 ### Changed
 
-- Whole-drive scans now reconcile scanned file-tree allocation against Windows reported used space.
-- The app shows an `Unattributed / system reserved` row when used space cannot be mapped to normal file entries.
-- Scan details include Windows used space and unattributed space.
-- Fixed Tauri installer build configuration for local release packaging.
+- Direct NTFS scans now include the `$Extend` metadata tree, including `$Extend\$Deleted`, so deleted-but-open files can be identified instead of appearing as unexplained used space.
+- CLI whole-drive scans now show scanned logical size, scanned allocated size, Windows reported used/total space, and any remaining unaccounted allocation.
+- Improved scan output for diagnosing disk-full cases where Explorer cannot show the file consuming space.
 
 ### Install
 

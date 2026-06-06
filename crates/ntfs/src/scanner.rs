@@ -12,6 +12,7 @@ use crate::mft::{
 };
 
 const ROOT_RECORD_NUMBER: u64 = 5;
+const EXTEND_RECORD_NUMBER: u64 = 11;
 const RESERVED_METADATA_RECORDS: u64 = 16;
 const MFT_READ_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const NO_PARENT_RECORD: u64 = u64::MAX;
@@ -949,7 +950,9 @@ fn fallback_root_parent(record_number: usize, ids: &[Option<EntryId>]) -> Option
 }
 
 fn is_reserved_metadata_record(record_number: u64) -> bool {
-    record_number < RESERVED_METADATA_RECORDS && record_number != ROOT_RECORD_NUMBER
+    record_number < RESERVED_METADATA_RECORDS
+        && record_number != ROOT_RECORD_NUMBER
+        && record_number != EXTEND_RECORD_NUMBER
 }
 
 fn root_display_name(volume: &str) -> String {
@@ -1171,8 +1174,8 @@ mod tests {
         entries.insert(
             42,
             NtfsRawEntry {
-                parent_record_number: Some(11),
-                name: "$UsnJrnl".to_owned(),
+                parent_record_number: Some(8),
+                name: "$BadClus".to_owned(),
                 kind: FileKind::File,
                 size: 500_000_000_000,
                 allocated: 500_000_000_000,
@@ -1183,7 +1186,7 @@ mod tests {
 
         let graph = build_graph_from_entries(entries, "C:\\".to_owned()).unwrap();
 
-        assert!(graph.ids().all(|id| graph.name(id) != Some("$UsnJrnl")));
+        assert!(graph.ids().all(|id| graph.name(id) != Some("$BadClus")));
         assert_eq!(graph.len(), 1);
     }
 

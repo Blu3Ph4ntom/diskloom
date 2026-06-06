@@ -130,6 +130,14 @@ struct ScanOutcome {
     scanner_label: &'static str,
     fallback_reason: Option<String>,
     display_root: Option<PathBuf>,
+    volume_usage: Option<VolumeUsage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VolumeUsage {
+    used: u64,
+    total: u64,
+    accounted_allocated: u64,
 }
 
 pub fn run() -> Result<()> {
@@ -214,7 +222,9 @@ fn run_scan_to_writer(
         writer,
         &display_path,
         outcome.scanner_label,
+        &graph,
         &summary,
+        outcome.volume_usage,
         elapsed,
     )?;
     if let Some(reason) = outcome.fallback_reason {
@@ -459,6 +469,7 @@ fn scan_fallback(command: &ScanCommand, fallback_reason: Option<String>) -> Resu
         scanner_label: "fallback traversal",
         fallback_reason,
         display_root: None,
+        volume_usage: None,
     })
 }
 
@@ -468,12 +479,18 @@ fn scan_ntfs(command: &ScanCommand) -> Result<ScanOutcome, diskloom_ntfs::NtfsSc
         .unwrap_or_else(|| command.path.to_string_lossy().into_owned());
     let graph = NtfsScanner::scan_volume(&volume)?;
     let summary = summary_from_graph(&graph);
+    let display_root = display_root_for_direct_scan(&resolved_path);
+    let volume_usage = display_root
+        .is_none()
+        .then(|| volume_usage_for_direct_scan(&volume, &graph))
+        .flatten();
     Ok(ScanOutcome {
         graph,
         summary,
         scanner_label: "direct NTFS MFT",
         fallback_reason: None,
-        display_root: display_root_for_direct_scan(&resolved_path),
+        display_root,
+        volume_usage,
     })
 }
 
@@ -522,6 +539,31 @@ fn drive_for_path(path: &Path) -> Option<String> {
 
 fn display_root_for_direct_scan(path: &Path) -> Option<PathBuf> {
     drive_volume(path).is_none().then(|| path.to_path_buf())
+}
+
+fn volume_usage_for_direct_scan(volume: &str, graph: &FileGraph) -> Option<VolumeUsage> {
+    let volume_root = format!("{}\\", volume.trim_end_matches(['\\', '/']));
+    let volume = discover_volumes()
+        .ok()?
+        .into_iter()
+        .find(|candidate| candidate.root.eq_ignore_ascii_case(&volume_root))?;
+    let total = volume.total_bytes?;
+    let free = volume.free_bytes?;
+    Some(VolumeUsage {
+        used: total.saturating_sub(free),
+        total,
+        accounted_allocated: graph_accounted_allocated(graph),
+    })
+}
+
+fn graph_accounted_allocated(graph: &FileGraph) -> u64 {
+    graph
+        .ids()
+        .filter(|id| !entry_has_parent(graph, *id))
+        .filter_map(|id| graph.stats(id))
+        .fold(0_u64, |sum, stats| {
+            sum.saturating_add(stats.total_allocated.bytes())
+        })
 }
 
 fn resolved_scan_path(path: &Path) -> PathBuf {
@@ -781,7 +823,9 @@ fn write_scan_summary(
     writer: &mut impl Write,
     path: &Path,
     scanner_label: &str,
+    graph: &FileGraph,
     summary: &ScanSummary,
+    volume_usage: Option<VolumeUsage>,
     elapsed: Duration,
 ) -> Result<()> {
     writeln!(writer, "DiskLoom scan")?;
@@ -801,8 +845,45 @@ fn write_scan_summary(
         format_count(summary.directories),
         format_count(summary.inaccessible)
     )?;
+    writeln!(
+        writer,
+        "{:<12} {} logical, {} allocated",
+        "Accounted",
+        format_size(graph_accounted_size(graph), false),
+        format_size(graph_accounted_allocated(graph), false)
+    )?;
+    if let Some(volume_usage) = volume_usage {
+        let unaccounted = volume_usage
+            .used
+            .saturating_sub(volume_usage.accounted_allocated);
+        writeln!(
+            writer,
+            "{:<12} {} used of {} total",
+            "Volume",
+            format_size(volume_usage.used, false),
+            format_size(volume_usage.total, false)
+        )?;
+        if unaccounted > 0 {
+            writeln!(
+                writer,
+                "{:<12} {} used by NTFS metadata, shadow copies, alternate streams, or other space not attributed to visible files",
+                "Unaccounted",
+                format_size(unaccounted, false)
+            )?;
+        }
+    }
     writeln!(writer, "{:<12} {}", "Elapsed", format_duration(elapsed))?;
     Ok(())
+}
+
+fn graph_accounted_size(graph: &FileGraph) -> u64 {
+    graph
+        .ids()
+        .filter(|id| !entry_has_parent(graph, *id))
+        .filter_map(|id| graph.stats(id))
+        .fold(0_u64, |sum, stats| {
+            sum.saturating_add(stats.total_size.bytes())
+        })
 }
 
 fn format_size(bytes: u64, raw: bool) -> String {
